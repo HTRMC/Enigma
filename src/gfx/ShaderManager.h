@@ -48,6 +48,14 @@ public:
     // needed, per the standard Vulkan idiom).
     VkShaderModule compile(const std::filesystem::path& absolutePath, Stage stage);
 
+    // Non-fatal variant of compile(). Returns VK_NULL_HANDLE on any
+    // failure (missing file, GLSL syntax error, vkCreateShaderModule
+    // error) instead of asserting. Used by hot reload so a typo in a
+    // shader source does not crash the engine — the caller keeps its
+    // previous module/pipeline intact and the developer fixes and
+    // saves again.
+    VkShaderModule tryCompile(const std::filesystem::path& absolutePath, Stage stage);
+
 private:
     Device*                  m_device   = nullptr;
     shaderc::Compiler*       m_compiler = nullptr;

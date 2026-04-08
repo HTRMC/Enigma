@@ -24,11 +24,13 @@ shaderc_shader_kind toShaderKind(ShaderManager::Stage stage) {
     return shaderc_vertex_shader;
 }
 
-std::string readTextFile(const std::filesystem::path& path) {
+// Non-asserting source reader. Returns an empty string on any error
+// so the caller (tryCompile) can decide whether failure is fatal or
+// tolerable. Hot reload wants tolerable; the initial load wraps this
+// with an assert via compile() below.
+std::string readTextFileSafe(const std::filesystem::path& path) {
     std::ifstream in(path, std::ios::in | std::ios::binary);
     if (!in) {
-        ENIGMA_LOG_ERROR("[shader] failed to open: {}", path.string());
-        ENIGMA_ASSERT(false && "shader source file not found");
         return {};
     }
     std::ostringstream ss;
@@ -59,9 +61,12 @@ ShaderManager::~ShaderManager() {
     delete m_compiler;
 }
 
-VkShaderModule ShaderManager::compile(const std::filesystem::path& absolutePath, Stage stage) {
-    const std::string source = readTextFile(absolutePath);
-    ENIGMA_ASSERT(!source.empty());
+VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePath, Stage stage) {
+    const std::string source = readTextFileSafe(absolutePath);
+    if (source.empty()) {
+        ENIGMA_LOG_ERROR("[shader] failed to open or empty source: {}", absolutePath.string());
+        return VK_NULL_HANDLE;
+    }
 
     const std::string sourceName = absolutePath.filename().string();
     const shaderc_shader_kind kind = toShaderKind(stage);
@@ -72,7 +77,6 @@ VkShaderModule ShaderManager::compile(const std::filesystem::path& absolutePath,
     if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
         ENIGMA_LOG_ERROR("[shader] compile failed: {}\n{}",
                          sourceName, result.GetErrorMessage());
-        ENIGMA_ASSERT(false && "shader compilation failed");
         return VK_NULL_HANDLE;
     }
 
@@ -84,9 +88,20 @@ VkShaderModule ShaderManager::compile(const std::filesystem::path& absolutePath,
     info.pCode    = spirv.data();
 
     VkShaderModule module = VK_NULL_HANDLE;
-    ENIGMA_VK_CHECK(vkCreateShaderModule(m_device->logical(), &info, nullptr, &module));
+    const VkResult vr = vkCreateShaderModule(m_device->logical(), &info, nullptr, &module);
+    if (vr != VK_SUCCESS) {
+        ENIGMA_LOG_ERROR("[shader] vkCreateShaderModule failed: {} (VkResult={})",
+                         sourceName, static_cast<int>(vr));
+        return VK_NULL_HANDLE;
+    }
 
     ENIGMA_LOG_INFO("[shader] compiled {} ({} words)", sourceName, spirv.size());
+    return module;
+}
+
+VkShaderModule ShaderManager::compile(const std::filesystem::path& absolutePath, Stage stage) {
+    VkShaderModule module = tryCompile(absolutePath, stage);
+    ENIGMA_ASSERT(module != VK_NULL_HANDLE && "shader compilation failed (initial load)");
     return module;
 }
 
