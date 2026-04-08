@@ -41,20 +41,29 @@ public:
     ShaderManager(ShaderManager&&)                 = delete;
     ShaderManager& operator=(ShaderManager&&)      = delete;
 
-    // Read a GLSL source file from disk, compile to SPIR-V via shaderc,
-    // and create a VkShaderModule. Caller owns the returned handle and
-    // must `vkDestroyShaderModule` it (typically once the pipeline that
-    // consumes it has been created and the source modules are no longer
-    // needed, per the standard Vulkan idiom).
-    VkShaderModule compile(const std::filesystem::path& absolutePath, Stage stage);
+    // Read a shader source file from disk, compile to SPIR-V, and
+    // create a VkShaderModule. Caller owns the returned handle and
+    // must `vkDestroyShaderModule` it (typically once the pipeline
+    // that consumes it has been created and the source modules are
+    // no longer needed, per the standard Vulkan idiom).
+    //
+    // `entryPoint` defaults to "main" which matches the GLSL idiom
+    // (every GLSL shader has a single `void main()`). HLSL shaders
+    // name their entry points (`VSMain`, `PSMain`, etc.) so the HLSL
+    // path requires an explicit override.
+    VkShaderModule compile(const std::filesystem::path& absolutePath,
+                           Stage stage,
+                           const std::string& entryPoint = "main");
 
     // Non-fatal variant of compile(). Returns VK_NULL_HANDLE on any
-    // failure (missing file, GLSL syntax error, vkCreateShaderModule
+    // failure (missing file, syntax error, vkCreateShaderModule
     // error) instead of asserting. Used by hot reload so a typo in a
     // shader source does not crash the engine — the caller keeps its
     // previous module/pipeline intact and the developer fixes and
     // saves again.
-    VkShaderModule tryCompile(const std::filesystem::path& absolutePath, Stage stage);
+    VkShaderModule tryCompile(const std::filesystem::path& absolutePath,
+                              Stage stage,
+                              const std::string& entryPoint = "main");
 
 private:
     Device*                  m_device   = nullptr;

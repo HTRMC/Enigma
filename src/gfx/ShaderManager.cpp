@@ -61,7 +61,9 @@ ShaderManager::~ShaderManager() {
     delete m_compiler;
 }
 
-VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePath, Stage stage) {
+VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePath,
+                                         Stage stage,
+                                         const std::string& entryPoint) {
     const std::string source = readTextFileSafe(absolutePath);
     if (source.empty()) {
         ENIGMA_LOG_ERROR("[shader] failed to open or empty source: {}", absolutePath.string());
@@ -72,7 +74,8 @@ VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePa
     const shaderc_shader_kind kind = toShaderKind(stage);
 
     shaderc::SpvCompilationResult result =
-        m_compiler->CompileGlslToSpv(source, kind, sourceName.c_str(), *m_options);
+        m_compiler->CompileGlslToSpv(source, kind, sourceName.c_str(),
+                                     entryPoint.c_str(), *m_options);
 
     if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
         ENIGMA_LOG_ERROR("[shader] compile failed: {}\n{}",
@@ -99,8 +102,10 @@ VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePa
     return module;
 }
 
-VkShaderModule ShaderManager::compile(const std::filesystem::path& absolutePath, Stage stage) {
-    VkShaderModule module = tryCompile(absolutePath, stage);
+VkShaderModule ShaderManager::compile(const std::filesystem::path& absolutePath,
+                                      Stage stage,
+                                      const std::string& entryPoint) {
+    VkShaderModule module = tryCompile(absolutePath, stage, entryPoint);
     ENIGMA_ASSERT(module != VK_NULL_HANDLE && "shader compilation failed (initial load)");
     return module;
 }
