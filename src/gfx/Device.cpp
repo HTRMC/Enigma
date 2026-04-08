@@ -76,6 +76,40 @@ u32 scoreDevice(VkPhysicalDevice phys) {
 
 } // namespace
 
+void RequiredFeatures::requestAllRequired() {
+    v13 = {};
+    v13.sType             = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    v13.dynamicRendering  = VK_TRUE;
+    v13.synchronization2  = VK_TRUE;
+
+    v12 = {};
+    v12.sType                                         = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    v12.descriptorIndexing                            = VK_TRUE;
+    v12.runtimeDescriptorArray                        = VK_TRUE;
+    v12.descriptorBindingPartiallyBound               = VK_TRUE;
+    v12.descriptorBindingVariableDescriptorCount      = VK_TRUE;
+    v12.descriptorBindingSampledImageUpdateAfterBind  = VK_TRUE;
+    v12.descriptorBindingStorageImageUpdateAfterBind  = VK_TRUE;
+    v12.descriptorBindingStorageBufferUpdateAfterBind = VK_TRUE;
+    v12.descriptorBindingUpdateUnusedWhilePending     = VK_TRUE;
+    v12.shaderSampledImageArrayNonUniformIndexing     = VK_TRUE;
+    v12.shaderStorageBufferArrayNonUniformIndexing    = VK_TRUE;
+    v12.shaderStorageImageArrayNonUniformIndexing     = VK_TRUE;
+    v12.timelineSemaphore                             = VK_TRUE;
+    // bufferDeviceAddress intentionally NOT enabled (ADR).
+
+    v11 = {};
+    v11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+
+    features2 = {};
+    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+
+    features2.pNext = &v11;
+    v11.pNext       = &v12;
+    v12.pNext       = &v13;
+    v13.pNext       = nullptr;
+}
+
 Device::Device(Instance& instance) {
     pickPhysicalDevice(instance.handle());
 
