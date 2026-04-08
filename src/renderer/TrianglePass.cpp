@@ -7,6 +7,7 @@
 #include "gfx/DescriptorAllocator.h"
 #include "gfx/Device.h"
 #include "gfx/Pipeline.h"
+#include "gfx/ShaderHotReload.h"
 #include "gfx/ShaderManager.h"
 
 #define VMA_STATIC_VULKAN_FUNCTIONS  0
@@ -80,17 +81,68 @@ void TrianglePass::buildPipeline(gfx::ShaderManager& shaderManager,
                                  VkFormat colorAttachmentFormat) {
     ENIGMA_ASSERT(m_pipeline == nullptr && "TrianglePass::buildPipeline called twice");
 
-    const std::filesystem::path vertPath = Paths::shaderDir() / "triangle.vert";
-    const std::filesystem::path fragPath = Paths::shaderDir() / "triangle.frag";
+    // Capture everything rebuildPipeline() needs so a hot-reload
+    // event can swap the pipeline without re-plumbing arguments from
+    // the Renderer. `Paths::shaderSourceDir()` prefers the
+    // in-repository `shaders/` directory (baked in at build time via
+    // the ENIGMA_SHADER_SOURCE_DIR macro) so edits land without a
+    // rebuild; it falls back to the exe-adjacent copy on shipped
+    // binaries or moved build trees.
+    m_shaderManager   = &shaderManager;
+    m_globalSetLayout = globalSetLayout;
+    m_colorFormat     = colorAttachmentFormat;
+    m_vertPath        = Paths::shaderSourceDir() / "triangle.vert";
+    m_fragPath        = Paths::shaderSourceDir() / "triangle.frag";
 
-    VkShaderModule vert = shaderManager.compile(vertPath, gfx::ShaderManager::Stage::Vertex);
-    VkShaderModule frag = shaderManager.compile(fragPath, gfx::ShaderManager::Stage::Fragment);
+    VkShaderModule vert = shaderManager.compile(m_vertPath, gfx::ShaderManager::Stage::Vertex);
+    VkShaderModule frag = shaderManager.compile(m_fragPath, gfx::ShaderManager::Stage::Fragment);
 
     m_pipeline = new gfx::Pipeline(*m_device, vert, frag, globalSetLayout, colorAttachmentFormat);
 
     // Shader modules can be destroyed as soon as the pipeline is built.
     vkDestroyShaderModule(m_device->logical(), vert, nullptr);
     vkDestroyShaderModule(m_device->logical(), frag, nullptr);
+}
+
+void TrianglePass::rebuildPipeline() {
+    ENIGMA_ASSERT(m_pipeline != nullptr && "rebuildPipeline before initial build");
+    ENIGMA_ASSERT(m_shaderManager != nullptr);
+
+    // Compile both shaders BEFORE touching the existing pipeline.
+    // Either failure keeps the previous pipeline intact and logs an
+    // error so the frame loop continues unaffected.
+    VkShaderModule vert =
+        m_shaderManager->tryCompile(m_vertPath, gfx::ShaderManager::Stage::Vertex);
+    if (vert == VK_NULL_HANDLE) {
+        ENIGMA_LOG_ERROR("[triangle] hot-reload: vertex compile failed, keeping previous pipeline");
+        return;
+    }
+    VkShaderModule frag =
+        m_shaderManager->tryCompile(m_fragPath, gfx::ShaderManager::Stage::Fragment);
+    if (frag == VK_NULL_HANDLE) {
+        ENIGMA_LOG_ERROR("[triangle] hot-reload: fragment compile failed, keeping previous pipeline");
+        vkDestroyShaderModule(m_device->logical(), vert, nullptr);
+        return;
+    }
+
+    // Both shaders compiled — swap is now safe. `vkDeviceWaitIdle`
+    // is heavy but this is a developer-only path; simplicity wins
+    // over trying to fence individual frames.
+    vkDeviceWaitIdle(m_device->logical());
+
+    delete m_pipeline;
+    m_pipeline = new gfx::Pipeline(*m_device, vert, frag, m_globalSetLayout, m_colorFormat);
+
+    vkDestroyShaderModule(m_device->logical(), vert, nullptr);
+    vkDestroyShaderModule(m_device->logical(), frag, nullptr);
+
+    ENIGMA_LOG_INFO("[triangle] hot-reload: pipeline rebuilt successfully");
+}
+
+void TrianglePass::registerHotReload(gfx::ShaderHotReload& reloader) {
+    ENIGMA_ASSERT(m_pipeline != nullptr && "registerHotReload called before buildPipeline");
+    reloader.watchGroup({m_vertPath, m_fragPath},
+                        [this]() { rebuildPipeline(); });
 }
 
 void TrianglePass::record(VkCommandBuffer cmd,

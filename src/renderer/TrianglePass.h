@@ -4,6 +4,8 @@
 
 #include <volk.h>
 
+#include <filesystem>
+
 struct VmaAllocation_T;
 using VmaAllocation = VmaAllocation_T*;
 
@@ -12,6 +14,7 @@ class Allocator;
 class Device;
 class DescriptorAllocator;
 class Pipeline;
+class ShaderHotReload;
 class ShaderManager;
 }
 
@@ -52,9 +55,22 @@ public:
                 VkDescriptorSet globalSet,
                 VkExtent2D extent);
 
+    // Register this pass's vertex + fragment shader files with the
+    // given hot-reload watcher. Must be called after buildPipeline().
+    // On a change detected during `ShaderHotReload::poll()` the
+    // pipeline is safely rebuilt via `rebuildPipeline()`.
+    void registerHotReload(gfx::ShaderHotReload& reloader);
+
     u32 bindlessSlot() const { return m_bindlessSlot; }
 
 private:
+    // Internal rebuild path used by the hot-reload callback. Waits
+    // for the device to idle, tries to recompile both shaders, and —
+    // on success — swaps in a new pipeline. Compile failures leave
+    // the previous pipeline intact and emit an error log; the frame
+    // loop continues unaffected.
+    void rebuildPipeline();
+
     gfx::Device*              m_device    = nullptr;
     gfx::Allocator*           m_allocator = nullptr;
 
@@ -64,6 +80,13 @@ private:
 
     gfx::Pipeline*            m_pipeline = nullptr; // owned, but forward-declared
     bool                      m_firstRecord = true;
+
+    // Hot-reload state captured from the initial buildPipeline() call.
+    gfx::ShaderManager*       m_shaderManager   = nullptr;
+    VkDescriptorSetLayout     m_globalSetLayout = VK_NULL_HANDLE;
+    VkFormat                  m_colorFormat     = VK_FORMAT_UNDEFINED;
+    std::filesystem::path     m_vertPath;
+    std::filesystem::path     m_fragPath;
 };
 
 } // namespace enigma
