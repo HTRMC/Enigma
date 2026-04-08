@@ -6,12 +6,13 @@
 
 #include <shaderc/shaderc.hpp>
 
-// dxcapi.h uses Win32 typedefs (UINT32, LPCWSTR, LPCVOID, IUnknown,
-// etc.) but does NOT include <Windows.h> itself — it assumes the
-// caller has already pulled it in. We lean-and-mean + NOMINMAX to
-// keep the pollution minimal but the Windows.h include is mandatory
-// on MSVC or dxcapi.h will not parse.
-#define WIN32_LEAN_AND_MEAN
+// dxcapi.h uses Win32 typedefs (UINT32, LPCWSTR, LPCVOID) AND COM
+// types (IUnknown::Release, IID_PPV_ARGS) without including
+// <Windows.h> itself. WIN32_LEAN_AND_MEAN is deliberately NOT set
+// because it excludes <ole2.h>, which in turn pulls in <unknwn.h>
+// (IUnknown) and <combaseapi.h> (IID_PPV_ARGS) — both of which the
+// DXC COM interfaces need at the call site. We still set NOMINMAX
+// to keep `min`/`max` from becoming macros.
 #define NOMINMAX
 #include <Windows.h>
 #include <dxc/dxcapi.h>
