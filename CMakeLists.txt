@@ -48,6 +48,7 @@ target_sources(Enigma PRIVATE
     src/gfx/FrameContext.cpp
     src/gfx/DescriptorAllocator.cpp
     src/gfx/ShaderManager.cpp
+    src/gfx/Pipeline.cpp
 )
 
 target_include_directories(Enigma PRIVATE
