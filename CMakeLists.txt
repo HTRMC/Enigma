@@ -43,6 +43,19 @@ target_link_libraries(Enigma PRIVATE
     Vulkan::shaderc_combined
 )
 
+# -----------------------------------------------------------------------------
+# Mark third-party include directories as SYSTEM so their (often noisy)
+# warnings do not cascade into the Enigma target's warnings-as-errors policy.
+# FetchContent populates these *_SOURCE_DIR variables after the
+# FetchContent_MakeAvailable() calls in Dependencies.cmake.
+# -----------------------------------------------------------------------------
+target_include_directories(Enigma SYSTEM PRIVATE
+    ${volk_SOURCE_DIR}
+    ${VulkanMemoryAllocator_SOURCE_DIR}/include
+    ${glfw_SOURCE_DIR}/include
+    ${glm_SOURCE_DIR}
+)
+
 # volk loads Vulkan at runtime; we only need the Vulkan headers transitively
 # through volk. We do NOT link Vulkan::Vulkan directly.
 target_compile_definitions(Enigma PRIVATE
