@@ -1,0 +1,42 @@
+# Build directories
+build/
+build-*/
+cmake-build-*/
+out/
+
+# IDE
+.vs/
+*.user
+*.suo
+*.vcxproj.user
+
+# CMake generated
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+*.cmake.in.out
+CMakeUserPresets.json
+
+# Binaries / object files
+*.o
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.dll
+*.lib
+*.a
+*.exp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+*.swp
+*~
+.vscode/
+
+# Workflow artifacts (optional — keep under version control if desired)
+.omc/state/
