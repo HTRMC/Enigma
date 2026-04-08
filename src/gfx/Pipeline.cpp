@@ -9,13 +9,17 @@ namespace enigma::gfx {
 
 Pipeline::Pipeline(Device& device,
                    VkShaderModule vertShader,
+                   const char* vertEntryPoint,
                    VkShaderModule fragShader,
+                   const char* fragEntryPoint,
                    VkDescriptorSetLayout globalSetLayout,
                    VkFormat colorAttachmentFormat,
                    VkFormat depthAttachmentFormat)
     : m_device(&device) {
     ENIGMA_ASSERT(vertShader != VK_NULL_HANDLE);
     ENIGMA_ASSERT(fragShader != VK_NULL_HANDLE);
+    ENIGMA_ASSERT(vertEntryPoint != nullptr);
+    ENIGMA_ASSERT(fragEntryPoint != nullptr);
     ENIGMA_ASSERT(globalSetLayout != VK_NULL_HANDLE);
 
     // -------------------------------------------------------------------
@@ -45,7 +49,7 @@ Pipeline::Pipeline(Device& device,
             nullptr, 0,
             VK_SHADER_STAGE_VERTEX_BIT,
             vertShader,
-            "main",
+            vertEntryPoint,
             nullptr,
         },
         {
@@ -53,7 +57,7 @@ Pipeline::Pipeline(Device& device,
             nullptr, 0,
             VK_SHADER_STAGE_FRAGMENT_BIT,
             fragShader,
-            "main",
+            fragEntryPoint,
             nullptr,
         },
     }};

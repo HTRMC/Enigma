@@ -38,9 +38,21 @@ public:
     // on `depthTestEnable` + `depthWriteEnable` with `COMPARE_OP_LESS`
     // and wires the matching pNext format — no separate API surface
     // for "depth-enabled" pipelines.
+    //
+    // `vertEntryPoint` and `fragEntryPoint` name the SPIR-V entry
+    // points inside each shader module. DXC's `-spirv` output
+    // PRESERVES the HLSL entry-point name (e.g. `VSMain`, `PSMain`)
+    // in `OpEntryPoint`, so the pipeline's `pName` field must match
+    // exactly or `vkCreateGraphicsPipelines` will fail at runtime
+    // with "entry point not found". The names are captured as C
+    // strings and must outlive the Pipeline constructor call (string
+    // literals are fine; any dynamic storage must live at least that
+    // long).
     Pipeline(Device& device,
              VkShaderModule vertShader,
+             const char* vertEntryPoint,
              VkShaderModule fragShader,
+             const char* fragEntryPoint,
              VkDescriptorSetLayout globalSetLayout,
              VkFormat colorAttachmentFormat,
              VkFormat depthAttachmentFormat = VK_FORMAT_UNDEFINED);

@@ -315,7 +315,10 @@ void TrianglePass::buildPipeline(gfx::ShaderManager& shaderManager,
     VkShaderModule vert = shaderManager.compile(m_shaderPath, gfx::ShaderManager::Stage::Vertex, "VSMain");
     VkShaderModule frag = shaderManager.compile(m_shaderPath, gfx::ShaderManager::Stage::Fragment, "PSMain");
 
-    m_pipeline = new gfx::Pipeline(*m_device, vert, frag, globalSetLayout,
+    m_pipeline = new gfx::Pipeline(*m_device,
+                                   vert, "VSMain",
+                                   frag, "PSMain",
+                                   globalSetLayout,
                                    colorAttachmentFormat, depthAttachmentFormat);
 
     // Shader modules can be destroyed as soon as the pipeline is built.
@@ -351,7 +354,10 @@ void TrianglePass::rebuildPipeline() {
     vkDeviceWaitIdle(m_device->logical());
 
     delete m_pipeline;
-    m_pipeline = new gfx::Pipeline(*m_device, vert, frag, m_globalSetLayout,
+    m_pipeline = new gfx::Pipeline(*m_device,
+                                   vert, "VSMain",
+                                   frag, "PSMain",
+                                   m_globalSetLayout,
                                    m_colorFormat, m_depthFormat);
 
     vkDestroyShaderModule(m_device->logical(), vert, nullptr);
