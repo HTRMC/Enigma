@@ -57,7 +57,7 @@ target_include_directories(Enigma PRIVATE
 )
 
 target_link_libraries(Enigma PRIVATE
-    volk::volk_headers
+    volk::volk
     GPUOpen::VulkanMemoryAllocator
     glfw
     glm::glm
