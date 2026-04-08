@@ -112,13 +112,104 @@ void RequiredFeatures::requestAllRequired() {
 
 Device::Device(Instance& instance) {
     pickPhysicalDevice(instance.handle());
-
-    // Logical device creation arrives at step 24. For now we only have the
-    // selected physical device + properties + graphics queue family.
     findGraphicsQueueFamily(m_physical, &m_graphicsQueueFamily);
 
     ENIGMA_LOG_INFO("[gfx] picked physical device '{}' (queue family {})",
                     m_properties.deviceName, m_graphicsQueueFamily);
+
+    // Feature verification: query what the device actually supports and
+    // compare with what Enigma requires. Abort with a clear diagnostic
+    // when anything is missing. (This is the step 24 verification path.)
+    RequiredFeatures have{};
+    have.requestAllRequired(); // sets up sType + pNext chain with all bits 0
+    have.v13.dynamicRendering        = VK_FALSE;
+    have.v13.synchronization2        = VK_FALSE;
+    have.v12.descriptorIndexing      = VK_FALSE;
+    have.v12.runtimeDescriptorArray  = VK_FALSE;
+    have.v12.descriptorBindingPartiallyBound               = VK_FALSE;
+    have.v12.descriptorBindingVariableDescriptorCount      = VK_FALSE;
+    have.v12.descriptorBindingSampledImageUpdateAfterBind  = VK_FALSE;
+    have.v12.descriptorBindingStorageImageUpdateAfterBind  = VK_FALSE;
+    have.v12.descriptorBindingStorageBufferUpdateAfterBind = VK_FALSE;
+    have.v12.descriptorBindingUpdateUnusedWhilePending     = VK_FALSE;
+    have.v12.shaderSampledImageArrayNonUniformIndexing     = VK_FALSE;
+    have.v12.shaderStorageBufferArrayNonUniformIndexing    = VK_FALSE;
+    have.v12.shaderStorageImageArrayNonUniformIndexing     = VK_FALSE;
+    have.v12.timelineSemaphore                             = VK_FALSE;
+    vkGetPhysicalDeviceFeatures2(m_physical, &have.features2);
+
+    const auto check = [](VkBool32 v, const char* name) {
+        if (v != VK_TRUE) {
+            ENIGMA_LOG_ERROR("[gfx] missing required feature: {}", name);
+            return false;
+        }
+        return true;
+    };
+    bool ok = true;
+    ok &= check(have.v13.dynamicRendering,                         "Vulkan13.dynamicRendering");
+    ok &= check(have.v13.synchronization2,                         "Vulkan13.synchronization2");
+    ok &= check(have.v12.descriptorIndexing,                       "Vulkan12.descriptorIndexing");
+    ok &= check(have.v12.runtimeDescriptorArray,                   "Vulkan12.runtimeDescriptorArray");
+    ok &= check(have.v12.descriptorBindingPartiallyBound,          "Vulkan12.descriptorBindingPartiallyBound");
+    ok &= check(have.v12.descriptorBindingVariableDescriptorCount, "Vulkan12.descriptorBindingVariableDescriptorCount");
+    ok &= check(have.v12.descriptorBindingSampledImageUpdateAfterBind,  "Vulkan12.descriptorBindingSampledImageUpdateAfterBind");
+    ok &= check(have.v12.descriptorBindingStorageImageUpdateAfterBind,  "Vulkan12.descriptorBindingStorageImageUpdateAfterBind");
+    ok &= check(have.v12.descriptorBindingStorageBufferUpdateAfterBind, "Vulkan12.descriptorBindingStorageBufferUpdateAfterBind");
+    ok &= check(have.v12.timelineSemaphore,                        "Vulkan12.timelineSemaphore");
+    if (!ok) {
+        ENIGMA_ASSERT(false);
+        return;
+    }
+
+    // Build the actual "request" struct for device creation.
+    RequiredFeatures want{};
+    want.requestAllRequired();
+
+    // Enumerate device extensions to add the spec-mandated
+    // VK_KHR_portability_subset if present on the chosen device.
+    u32 extCount = 0;
+    vkEnumerateDeviceExtensionProperties(m_physical, nullptr, &extCount, nullptr);
+    std::vector<VkExtensionProperties> extProps(extCount);
+    vkEnumerateDeviceExtensionProperties(m_physical, nullptr, &extCount, extProps.data());
+
+    std::vector<const char*> enabledExts;
+    enabledExts.reserve(kRequiredDeviceExtensions.size() + 1);
+    for (const char* e : kRequiredDeviceExtensions) {
+        enabledExts.push_back(e);
+    }
+    for (const auto& ep : extProps) {
+        if (std::strcmp(ep.extensionName, "VK_KHR_portability_subset") == 0) {
+            enabledExts.push_back("VK_KHR_portability_subset");
+            ENIGMA_LOG_INFO("[gfx] enabling VK_KHR_portability_subset on device");
+            break;
+        }
+    }
+
+    // One graphics queue.
+    const float queuePriority = 1.0f;
+    VkDeviceQueueCreateInfo queueInfo{};
+    queueInfo.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queueInfo.queueFamilyIndex = m_graphicsQueueFamily;
+    queueInfo.queueCount       = 1;
+    queueInfo.pQueuePriorities = &queuePriority;
+
+    VkDeviceCreateInfo deviceInfo{};
+    deviceInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    deviceInfo.pNext                   = &want.features2;
+    deviceInfo.queueCreateInfoCount    = 1;
+    deviceInfo.pQueueCreateInfos       = &queueInfo;
+    deviceInfo.enabledExtensionCount   = static_cast<u32>(enabledExts.size());
+    deviceInfo.ppEnabledExtensionNames = enabledExts.data();
+
+    ENIGMA_VK_CHECK(vkCreateDevice(m_physical, &deviceInfo, nullptr, &m_device));
+    ENIGMA_ASSERT(m_device != VK_NULL_HANDLE);
+
+    // Populate device-level function pointers for volk.
+    volkLoadDevice(m_device);
+
+    vkGetDeviceQueue(m_device, m_graphicsQueueFamily, 0, &m_graphicsQueue);
+
+    ENIGMA_LOG_INFO("[gfx] VkDevice created (extensions = {})", enabledExts.size());
 }
 
 Device::~Device() {
