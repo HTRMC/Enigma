@@ -3,6 +3,7 @@
 #include "core/Types.h"
 #include "gfx/Allocator.h"
 #include "gfx/Device.h"
+#include "gfx/FrameContext.h"
 #include "gfx/Instance.h"
 #include "gfx/Swapchain.h"
 

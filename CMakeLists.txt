@@ -45,6 +45,7 @@ target_sources(Enigma PRIVATE
     src/gfx/Device.cpp
     src/gfx/Allocator.cpp
     src/gfx/Swapchain.cpp
+    src/gfx/FrameContext.cpp
 )
 
 target_include_directories(Enigma PRIVATE
