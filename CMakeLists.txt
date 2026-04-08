@@ -37,6 +37,9 @@ target_sources(Enigma PRIVATE
     src/core/Paths.cpp
     src/platform/Window.cpp
     src/engine/Clock.cpp
+    src/engine/Application.cpp
+    src/engine/Engine.cpp
+    src/renderer/Renderer.cpp
 )
 
 target_include_directories(Enigma PRIVATE
