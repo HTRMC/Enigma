@@ -36,6 +36,13 @@ public:
     VkImage     image(u32 index) const { return m_images[index]; }
     VkImageView view(u32 index)  const { return m_views[index]; }
 
+    // Per-swapchain-image "render finished" binary semaphore. Presentation
+    // ties the semaphore lifetime to the IMAGE, not to the frame-in-flight
+    // slot, so a single shared semaphore per slot cannot be re-signaled
+    // safely while the previous present on another image still holds it.
+    // One semaphore per image sidesteps the problem cleanly.
+    VkSemaphore renderFinished(u32 index) const { return m_renderFinished[index]; }
+
     // Tear down and rebuild at the new extent. Called from resize / out-of-
     // date handling. Arrives functionally at step 28.
     void recreate(u32 width, u32 height);
@@ -54,6 +61,7 @@ private:
     VkExtent2D       m_extent{};
     std::vector<VkImage>     m_images;
     std::vector<VkImageView> m_views;
+    std::vector<VkSemaphore> m_renderFinished;
 };
 
 } // namespace enigma::gfx

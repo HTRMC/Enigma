@@ -207,15 +207,18 @@ void Renderer::drawFrame() {
     ENIGMA_VK_CHECK(vkEndCommandBuffer(frame.commandBuffer));
 
     // -------------------------------------------------------------------
-    // Submit. Waits on `imageAvailable` (binary), signals
-    // `renderFinished` (binary) for present, plus the timeline
-    // `inFlight` at value `frameValue + 1` for CPU/GPU pipelining.
+    // Submit. Waits on `imageAvailable` (binary), signals the
+    // swapchain's per-image `renderFinished` (binary) for present, plus
+    // the timeline `inFlight` at value `frameValue + 1` for CPU/GPU
+    // pipelining.
     // -------------------------------------------------------------------
     const u64 signalValue = frame.frameValue + 1;
 
+    const VkSemaphore imageRenderFinished = m_swapchain->renderFinished(imageIndex);
+
     const VkSemaphore        waitSems[]   = { frame.imageAvailable };
     const VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-    const VkSemaphore        signalSems[] = { frame.renderFinished, frame.inFlight };
+    const VkSemaphore        signalSems[] = { imageRenderFinished, frame.inFlight };
     const u64                signalValues[] = { 0, signalValue };
 
     VkTimelineSemaphoreSubmitInfo timelineInfo{};
@@ -247,7 +250,7 @@ void Renderer::drawFrame() {
     VkPresentInfoKHR presentInfo{};
     presentInfo.sType              = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
     presentInfo.waitSemaphoreCount = 1;
-    presentInfo.pWaitSemaphores    = &frame.renderFinished;
+    presentInfo.pWaitSemaphores    = &imageRenderFinished;
     presentInfo.swapchainCount     = 1;
     presentInfo.pSwapchains        = &swapchain;
     presentInfo.pImageIndices      = &imageIndex;

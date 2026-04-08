@@ -126,6 +126,16 @@ void Swapchain::create(u32 width, u32 height) {
         ENIGMA_VK_CHECK(vkCreateImageView(m_device->logical(), &vi, nullptr, &m_views[i]));
     }
 
+    // One renderFinished binary semaphore per swapchain image — see the
+    // Swapchain.h comment for the "present ties semaphore to image, not
+    // slot" rationale.
+    m_renderFinished.resize(actualImageCount, VK_NULL_HANDLE);
+    for (u32 i = 0; i < actualImageCount; ++i) {
+        VkSemaphoreCreateInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        ENIGMA_VK_CHECK(vkCreateSemaphore(m_device->logical(), &si, nullptr, &m_renderFinished[i]));
+    }
+
     ENIGMA_LOG_INFO("[gfx] swapchain created ({}x{}, {} images, format {})",
                     m_extent.width, m_extent.height, actualImageCount,
                     static_cast<int>(m_format));
@@ -135,6 +145,12 @@ void Swapchain::destroyImagesAndSwapchain() {
     if (m_device == nullptr || m_device->logical() == VK_NULL_HANDLE) {
         return;
     }
+    for (VkSemaphore s : m_renderFinished) {
+        if (s != VK_NULL_HANDLE) {
+            vkDestroySemaphore(m_device->logical(), s, nullptr);
+        }
+    }
+    m_renderFinished.clear();
     for (VkImageView v : m_views) {
         if (v != VK_NULL_HANDLE) {
             vkDestroyImageView(m_device->logical(), v, nullptr);
