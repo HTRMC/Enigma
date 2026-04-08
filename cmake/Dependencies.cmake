@@ -19,3 +19,14 @@ FetchContent_Declare(
     GIT_TAG        0b17a763ba5643e32da1b2dee2a1ff7f1eb55d5c
 )
 FetchContent_MakeAvailable(volk)
+
+# -----------------------------------------------------------------------------
+# VulkanMemoryAllocator (VMA) — AMD's GPU memory allocator for Vulkan.
+# Tag: v3.1.0
+# -----------------------------------------------------------------------------
+FetchContent_Declare(
+    VulkanMemoryAllocator
+    GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
+    GIT_TAG        1732c4a74e0ca58d40e7c21c303cef7b70b75eb6
+)
+FetchContent_MakeAvailable(VulkanMemoryAllocator)
