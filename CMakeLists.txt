@@ -49,6 +49,7 @@ target_sources(Enigma PRIVATE
     src/gfx/DescriptorAllocator.cpp
     src/gfx/ShaderManager.cpp
     src/gfx/Pipeline.cpp
+    src/renderer/TrianglePass.cpp
 )
 
 target_include_directories(Enigma PRIVATE
