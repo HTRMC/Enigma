@@ -32,13 +32,18 @@ Texture2D g_sampledImages[] : register(t0, space0);
 [[vk::binding(3, 0)]]
 SamplerState g_samplers[] : register(s0, space0);
 
-[[vk::push_constant]]
-cbuffer PC {
+// DXC requires `[[vk::push_constant]]` to annotate a global variable
+// of struct type — not a cbuffer block. The `pc.X` reference form
+// mirrors the GLSL `layout(push_constant) uniform PC { ... } pc;`
+// idiom we were using before the migration.
+struct PushBlock {
     uint bufferIndex;
     uint textureIndex;
     uint samplerIndex;
     uint _pad;
 };
+
+[[vk::push_constant]] PushBlock pc;
 
 struct VSOut {
     float4 pos : SV_Position;
@@ -49,7 +54,7 @@ VSOut VSMain(uint vid : SV_VertexID) {
     // Each SSBO entry packs a single vertex as a vec4 where
     // .xy = NDC position (math convention, +Y up — flipped on write
     // below to match Vulkan's +Y-down NDC) and .zw = UV coordinates.
-    const float4 vertex = g_vertices[NonUniformResourceIndex(bufferIndex)][vid];
+    const float4 vertex = g_vertices[NonUniformResourceIndex(pc.bufferIndex)][vid];
 
     VSOut o;
     o.pos = float4(vertex.x, -vertex.y, 0.0, 1.0);
@@ -62,7 +67,7 @@ float4 PSMain(VSOut vs) : SV_Target {
     // idiom: pick a Texture2D slot and a SamplerState slot by index,
     // then call .Sample(). This maps to the same SPIR-V as the GLSL
     // `texture(sampler2D(tex, samp), uv)` construction.
-    Texture2D    tex  = g_sampledImages[NonUniformResourceIndex(textureIndex)];
-    SamplerState samp = g_samplers[NonUniformResourceIndex(samplerIndex)];
+    Texture2D    tex  = g_sampledImages[NonUniformResourceIndex(pc.textureIndex)];
+    SamplerState samp = g_samplers[NonUniformResourceIndex(pc.samplerIndex)];
     return tex.Sample(samp, vs.uv);
 }
