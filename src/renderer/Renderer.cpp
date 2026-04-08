@@ -9,6 +9,7 @@
 #include "gfx/Instance.h"
 #include "gfx/ShaderManager.h"
 #include "gfx/Swapchain.h"
+#include "gfx/Validation.h"
 #include "platform/Window.h"
 #include "renderer/TrianglePass.h"
 
@@ -38,6 +39,18 @@ Renderer::~Renderer() {
     if (m_device) {
         vkDeviceWaitIdle(m_device->logical());
     }
+
+    // -------------------------------------------------------------------
+    // Validation counter shutdown gate (AC6). This is the ONLY place
+    // the plan asserts validation-clean. Any WARNING_BIT/ERROR_BIT
+    // fired across init, steady-state, resize, minimize, or teardown
+    // would have incremented the counter; a non-zero value here is a
+    // milestone regression.
+    // -------------------------------------------------------------------
+    const u32 validationCount = gfx::getValidationCounter();
+    ENIGMA_LOG_INFO("[renderer] shutdown g_validationCounter = {}", validationCount);
+    ENIGMA_ASSERT(validationCount == 0);
+
     ENIGMA_LOG_INFO("[renderer] shutdown");
 }
 
