@@ -1,14 +1,17 @@
 #pragma once
 
 #include "core/Types.h"
+#include "gfx/Instance.h"
+
+#include <memory>
 
 namespace enigma {
 
 class Window;
 
-// The top-level graphics facade. At step 17 this is a stub — construction
-// takes a Window reference and `drawFrame()` is a no-op. Real Vulkan
-// subsystem composition arrives at step 38.
+// The top-level graphics facade. At step 19 it owns the Vulkan instance
+// wrapper. Subsequent steps add device, swapchain, frames, pipeline, and
+// the triangle pass.
 class Renderer {
 public:
     explicit Renderer(Window& window);
@@ -23,6 +26,8 @@ public:
 
 private:
     Window& m_window;
+
+    std::unique_ptr<gfx::Instance> m_instance;
 };
 
 } // namespace enigma

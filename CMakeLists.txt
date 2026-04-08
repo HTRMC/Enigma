@@ -40,6 +40,7 @@ target_sources(Enigma PRIVATE
     src/engine/Application.cpp
     src/engine/Engine.cpp
     src/renderer/Renderer.cpp
+    src/gfx/Instance.cpp
 )
 
 target_include_directories(Enigma PRIVATE
