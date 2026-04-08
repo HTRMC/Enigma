@@ -28,8 +28,13 @@ void main() {
     // technically over-cautious here (the push constant is uniform
     // across the draw) but it is the authentic idiom and proves the
     // non-uniform-indexing path is live.
+    //
+    // Vulkan NDC has +Y pointing DOWN the screen (unlike OpenGL/Math
+    // convention where +Y points up). Flip Y on write so the engine's
+    // SSBO stores math-convention coordinates and the screen sees the
+    // right-side-up triangle.
     const vec4 p = g_storageBuffers[nonuniformEXT(pc.bufferIndex)].pos[gl_VertexIndex];
-    gl_Position = vec4(p.xy, 0.0, 1.0);
+    gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
 
     // Per-vertex color derived from the vertex index so the three
     // corners come out red / green / blue.
