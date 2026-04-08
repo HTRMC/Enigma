@@ -2,19 +2,28 @@
 
 #include "core/Assert.h"
 #include "core/Log.h"
+#include "gfx/Allocator.h"
 #include "gfx/Device.h"
 #include "gfx/Instance.h"
 #include "platform/Window.h"
 
 #include <GLFW/glfw3.h>
 
+// vk_mem_alloc.h is driven via volk — the guards match the existing
+// Allocator.cpp usage (function pointers supplied manually, no static
+// or dynamic loading by VMA itself).
+#define VMA_STATIC_VULKAN_FUNCTIONS  0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
+#include <vk_mem_alloc.h>
+
 #include <algorithm>
 
 namespace enigma::gfx {
 
-Swapchain::Swapchain(Instance& instance, Device& device, Window& window)
+Swapchain::Swapchain(Instance& instance, Device& device, Allocator& allocator, Window& window)
     : m_instance(&instance)
-    , m_device(&device) {
+    , m_device(&device)
+    , m_allocator(&allocator) {
 
     // Surface creation is the Swapchain's responsibility — the surface has
     // the same lifetime as the swapchain for all practical purposes.
@@ -136,7 +145,41 @@ void Swapchain::create(u32 width, u32 height) {
         ENIGMA_VK_CHECK(vkCreateSemaphore(m_device->logical(), &si, nullptr, &m_renderFinished[i]));
     }
 
-    ENIGMA_LOG_INFO("[gfx] swapchain created ({}x{}, {} images, format {})",
+    // -------------------------------------------------------------------
+    // Depth attachment: a single shared VkImage sized to the color
+    // extent. Recreated alongside the swapchain so extent stays in
+    // sync through resizes. D32_SFLOAT is universally supported and
+    // is the format declared in Swapchain.h; no runtime format
+    // query needed.
+    // -------------------------------------------------------------------
+    VkImageCreateInfo depthImgInfo{};
+    depthImgInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    depthImgInfo.imageType     = VK_IMAGE_TYPE_2D;
+    depthImgInfo.format        = m_depthFormat;
+    depthImgInfo.extent        = { m_extent.width, m_extent.height, 1 };
+    depthImgInfo.mipLevels     = 1;
+    depthImgInfo.arrayLayers   = 1;
+    depthImgInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
+    depthImgInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    depthImgInfo.usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    depthImgInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    depthImgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo depthAllocInfo{};
+    depthAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+
+    ENIGMA_VK_CHECK(vmaCreateImage(m_allocator->handle(), &depthImgInfo, &depthAllocInfo,
+                                   &m_depthImage, &m_depthAllocation, nullptr));
+
+    VkImageViewCreateInfo depthViewInfo{};
+    depthViewInfo.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    depthViewInfo.image    = m_depthImage;
+    depthViewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    depthViewInfo.format   = m_depthFormat;
+    depthViewInfo.subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };
+    ENIGMA_VK_CHECK(vkCreateImageView(m_device->logical(), &depthViewInfo, nullptr, &m_depthView));
+
+    ENIGMA_LOG_INFO("[gfx] swapchain created ({}x{}, {} images, format {}, depth D32_SFLOAT)",
                     m_extent.width, m_extent.height, actualImageCount,
                     static_cast<int>(m_format));
 }
@@ -144,6 +187,16 @@ void Swapchain::create(u32 width, u32 height) {
 void Swapchain::destroyImagesAndSwapchain() {
     if (m_device == nullptr || m_device->logical() == VK_NULL_HANDLE) {
         return;
+    }
+    // Depth attachment first (reverse-order cleanup: view before image).
+    if (m_depthView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device->logical(), m_depthView, nullptr);
+        m_depthView = VK_NULL_HANDLE;
+    }
+    if (m_depthImage != VK_NULL_HANDLE && m_allocator != nullptr) {
+        vmaDestroyImage(m_allocator->handle(), m_depthImage, m_depthAllocation);
+        m_depthImage      = VK_NULL_HANDLE;
+        m_depthAllocation = nullptr;
     }
     for (VkSemaphore s : m_renderFinished) {
         if (s != VK_NULL_HANDLE) {
