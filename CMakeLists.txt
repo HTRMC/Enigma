@@ -43,6 +43,7 @@ target_sources(Enigma PRIVATE
     src/gfx/Instance.cpp
     src/gfx/Validation.cpp
     src/gfx/Device.cpp
+    src/gfx/Allocator.cpp
 )
 
 target_include_directories(Enigma PRIVATE

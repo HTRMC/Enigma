@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/Types.h"
+#include "gfx/Allocator.h"
 #include "gfx/Device.h"
 #include "gfx/Instance.h"
 
@@ -28,8 +29,9 @@ public:
 private:
     Window& m_window;
 
-    std::unique_ptr<gfx::Instance> m_instance;
-    std::unique_ptr<gfx::Device>   m_device;
+    std::unique_ptr<gfx::Instance>  m_instance;
+    std::unique_ptr<gfx::Device>    m_device;
+    std::unique_ptr<gfx::Allocator> m_allocator;
 };
 
 } // namespace enigma
