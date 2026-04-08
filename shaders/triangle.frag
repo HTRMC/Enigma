@@ -19,8 +19,14 @@ layout(location = 0) in  vec2 v_uv;
 layout(location = 0) out vec4 o_color;
 
 void main() {
-    const sampler2D combined = sampler2D(
-        g_sampledImages[nonuniformEXT(pc.textureIndex)],
-        g_samplers[nonuniformEXT(pc.samplerIndex)]);
-    o_color = texture(combined, v_uv);
+    // Construct the combined sampler2D inline as an rvalue argument
+    // to texture(). GLSL forbids declaring local variables of opaque
+    // types (sampler*, image*) — they are only legal as uniforms or
+    // function parameters, which is why the previous "const sampler2D
+    // combined = ..." form failed to compile.
+    o_color = texture(
+        sampler2D(
+            g_sampledImages[nonuniformEXT(pc.textureIndex)],
+            g_samplers[nonuniformEXT(pc.samplerIndex)]),
+        v_uv);
 }
