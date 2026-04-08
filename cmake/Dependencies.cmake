@@ -11,12 +11,12 @@ include(FetchContent)
 # -----------------------------------------------------------------------------
 # volk — meta-loader for Vulkan. Eliminates the need to link against the
 # Vulkan loader directly; loads entry points at runtime.
-# Tag: vulkan-sdk-1.3.296.0
+# Tag: vulkan-sdk-1.4.321.0
 # -----------------------------------------------------------------------------
 FetchContent_Declare(
     volk
     GIT_REPOSITORY https://github.com/zeux/volk.git
-    GIT_TAG        0b17a763ba5643e32da1b2dee2a1ff7f1eb55d5c
+    GIT_TAG        a8da8ef3368482b0ee9b0ec0c6079a16a89c6924
 )
 FetchContent_MakeAvailable(volk)
 
@@ -27,7 +27,7 @@ FetchContent_MakeAvailable(volk)
 FetchContent_Declare(
     VulkanMemoryAllocator
     GIT_REPOSITORY https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator.git
-    GIT_TAG        1732c4a74e0ca58d40e7c21c303cef7b70b75eb6
+    GIT_TAG        009ecd192c1289c7529bff248a16cfe896254816
 )
 FetchContent_MakeAvailable(VulkanMemoryAllocator)
 
@@ -43,7 +43,7 @@ set(GLFW_INSTALL        OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(
     glfw
     GIT_REPOSITORY https://github.com/glfw/glfw.git
-    GIT_TAG        7b6aead9fb88b3623e3b3725ebb42670cbe4c579
+    GIT_TAG        a74efa0d5628b74adc0426af4c5710e287fa7c2c
 )
 FetchContent_MakeAvailable(glfw)
 
