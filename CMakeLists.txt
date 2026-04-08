@@ -47,6 +47,7 @@ target_sources(Enigma PRIVATE
     src/gfx/Swapchain.cpp
     src/gfx/FrameContext.cpp
     src/gfx/DescriptorAllocator.cpp
+    src/gfx/ShaderManager.cpp
 )
 
 target_include_directories(Enigma PRIVATE
