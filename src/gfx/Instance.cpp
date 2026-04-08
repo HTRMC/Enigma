@@ -28,6 +28,19 @@ bool validationLayerAvailable() {
     return false;
 }
 
+bool instanceExtensionAvailable(const char* name) {
+    u32 count = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+    std::vector<VkExtensionProperties> exts(count);
+    vkEnumerateInstanceExtensionProperties(nullptr, &count, exts.data());
+    for (const auto& e : exts) {
+        if (std::strcmp(e.extensionName, name) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 Instance::Instance() {
@@ -67,6 +80,16 @@ Instance::Instance() {
         enabledExtensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
 
+    // Portability enumeration. On platforms where non-conformant drivers
+    // (MoltenVK on macOS) may be present, the enumerate flag instructs the
+    // loader to also report portability drivers. Silently opted in when
+    // the extension is available; harmless on platforms where it is not.
+    const bool havePortabilityEnum =
+        instanceExtensionAvailable(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    if (havePortabilityEnum) {
+        enabledExtensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
+    }
+
     std::vector<const char*> enabledLayers;
     if (haveValidationLayer) {
         enabledLayers.push_back(kValidationLayerName);
@@ -79,6 +102,9 @@ Instance::Instance() {
     createInfo.ppEnabledExtensionNames = enabledExtensions.data();
     createInfo.enabledLayerCount       = static_cast<u32>(enabledLayers.size());
     createInfo.ppEnabledLayerNames     = enabledLayers.data();
+    if (havePortabilityEnum) {
+        createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
+    }
 
     // Wire the debug messenger into the instance create pNext chain so
     // that validation messages produced during vkCreateInstance itself are
