@@ -70,20 +70,22 @@ void Renderer::drawFrame() {
     gfx::FrameContext& frame = m_frames->get(m_frameIndex);
 
     // -------------------------------------------------------------------
-    // Timeline semaphore wait: hold off until the FrameContext's last
-    // submitted work (frameValue - MAX_FRAMES_IN_FLIGHT + 1) has retired.
-    // For the first few frames this clamps to zero which is an immediate
-    // no-wait.
+    // Timeline semaphore wait: hold off until this FrameContext's last
+    // submission has fully retired. `frame.frameValue` is the timeline
+    // value signaled by that submission (0 if the slot has never been
+    // used yet). Waiting on the last signaled value is exactly what
+    // gates slot reuse — the old "-MAX_FRAMES_IN_FLIGHT + 1" formula
+    // was a typo that looked at the wrong slot's value and let the
+    // CPU race past still-in-flight command buffers, causing the
+    // cascade of `command buffer in use` / `semaphore has pending
+    // operations` validation errors and eventually VK_ERROR_DEVICE_LOST.
     // -------------------------------------------------------------------
-    const u64 waitValue = (frame.frameValue >= gfx::MAX_FRAMES_IN_FLIGHT)
-                              ? (frame.frameValue - gfx::MAX_FRAMES_IN_FLIGHT + 1)
-                              : 0;
-    if (waitValue > 0) {
+    if (frame.frameValue > 0) {
         VkSemaphoreWaitInfo waitInfo{};
         waitInfo.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
         waitInfo.semaphoreCount = 1;
         waitInfo.pSemaphores    = &frame.inFlight;
-        waitInfo.pValues        = &waitValue;
+        waitInfo.pValues        = &frame.frameValue;
         ENIGMA_VK_CHECK(vkWaitSemaphores(dev, &waitInfo, UINT64_MAX));
     }
 
