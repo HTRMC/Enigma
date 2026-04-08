@@ -81,6 +81,16 @@ private:
     VmaAllocation             m_vertexAllocation = nullptr;
     u32                       m_bindlessSlot     = 0;
 
+    // Procedural checkerboard texture + default sampler. Both land in
+    // the global bindless set and are addressed per-draw via push
+    // constants — no per-material descriptor set needed.
+    VkImage                   m_texImage      = VK_NULL_HANDLE;
+    VmaAllocation             m_texAllocation = nullptr;
+    VkImageView               m_texView       = VK_NULL_HANDLE;
+    VkSampler                 m_sampler       = VK_NULL_HANDLE;
+    u32                       m_textureSlot   = 0;
+    u32                       m_samplerSlot   = 0;
+
     gfx::Pipeline*            m_pipeline = nullptr; // owned, but forward-declared
     bool                      m_firstRecord = true;
 

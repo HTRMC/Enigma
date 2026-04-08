@@ -17,6 +17,7 @@
 #include <array>
 #include <cstring>
 #include <filesystem>
+#include <vector>
 
 namespace enigma {
 
@@ -67,12 +68,223 @@ TrianglePass::TrianglePass(gfx::Device& device,
 
     ENIGMA_LOG_INFO("[triangle] ssbo created: size={} bytes, bindless slot={}",
                     sizeof(kTriangleVertices), m_bindlessSlot);
+
+    // -------------------------------------------------------------------
+    // Procedural checkerboard texture: 64x64 RGBA8, two-tone. Generated
+    // in-code so the engine doesn't need an asset pipeline or a third-
+    // party image loader to prove bindless sampling on bindings 0 + 3.
+    // -------------------------------------------------------------------
+    constexpr u32 kTexWidth  = 64;
+    constexpr u32 kTexHeight = 64;
+    constexpr u32 kTexTileSize = 8;
+    std::vector<u32> pixels(kTexWidth * kTexHeight);
+    for (u32 y = 0; y < kTexHeight; ++y) {
+        for (u32 x = 0; x < kTexWidth; ++x) {
+            const bool dark = ((x / kTexTileSize) + (y / kTexTileSize)) % 2u == 0u;
+            // AABBGGRR with A=FF so the sRGB view sees an opaque texel.
+            pixels[y * kTexWidth + x] = dark ? 0xFF202020u : 0xFFF0F0F0u;
+        }
+    }
+    const VkDeviceSize texBytes = pixels.size() * sizeof(u32);
+
+    // ---- Staging buffer -----------------------------------------------
+    VkBufferCreateInfo stagingBufInfo{};
+    stagingBufInfo.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    stagingBufInfo.size        = texBytes;
+    stagingBufInfo.usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    stagingBufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo stagingAllocInfo{};
+    stagingAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    stagingAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                           | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+    VkBuffer          stagingBuffer     = VK_NULL_HANDLE;
+    VmaAllocation     stagingAllocation = nullptr;
+    VmaAllocationInfo stagingAllocHandle{};
+    ENIGMA_VK_CHECK(vmaCreateBuffer(allocator.handle(), &stagingBufInfo, &stagingAllocInfo,
+                                    &stagingBuffer, &stagingAllocation, &stagingAllocHandle));
+    ENIGMA_ASSERT(stagingAllocHandle.pMappedData != nullptr);
+    std::memcpy(stagingAllocHandle.pMappedData, pixels.data(), static_cast<size_t>(texBytes));
+
+    // ---- Destination image + view -------------------------------------
+    VkImageCreateInfo imgInfo{};
+    imgInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgInfo.imageType     = VK_IMAGE_TYPE_2D;
+    imgInfo.format        = VK_FORMAT_R8G8B8A8_SRGB;
+    imgInfo.extent        = { kTexWidth, kTexHeight, 1 };
+    imgInfo.mipLevels     = 1;
+    imgInfo.arrayLayers   = 1;
+    imgInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
+    imgInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    imgInfo.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imgInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo imgAllocInfo{};
+    imgAllocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+
+    ENIGMA_VK_CHECK(vmaCreateImage(allocator.handle(), &imgInfo, &imgAllocInfo,
+                                   &m_texImage, &m_texAllocation, nullptr));
+
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image            = m_texImage;
+    viewInfo.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    viewInfo.format           = VK_FORMAT_R8G8B8A8_SRGB;
+    viewInfo.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    ENIGMA_VK_CHECK(vkCreateImageView(device.logical(), &viewInfo, nullptr, &m_texView));
+
+    // ---- One-shot upload command buffer -------------------------------
+    // Transient pool → single primary → submit + fence-wait → destroy
+    // pool. The fence-wait blocks the constructor until the texture
+    // is fully resident in SHADER_READ_ONLY_OPTIMAL, so the rest of
+    // the engine can treat it as a plain ready resource.
+    VkCommandPoolCreateInfo uploadPoolInfo{};
+    uploadPoolInfo.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    uploadPoolInfo.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    uploadPoolInfo.queueFamilyIndex = device.graphicsQueueFamily();
+
+    VkCommandPool uploadPool = VK_NULL_HANDLE;
+    ENIGMA_VK_CHECK(vkCreateCommandPool(device.logical(), &uploadPoolInfo, nullptr, &uploadPool));
+
+    VkCommandBufferAllocateInfo uploadCbInfo{};
+    uploadCbInfo.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    uploadCbInfo.commandPool        = uploadPool;
+    uploadCbInfo.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    uploadCbInfo.commandBufferCount = 1;
+
+    VkCommandBuffer uploadCmd = VK_NULL_HANDLE;
+    ENIGMA_VK_CHECK(vkAllocateCommandBuffers(device.logical(), &uploadCbInfo, &uploadCmd));
+
+    VkCommandBufferBeginInfo uploadBegin{};
+    uploadBegin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    uploadBegin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    ENIGMA_VK_CHECK(vkBeginCommandBuffer(uploadCmd, &uploadBegin));
+
+    // UNDEFINED -> TRANSFER_DST_OPTIMAL (pre-copy)
+    {
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask        = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        barrier.srcAccessMask       = 0;
+        barrier.dstStageMask        = VK_PIPELINE_STAGE_2_COPY_BIT;
+        barrier.dstAccessMask       = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        barrier.oldLayout           = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image               = m_texImage;
+        barrier.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+        VkDependencyInfo dep{};
+        dep.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers    = &barrier;
+        vkCmdPipelineBarrier2(uploadCmd, &dep);
+    }
+
+    VkBufferImageCopy copyRegion{};
+    copyRegion.bufferOffset      = 0;
+    copyRegion.bufferRowLength   = 0;
+    copyRegion.bufferImageHeight = 0;
+    copyRegion.imageSubresource  = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    copyRegion.imageOffset       = { 0, 0, 0 };
+    copyRegion.imageExtent       = { kTexWidth, kTexHeight, 1 };
+    vkCmdCopyBufferToImage(uploadCmd, stagingBuffer, m_texImage,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copyRegion);
+
+    // TRANSFER_DST_OPTIMAL -> SHADER_READ_ONLY_OPTIMAL (post-copy)
+    {
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask        = VK_PIPELINE_STAGE_2_COPY_BIT;
+        barrier.srcAccessMask       = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+        barrier.dstStageMask        = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barrier.dstAccessMask       = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+        barrier.oldLayout           = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        barrier.newLayout           = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image               = m_texImage;
+        barrier.subresourceRange    = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+
+        VkDependencyInfo dep{};
+        dep.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers    = &barrier;
+        vkCmdPipelineBarrier2(uploadCmd, &dep);
+    }
+
+    ENIGMA_VK_CHECK(vkEndCommandBuffer(uploadCmd));
+
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkFence uploadFence = VK_NULL_HANDLE;
+    ENIGMA_VK_CHECK(vkCreateFence(device.logical(), &fenceInfo, nullptr, &uploadFence));
+
+    VkSubmitInfo uploadSubmit{};
+    uploadSubmit.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    uploadSubmit.commandBufferCount = 1;
+    uploadSubmit.pCommandBuffers    = &uploadCmd;
+    ENIGMA_VK_CHECK(vkQueueSubmit(device.graphicsQueue(), 1, &uploadSubmit, uploadFence));
+    ENIGMA_VK_CHECK(vkWaitForFences(device.logical(), 1, &uploadFence, VK_TRUE, UINT64_MAX));
+
+    // Tear down upload scratch: fence, transient pool (also destroys
+    // its command buffer), staging buffer.
+    vkDestroyFence(device.logical(), uploadFence, nullptr);
+    vkDestroyCommandPool(device.logical(), uploadPool, nullptr);
+    vmaDestroyBuffer(allocator.handle(), stagingBuffer, stagingAllocation);
+
+    // ---- Default sampler ----------------------------------------------
+    // Linear min/mag, repeat wrap, no anisotropy, no mipmaps. Small
+    // enough to inline here; future passes can create their own.
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType                   = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter               = VK_FILTER_LINEAR;
+    samplerInfo.minFilter               = VK_FILTER_LINEAR;
+    samplerInfo.mipmapMode              = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    samplerInfo.addressModeU            = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeV            = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeW            = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.mipLodBias              = 0.0f;
+    samplerInfo.anisotropyEnable        = VK_FALSE;
+    samplerInfo.maxAnisotropy           = 1.0f;
+    samplerInfo.compareEnable           = VK_FALSE;
+    samplerInfo.minLod                  = 0.0f;
+    samplerInfo.maxLod                  = 0.0f;
+    samplerInfo.borderColor             = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    samplerInfo.unnormalizedCoordinates = VK_FALSE;
+    ENIGMA_VK_CHECK(vkCreateSampler(device.logical(), &samplerInfo, nullptr, &m_sampler));
+
+    // ---- Bindless registration (bindings 0 and 3) ---------------------
+    m_textureSlot = descriptorAllocator.registerSampledImage(
+        m_texView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m_samplerSlot = descriptorAllocator.registerSampler(m_sampler);
+
+    ENIGMA_LOG_INFO("[triangle] texture uploaded: {}x{} checkerboard, "
+                    "textureSlot={} samplerSlot={}",
+                    kTexWidth, kTexHeight, m_textureSlot, m_samplerSlot);
 }
 
 TrianglePass::~TrianglePass() {
     delete m_pipeline;
-    if (m_allocator != nullptr && m_vertexBuffer != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(m_allocator->handle(), m_vertexBuffer, m_vertexAllocation);
+    if (m_device != nullptr) {
+        VkDevice dev = m_device->logical();
+        if (m_sampler != VK_NULL_HANDLE) {
+            vkDestroySampler(dev, m_sampler, nullptr);
+        }
+        if (m_texView != VK_NULL_HANDLE) {
+            vkDestroyImageView(dev, m_texView, nullptr);
+        }
+    }
+    if (m_allocator != nullptr) {
+        if (m_texImage != VK_NULL_HANDLE) {
+            vmaDestroyImage(m_allocator->handle(), m_texImage, m_texAllocation);
+        }
+        if (m_vertexBuffer != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(m_allocator->handle(), m_vertexBuffer, m_vertexAllocation);
+        }
     }
 }
 
@@ -174,10 +386,19 @@ void TrianglePass::record(VkCommandBuffer cmd,
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             m_pipeline->layout(), 0, 1, &globalSet, 0, nullptr);
 
-    // Push the bindless slot index (first 4 bytes of the 16-byte range).
-    struct PushBlock { u32 bufferIndex; u32 _pad[3]; };
+    // Push the bindless slot indices: vertex SSBO, sampled texture,
+    // sampler. `_pad` keeps the block 16-byte aligned to match the
+    // pipeline layout's push constant range exactly.
+    struct PushBlock {
+        u32 bufferIndex;
+        u32 textureIndex;
+        u32 samplerIndex;
+        u32 _pad;
+    };
     PushBlock pc{};
-    pc.bufferIndex = m_bindlessSlot;
+    pc.bufferIndex  = m_bindlessSlot;
+    pc.textureIndex = m_textureSlot;
+    pc.samplerIndex = m_samplerSlot;
     vkCmdPushConstants(cmd, m_pipeline->layout(),
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                        0, sizeof(pc), &pc);
