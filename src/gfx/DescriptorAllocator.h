@@ -55,12 +55,29 @@ public:
     VkDescriptorSet       globalSet() const { return m_globalSet; }
     const Caps&           caps()      const { return m_caps; }
 
+    // Register a storage buffer in binding 2 and return the bindless
+    // slot index. At milestone 1 this is the only populated binding.
+    // The descriptor is written via `vkUpdateDescriptorSets` with
+    // UPDATE_AFTER_BIND semantics so it is legal to call at any time,
+    // even after the set has been bound to a command buffer.
+    u32 registerStorageBuffer(VkBuffer buffer, VkDeviceSize size);
+
+    // --- stubs for milestone 2 (Principle 6: pin the API shape now) ---
+    u32 registerSampledImage(VkImageView view, VkImageLayout layout);
+    u32 registerStorageImage(VkImageView view);
+    u32 registerSampler(VkSampler sampler);
+
 private:
     Device*               m_device     = nullptr;
     Caps                  m_caps{};
     VkDescriptorSetLayout m_layout     = VK_NULL_HANDLE;
     VkDescriptorPool      m_pool       = VK_NULL_HANDLE;
     VkDescriptorSet       m_globalSet  = VK_NULL_HANDLE;
+
+    u32 m_nextSampledImage  = 0;
+    u32 m_nextStorageImage  = 0;
+    u32 m_nextStorageBuffer = 0;
+    u32 m_nextSampler       = 0;
 };
 
 } // namespace enigma::gfx

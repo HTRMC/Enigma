@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 
 namespace enigma::gfx {
 
@@ -162,6 +163,46 @@ DescriptorAllocator::~DescriptorAllocator() {
     VkDevice dev = m_device->logical();
     if (m_pool   != VK_NULL_HANDLE) vkDestroyDescriptorPool(dev, m_pool, nullptr);
     if (m_layout != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(dev, m_layout, nullptr);
+}
+
+u32 DescriptorAllocator::registerStorageBuffer(VkBuffer buffer, VkDeviceSize size) {
+    ENIGMA_ASSERT(m_nextStorageBuffer < m_caps.storageBuffers);
+    const u32 slot = m_nextStorageBuffer++;
+
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = buffer;
+    bufferInfo.offset = 0;
+    bufferInfo.range  = size;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = m_globalSet;
+    write.dstBinding      = kBindingStorageBuffer;
+    write.dstArrayElement = slot;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.pBufferInfo     = &bufferInfo;
+
+    vkUpdateDescriptorSets(m_device->logical(), 1, &write, 0, nullptr);
+    return slot;
+}
+
+// Milestone-2 stubs. Pinning the API shape now so adding a texture later
+// is a method body change in this file, not a header edit propagating
+// through every caller.
+u32 DescriptorAllocator::registerSampledImage(VkImageView, VkImageLayout) {
+    ENIGMA_ASSERT(false && "registerSampledImage: not implemented until milestone 2");
+    return UINT32_MAX;
+}
+
+u32 DescriptorAllocator::registerStorageImage(VkImageView) {
+    ENIGMA_ASSERT(false && "registerStorageImage: not implemented until milestone 2");
+    return UINT32_MAX;
+}
+
+u32 DescriptorAllocator::registerSampler(VkSampler) {
+    ENIGMA_ASSERT(false && "registerSampler: not implemented until milestone 2");
+    return UINT32_MAX;
 }
 
 } // namespace enigma::gfx
