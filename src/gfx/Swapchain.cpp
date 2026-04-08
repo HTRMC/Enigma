@@ -148,8 +148,15 @@ void Swapchain::destroyImagesAndSwapchain() {
     }
 }
 
-void Swapchain::recreate(u32 /*width*/, u32 /*height*/) {
-    // Implemented at step 28.
+void Swapchain::recreate(u32 width, u32 height) {
+    if (m_device == nullptr || m_device->logical() == VK_NULL_HANDLE) {
+        return;
+    }
+    // Serialize with the GPU before tearing down swapchain resources.
+    // Dynamic rendering path: no VkRenderPass / VkFramebuffer to rebuild.
+    vkDeviceWaitIdle(m_device->logical());
+    destroyImagesAndSwapchain();
+    create(width, height);
 }
 
 } // namespace enigma::gfx
