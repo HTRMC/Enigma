@@ -91,6 +91,10 @@ target_compile_definitions(Enigma PRIVATE
 if(MSVC)
     target_compile_options(Enigma PRIVATE
         /std:c++latest /W4 /WX /permissive- /Zc:preprocessor
+        # C4127 "conditional expression is constant" fires on ENIGMA_ASSERT
+        # macros (do-while(0) and compile-time false conditions) — those
+        # are legitimate patterns, not real warnings.
+        /wd4127
     )
 else()
     target_compile_options(Enigma PRIVATE
