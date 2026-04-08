@@ -95,12 +95,13 @@ private:
     bool                      m_firstRecord = true;
 
     // Hot-reload state captured from the initial buildPipeline() call.
+    // One-file-per-pass HLSL convention: `m_shaderPath` is a single
+    // `.hlsl` file containing both `VSMain` and `PSMain` entry points.
     gfx::ShaderManager*       m_shaderManager   = nullptr;
     VkDescriptorSetLayout     m_globalSetLayout = VK_NULL_HANDLE;
     VkFormat                  m_colorFormat     = VK_FORMAT_UNDEFINED;
     VkFormat                  m_depthFormat     = VK_FORMAT_UNDEFINED;
-    std::filesystem::path     m_vertPath;
-    std::filesystem::path     m_fragPath;
+    std::filesystem::path     m_shaderPath;
 };
 
 } // namespace enigma

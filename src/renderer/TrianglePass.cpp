@@ -307,11 +307,13 @@ void TrianglePass::buildPipeline(gfx::ShaderManager& shaderManager,
     m_globalSetLayout = globalSetLayout;
     m_colorFormat     = colorAttachmentFormat;
     m_depthFormat     = depthAttachmentFormat;
-    m_vertPath        = Paths::shaderSourceDir() / "triangle.vert";
-    m_fragPath        = Paths::shaderSourceDir() / "triangle.frag";
+    m_shaderPath      = Paths::shaderSourceDir() / "triangle.hlsl";
 
-    VkShaderModule vert = shaderManager.compile(m_vertPath, gfx::ShaderManager::Stage::Vertex);
-    VkShaderModule frag = shaderManager.compile(m_fragPath, gfx::ShaderManager::Stage::Fragment);
+    // One-file-per-pass HLSL: both entry points live in the same
+    // file. The extension-based dispatch inside ShaderManager routes
+    // `.hlsl` through the DXC path automatically.
+    VkShaderModule vert = shaderManager.compile(m_shaderPath, gfx::ShaderManager::Stage::Vertex, "VSMain");
+    VkShaderModule frag = shaderManager.compile(m_shaderPath, gfx::ShaderManager::Stage::Fragment, "PSMain");
 
     m_pipeline = new gfx::Pipeline(*m_device, vert, frag, globalSetLayout,
                                    colorAttachmentFormat, depthAttachmentFormat);
@@ -325,19 +327,20 @@ void TrianglePass::rebuildPipeline() {
     ENIGMA_ASSERT(m_pipeline != nullptr && "rebuildPipeline before initial build");
     ENIGMA_ASSERT(m_shaderManager != nullptr);
 
-    // Compile both shaders BEFORE touching the existing pipeline.
+    // Compile both entry points BEFORE touching the existing pipeline.
     // Either failure keeps the previous pipeline intact and logs an
-    // error so the frame loop continues unaffected.
+    // error so the frame loop continues unaffected. Both calls target
+    // the same .hlsl file; only the entry point name differs.
     VkShaderModule vert =
-        m_shaderManager->tryCompile(m_vertPath, gfx::ShaderManager::Stage::Vertex);
+        m_shaderManager->tryCompile(m_shaderPath, gfx::ShaderManager::Stage::Vertex, "VSMain");
     if (vert == VK_NULL_HANDLE) {
-        ENIGMA_LOG_ERROR("[triangle] hot-reload: vertex compile failed, keeping previous pipeline");
+        ENIGMA_LOG_ERROR("[triangle] hot-reload: VSMain compile failed, keeping previous pipeline");
         return;
     }
     VkShaderModule frag =
-        m_shaderManager->tryCompile(m_fragPath, gfx::ShaderManager::Stage::Fragment);
+        m_shaderManager->tryCompile(m_shaderPath, gfx::ShaderManager::Stage::Fragment, "PSMain");
     if (frag == VK_NULL_HANDLE) {
-        ENIGMA_LOG_ERROR("[triangle] hot-reload: fragment compile failed, keeping previous pipeline");
+        ENIGMA_LOG_ERROR("[triangle] hot-reload: PSMain compile failed, keeping previous pipeline");
         vkDestroyShaderModule(m_device->logical(), vert, nullptr);
         return;
     }
@@ -359,7 +362,10 @@ void TrianglePass::rebuildPipeline() {
 
 void TrianglePass::registerHotReload(gfx::ShaderHotReload& reloader) {
     ENIGMA_ASSERT(m_pipeline != nullptr && "registerHotReload called before buildPipeline");
-    reloader.watchGroup({m_vertPath, m_fragPath},
+    // One-file-per-pass: single-element group. Editing the .hlsl file
+    // fires the rebuild callback once, regardless of which entry point
+    // was edited.
+    reloader.watchGroup({m_shaderPath},
                         [this]() { rebuildPipeline(); });
 }
 
