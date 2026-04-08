@@ -30,3 +30,19 @@ FetchContent_Declare(
     GIT_TAG        1732c4a74e0ca58d40e7c21c303cef7b70b75eb6
 )
 FetchContent_MakeAvailable(VulkanMemoryAllocator)
+
+# -----------------------------------------------------------------------------
+# GLFW — windowing / input library. Docs/tests/examples are suppressed via
+# cache variables set before MakeAvailable so the GLFW build scripts see them.
+# Tag: 3.4
+# -----------------------------------------------------------------------------
+set(GLFW_BUILD_DOCS     OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS    OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL        OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    glfw
+    GIT_REPOSITORY https://github.com/glfw/glfw.git
+    GIT_TAG        7b6aead9fb88b3623e3b3725ebb42670cbe4c579
+)
+FetchContent_MakeAvailable(glfw)
