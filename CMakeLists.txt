@@ -41,6 +41,7 @@ target_sources(Enigma PRIVATE
     src/engine/Engine.cpp
     src/renderer/Renderer.cpp
     src/gfx/Instance.cpp
+    src/gfx/Validation.cpp
 )
 
 target_include_directories(Enigma PRIVATE
