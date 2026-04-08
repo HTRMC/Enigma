@@ -91,11 +91,79 @@ void Renderer::drawFrame() {
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     ENIGMA_VK_CHECK(vkBeginCommandBuffer(frame.commandBuffer, &beginInfo));
 
-    // Triangle pass draw is recorded here at step 40 once layout
-    // transitions + dynamic rendering begin/end are in place. For step
-    // 39 we intentionally record nothing so the submit/present
-    // plumbing is exercised standalone.
-    (void)imageIndex;
+    VkImage     targetImage = m_swapchain->image(imageIndex);
+    VkImageView targetView  = m_swapchain->view(imageIndex);
+    const VkExtent2D extent = m_swapchain->extent();
+
+    // ---- UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL (sync2 barrier) --------
+    {
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask     = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        barrier.srcAccessMask    = 0;
+        barrier.dstStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        barrier.dstAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image            = targetImage;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        VkDependencyInfo dep{};
+        dep.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers    = &barrier;
+        vkCmdPipelineBarrier2(frame.commandBuffer, &dep);
+    }
+
+    // ---- Dynamic rendering begin --------------------------------------
+    VkRenderingAttachmentInfo colorAttach{};
+    colorAttach.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    colorAttach.imageView   = targetView;
+    colorAttach.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    colorAttach.loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    colorAttach.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
+    colorAttach.clearValue.color = {{0.02f, 0.02f, 0.05f, 1.0f}};
+
+    VkRenderingInfo renderingInfo{};
+    renderingInfo.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    renderingInfo.renderArea.offset    = {0, 0};
+    renderingInfo.renderArea.extent    = extent;
+    renderingInfo.layerCount           = 1;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachments    = &colorAttach;
+    vkCmdBeginRendering(frame.commandBuffer, &renderingInfo);
+
+    // ---- Triangle draw ------------------------------------------------
+    m_trianglePass->record(frame.commandBuffer,
+                           m_descriptorAllocator->globalSet(),
+                           extent);
+
+    // ---- Dynamic rendering end ----------------------------------------
+    vkCmdEndRendering(frame.commandBuffer);
+
+    // ---- COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC_KHR ------------------
+    {
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        barrier.srcAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.dstStageMask     = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
+        barrier.dstAccessMask    = 0;
+        barrier.oldLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.newLayout        = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image            = targetImage;
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        VkDependencyInfo dep{};
+        dep.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dep.imageMemoryBarrierCount = 1;
+        dep.pImageMemoryBarriers    = &barrier;
+        vkCmdPipelineBarrier2(frame.commandBuffer, &dep);
+    }
 
     ENIGMA_VK_CHECK(vkEndCommandBuffer(frame.commandBuffer));
 
