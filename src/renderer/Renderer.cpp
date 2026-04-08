@@ -64,11 +64,24 @@ void Renderer::drawFrame() {
     }
 
     // -------------------------------------------------------------------
-    // Acquire next swapchain image.
+    // Acquire next swapchain image. OUT_OF_DATE triggers a rebuild and
+    // skips the frame; SUBOPTIMAL is accepted and flagged to rebuild
+    // after present.
     // -------------------------------------------------------------------
     u32 imageIndex = 0;
-    ENIGMA_VK_CHECK(vkAcquireNextImageKHR(dev, m_swapchain->handle(), UINT64_MAX,
-                                          frame.imageAvailable, VK_NULL_HANDLE, &imageIndex));
+    {
+        const VkResult acquireResult = vkAcquireNextImageKHR(
+            dev, m_swapchain->handle(), UINT64_MAX,
+            frame.imageAvailable, VK_NULL_HANDLE, &imageIndex);
+        if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
+            const auto [w, h] = m_window.framebufferSize();
+            m_swapchain->recreate(w, h);
+            return;
+        }
+        if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
+            ENIGMA_VK_CHECK(acquireResult);
+        }
+    }
 
     // -------------------------------------------------------------------
     // Record. Reset the per-frame command pool, begin the command
@@ -213,7 +226,13 @@ void Renderer::drawFrame() {
     presentInfo.pSwapchains        = &swapchain;
     presentInfo.pImageIndices      = &imageIndex;
 
-    vkQueuePresentKHR(m_device->graphicsQueue(), &presentInfo);
+    const VkResult presentResult = vkQueuePresentKHR(m_device->graphicsQueue(), &presentInfo);
+    if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
+        const auto [w, h] = m_window.framebufferSize();
+        m_swapchain->recreate(w, h);
+    } else if (presentResult != VK_SUCCESS) {
+        ENIGMA_VK_CHECK(presentResult);
+    }
 
     m_frameIndex = (m_frameIndex + 1) % gfx::MAX_FRAMES_IN_FLIGHT;
 }
