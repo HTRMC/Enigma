@@ -6,10 +6,14 @@
 
 #include <shaderc/shaderc.hpp>
 
-// Keep Windows.h (pulled in transitively by dxcapi.h) from polluting
-// the global namespace with `min`/`max` macros or legacy GUI types.
+// dxcapi.h uses Win32 typedefs (UINT32, LPCWSTR, LPCVOID, IUnknown,
+// etc.) but does NOT include <Windows.h> itself — it assumes the
+// caller has already pulled it in. We lean-and-mean + NOMINMAX to
+// keep the pollution minimal but the Windows.h include is mandatory
+// on MSVC or dxcapi.h will not parse.
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
+#include <Windows.h>
 #include <dxc/dxcapi.h>
 
 #include <cstdint>
