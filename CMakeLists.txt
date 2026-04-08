@@ -34,6 +34,7 @@ add_executable(Enigma)
 target_sources(Enigma PRIVATE
     main.cpp
     src/core/Log.cpp
+    src/core/Paths.cpp
 )
 
 target_include_directories(Enigma PRIVATE
