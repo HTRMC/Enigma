@@ -1,7 +1,11 @@
 cmake_minimum_required(VERSION 3.28)
 project(Enigma LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 26)
+# C++26 requested. CMake 4.2's MSVC compiler module currently caps the
+# tracked CXX_STANDARD_LATEST at 23 (no CXX26 dialect flag), so we set the
+# tracked standard to 23 here and opt into C++26-preview features at the
+# target level below via `/std:c++latest` on MSVC and `-std=c++2c` elsewhere.
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
@@ -69,10 +73,11 @@ target_compile_definitions(Enigma PRIVATE
 # warnings do not cascade into this strict policy.
 if(MSVC)
     target_compile_options(Enigma PRIVATE
-        /W4 /WX /permissive- /Zc:preprocessor
+        /std:c++latest /W4 /WX /permissive- /Zc:preprocessor
     )
 else()
     target_compile_options(Enigma PRIVATE
+        -std=c++2c
         -Wall -Wextra -Wpedantic -Werror
         -Wno-missing-field-initializers
     )
