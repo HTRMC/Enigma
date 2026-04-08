@@ -42,6 +42,17 @@ Renderer::~Renderer() {
 }
 
 void Renderer::drawFrame() {
+    // Minimized window (0x0): block until an event arrives so the
+    // frame loop does not spin, and return without submitting any
+    // Vulkan work. Zero contribution to the validation counter.
+    {
+        const auto fb = m_window.framebufferSize();
+        if (fb.width == 0 || fb.height == 0) {
+            m_window.waitEvents();
+            return;
+        }
+    }
+
     VkDevice dev = m_device->logical();
     gfx::FrameContext& frame = m_frames->get(m_frameIndex);
 
