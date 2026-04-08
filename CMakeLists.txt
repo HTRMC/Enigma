@@ -15,6 +15,14 @@ endif()
 include(${CMAKE_SOURCE_DIR}/cmake/Dependencies.cmake)
 
 # -----------------------------------------------------------------------------
+# Vulkan SDK — provides headers, validation layer runtime, and shaderc
+# (runtime GLSL -> SPIR-V compilation via the Vulkan::shaderc_combined
+# imported target). Minimum version 1.3 is required for dynamic rendering,
+# descriptor indexing, sync2, and timeline semaphores as core features.
+# -----------------------------------------------------------------------------
+find_package(Vulkan 1.3 REQUIRED COMPONENTS shaderc_combined)
+
+# -----------------------------------------------------------------------------
 # Target
 # -----------------------------------------------------------------------------
 add_executable(Enigma)
@@ -25,6 +33,22 @@ target_sources(Enigma PRIVATE
 
 target_include_directories(Enigma PRIVATE
     ${CMAKE_SOURCE_DIR}/src
+)
+
+target_link_libraries(Enigma PRIVATE
+    volk::volk_headers
+    GPUOpen::VulkanMemoryAllocator
+    glfw
+    glm::glm
+    Vulkan::shaderc_combined
+)
+
+# volk loads Vulkan at runtime; we only need the Vulkan headers transitively
+# through volk. We do NOT link Vulkan::Vulkan directly.
+target_compile_definitions(Enigma PRIVATE
+    VK_NO_PROTOTYPES
+    $<$<PLATFORM_ID:Windows>:VK_USE_PLATFORM_WIN32_KHR>
+    GLFW_INCLUDE_NONE
 )
 
 # Warnings-as-errors scoped to the Enigma target only. Third-party headers
