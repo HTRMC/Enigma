@@ -35,6 +35,7 @@ target_sources(Enigma PRIVATE
     main.cpp
     src/core/Log.cpp
     src/core/Paths.cpp
+    src/platform/Window.cpp
 )
 
 target_include_directories(Enigma PRIVATE
