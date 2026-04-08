@@ -11,7 +11,8 @@ Pipeline::Pipeline(Device& device,
                    VkShaderModule vertShader,
                    VkShaderModule fragShader,
                    VkDescriptorSetLayout globalSetLayout,
-                   VkFormat colorAttachmentFormat)
+                   VkFormat colorAttachmentFormat,
+                   VkFormat depthAttachmentFormat)
     : m_device(&device) {
     ENIGMA_ASSERT(vertShader != VK_NULL_HANDLE);
     ENIGMA_ASSERT(fragShader != VK_NULL_HANDLE);
@@ -125,6 +126,22 @@ Pipeline::Pipeline(Device& device,
     dynamicState.pDynamicStates    = dynamicStates.data();
 
     // -------------------------------------------------------------------
+    // Depth/stencil state: enabled when the caller supplied a real
+    // depth format. The struct is always populated so we can pass it
+    // to `pDepthStencilState` unconditionally — the test/write flags
+    // are what gate depth behavior, not the pointer being non-null.
+    // -------------------------------------------------------------------
+    const bool depthEnabled = depthAttachmentFormat != VK_FORMAT_UNDEFINED;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    depthStencil.sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    depthStencil.depthTestEnable       = depthEnabled ? VK_TRUE : VK_FALSE;
+    depthStencil.depthWriteEnable      = depthEnabled ? VK_TRUE : VK_FALSE;
+    depthStencil.depthCompareOp        = VK_COMPARE_OP_LESS;
+    depthStencil.depthBoundsTestEnable = VK_FALSE;
+    depthStencil.stencilTestEnable     = VK_FALSE;
+
+    // -------------------------------------------------------------------
     // Dynamic rendering: VkPipelineRenderingCreateInfo in pNext. No
     // VkRenderPass anywhere.
     // -------------------------------------------------------------------
@@ -132,6 +149,7 @@ Pipeline::Pipeline(Device& device,
     renderingInfo.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
     renderingInfo.colorAttachmentCount    = 1;
     renderingInfo.pColorAttachmentFormats = &colorAttachmentFormat;
+    renderingInfo.depthAttachmentFormat   = depthAttachmentFormat; // UNDEFINED = no depth
 
     // -------------------------------------------------------------------
     // Assemble the graphics pipeline.
@@ -146,6 +164,7 @@ Pipeline::Pipeline(Device& device,
     pipelineInfo.pViewportState      = &viewportState;
     pipelineInfo.pRasterizationState = &rasterizer;
     pipelineInfo.pMultisampleState   = &multisample;
+    pipelineInfo.pDepthStencilState  = &depthStencil;
     pipelineInfo.pColorBlendState    = &colorBlend;
     pipelineInfo.pDynamicState       = &dynamicState;
     pipelineInfo.layout              = m_pipelineLayout;

@@ -30,11 +30,20 @@ class Device;
 // rewrite required.
 class Pipeline {
 public:
+    // `depthAttachmentFormat` defaults to `VK_FORMAT_UNDEFINED`, which
+    // disables depth testing and writing and leaves the
+    // `VkPipelineRenderingCreateInfo::depthAttachmentFormat` unset so
+    // the pipeline is legal to bind in a render pass without a depth
+    // attachment. Passing a real depth format (e.g. D32_SFLOAT) turns
+    // on `depthTestEnable` + `depthWriteEnable` with `COMPARE_OP_LESS`
+    // and wires the matching pNext format — no separate API surface
+    // for "depth-enabled" pipelines.
     Pipeline(Device& device,
              VkShaderModule vertShader,
              VkShaderModule fragShader,
              VkDescriptorSetLayout globalSetLayout,
-             VkFormat colorAttachmentFormat);
+             VkFormat colorAttachmentFormat,
+             VkFormat depthAttachmentFormat = VK_FORMAT_UNDEFINED);
     ~Pipeline();
 
     Pipeline(const Pipeline&)            = delete;
