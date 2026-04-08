@@ -147,13 +147,23 @@ VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePa
     }
 
     HRESULT compileStatus = S_OK;
-    result->GetStatus(&compileStatus);
+    const HRESULT statusHr = result->GetStatus(&compileStatus);
+    if (FAILED(statusHr)) {
+        ENIGMA_LOG_ERROR("[shader] DXC GetStatus HRESULT failed: 0x{:x} ({})",
+                         static_cast<std::uint32_t>(statusHr), sourceName);
+        result->Release();
+        return VK_NULL_HANDLE;
+    }
 
     // Errors and warnings both arrive via DXC_OUT_ERRORS. On failure
     // we log + bail; on success with a non-empty error blob, we log
     // as warning and continue.
     IDxcBlobUtf8* errors = nullptr;
-    result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr);
+    const HRESULT errorsOutHr = result->GetOutput(DXC_OUT_ERRORS, IID_PPV_ARGS(&errors), nullptr);
+    if (FAILED(errorsOutHr)) {
+        ENIGMA_LOG_WARN("[shader] DXC GetOutput(DXC_OUT_ERRORS) HRESULT failed: 0x{:x} ({})",
+                        static_cast<std::uint32_t>(errorsOutHr), sourceName);
+    }
 
     if (FAILED(compileStatus)) {
         if (errors != nullptr && errors->GetStringLength() > 0) {
@@ -178,9 +188,10 @@ VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePa
     if (errors) errors->Release();
 
     IDxcBlob* spirvBlob = nullptr;
-    result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&spirvBlob), nullptr);
-    if (spirvBlob == nullptr || spirvBlob->GetBufferSize() == 0) {
-        ENIGMA_LOG_ERROR("[shader] HLSL compile produced empty SPIR-V: {}", sourceName);
+    const HRESULT objectOutHr = result->GetOutput(DXC_OUT_OBJECT, IID_PPV_ARGS(&spirvBlob), nullptr);
+    if (FAILED(objectOutHr) || spirvBlob == nullptr || spirvBlob->GetBufferSize() == 0) {
+        ENIGMA_LOG_ERROR("[shader] HLSL compile produced empty SPIR-V: {} (GetOutput HRESULT=0x{:x})",
+                         sourceName, static_cast<std::uint32_t>(objectOutHr));
         if (spirvBlob) spirvBlob->Release();
         result->Release();
         return VK_NULL_HANDLE;
