@@ -4,44 +4,40 @@
 // Global bindless descriptor set declarations.
 //
 // Layout matches src/gfx/DescriptorAllocator.cpp exactly:
-//   binding 0: SAMPLED_IMAGE   (unused at milestone 1)
+//   binding 0: SAMPLED_IMAGE   (populated — checkerboard texture)
 //   binding 1: STORAGE_IMAGE   (unused at milestone 1)
-//   binding 2: STORAGE_BUFFER  (populated — vertex positions live here)
-//   binding 3: SAMPLER         (unused at milestone 1)
+//   binding 2: STORAGE_BUFFER  (populated — per-vertex pos+uv SSBO)
+//   binding 3: SAMPLER         (populated — default linear/repeat)
 //
-// Only binding 2 is declared here because a vertex shader cannot
-// meaningfully read from images without samplers; the other bindings
-// will be declared as needed by the shaders that consume them.
-layout(set = 0, binding = 2) readonly buffer Positions {
-    vec4 pos[];
+// Each storage-buffer entry packs a single vertex as a vec4 where
+// .xy = NDC position (math convention, +Y up — flipped on write
+// below to match Vulkan's +Y-down NDC) and .zw = UV.
+layout(set = 0, binding = 2) readonly buffer Vertices {
+    vec4 data[];
 } g_storageBuffers[];
 
 layout(push_constant) uniform PC {
     uint bufferIndex;
-    uint _pad[3];
+    uint textureIndex;
+    uint samplerIndex;
+    uint _pad;
 } pc;
 
-layout(location = 0) out vec3 v_color;
+layout(location = 0) out vec2 v_uv;
 
 void main() {
-    // Fetch vertex position from the bindless SSBO. `nonuniformEXT` is
+    // Fetch vertex from the bindless SSBO. `nonuniformEXT` is
     // technically over-cautious here (the push constant is uniform
     // across the draw) but it is the authentic idiom and proves the
     // non-uniform-indexing path is live.
-    //
-    // Vulkan NDC has +Y pointing DOWN the screen (unlike OpenGL/Math
-    // convention where +Y points up). Flip Y on write so the engine's
-    // SSBO stores math-convention coordinates and the screen sees the
-    // right-side-up triangle.
-    const vec4 p = g_storageBuffers[nonuniformEXT(pc.bufferIndex)].pos[gl_VertexIndex];
-    gl_Position = vec4(p.x, -p.y, 0.0, 1.0);
+    const vec4 vertex = g_storageBuffers[nonuniformEXT(pc.bufferIndex)].data[gl_VertexIndex];
 
-    // Per-vertex color derived from the vertex index so the three
-    // corners come out red / green / blue.
-    const vec3 palette[3] = vec3[3](
-        vec3(1.0, 0.0, 0.0),
-        vec3(0.0, 1.0, 0.0),
-        vec3(0.0, 0.0, 1.0)
-    );
-    v_color = palette[gl_VertexIndex % 3];
+    // Vulkan NDC has +Y pointing DOWN the screen. Flip Y on write so
+    // the engine stores math-convention coordinates and the screen
+    // sees the right-side-up triangle.
+    gl_Position = vec4(vertex.x, -vertex.y, 0.0, 1.0);
+
+    // UVs pass through untouched — texture() sampling in the
+    // fragment shader handles address mode and filtering.
+    v_uv = vertex.zw;
 }

@@ -23,13 +23,15 @@ namespace enigma {
 
 namespace {
 
-// NDC-space centered triangle, alpha=1 for padding. Matches the
-// coordinates documented in the plan (step 36) so the executor and
-// the plan agree byte-for-byte.
+// NDC-space centered triangle. Each vertex packs position and UV
+// into a single vec4: .xy = NDC position (math convention, +Y up),
+// .zw = UV coordinates. The shader unpacks accordingly. Padding is
+// unused now that the .zw slots carry real data.
 constexpr std::array<float, 12> kTriangleVertices = {
-    -0.5f, -0.5f, 0.0f, 1.0f,
-     0.5f, -0.5f, 0.0f, 1.0f,
-     0.0f,  0.5f, 0.0f, 1.0f,
+    // x, y, u, v
+    -0.5f, -0.5f, 0.0f, 0.0f,  // bottom-left
+     0.5f, -0.5f, 1.0f, 0.0f,  // bottom-right
+     0.0f,  0.5f, 0.5f, 1.0f,  // top-center
 };
 
 } // namespace
