@@ -83,6 +83,7 @@ target_compile_definitions(Enigma PRIVATE
     VK_NO_PROTOTYPES
     $<$<PLATFORM_ID:Windows>:VK_USE_PLATFORM_WIN32_KHR>
     GLFW_INCLUDE_NONE
+    ENIGMA_SHADER_SOURCE_DIR="${CMAKE_SOURCE_DIR}/shaders"
 )
 
 # Warnings-as-errors scoped to the Enigma target only. Third-party headers
