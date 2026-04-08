@@ -19,15 +19,16 @@ endif()
 include(${CMAKE_SOURCE_DIR}/cmake/Dependencies.cmake)
 
 # -----------------------------------------------------------------------------
-# Vulkan SDK — provides headers, validation layer runtime, shaderc (legacy
-# GLSL path via Vulkan::shaderc_combined — slated for removal once the HLSL
-# migration lands), and DXC (Vulkan::dxc_lib — the DirectX Shader Compiler
-# with SPIR-V backend enabled). Minimum version 1.3 is required for dynamic
-# rendering, descriptor indexing, sync2, and timeline semaphores as core
-# features. The `dxc` component was added to CMake's FindVulkan module in
-# 3.25, so CMake 3.28 (the minimum above) supports it natively.
+# Vulkan SDK — provides headers, validation layer runtime, and DXC (the
+# DirectX Shader Compiler with SPIR-V backend enabled, via the
+# Vulkan::dxc_lib imported target). The engine is HLSL-only after the
+# milestone 2 migration; the legacy shaderc path has been removed in full.
+# Minimum version 1.3 is required for dynamic rendering, descriptor
+# indexing, sync2, and timeline semaphores as core features. The `dxc`
+# component was added to CMake's FindVulkan module in 3.25, so CMake 3.28
+# (the minimum above) supports it natively.
 # -----------------------------------------------------------------------------
-find_package(Vulkan 1.3 REQUIRED COMPONENTS shaderc_combined dxc)
+find_package(Vulkan 1.3 REQUIRED COMPONENTS dxc)
 
 # -----------------------------------------------------------------------------
 # Target
@@ -65,7 +66,6 @@ target_link_libraries(Enigma PRIVATE
     GPUOpen::VulkanMemoryAllocator
     glfw
     glm::glm
-    Vulkan::shaderc_combined
     Vulkan::dxc_lib
 )
 
