@@ -7,8 +7,6 @@
 #include <filesystem>
 #include <string>
 
-namespace shaderc { class Compiler; class CompileOptions; }
-
 // Forward declarations for DXC's COM interfaces. The full dxcapi.h
 // pulls in Windows.h and the whole COM machinery, so we keep it out
 // of this header and include it only in ShaderManager.cpp.
@@ -21,13 +19,13 @@ class Device;
 
 // ShaderManager
 // =============
-// Owns the shaderc compiler used to turn GLSL source files into
-// `VkShaderModule` handles at runtime. The plan rejected offline
-// glslc + SPIR-V build artifacts in favor of runtime compilation so
-// future hot-reload can be added without a build-system change.
+// Owns DXC instances used to turn HLSL source files into
+// `VkShaderModule` handles at runtime. Runtime compilation (rather
+// than offline `dxc` + SPIR-V artifacts) keeps the shader hot
+// reload path a single `compile()` call away from any caller.
 //
-// Stages supported: vertex, fragment. Compute and other stages can be
-// added by extending the `Stage` enum without touching callers.
+// Stages supported: vertex, fragment. Compute and other stages can
+// be added by extending the `Stage` enum without touching callers.
 //
 // Second-caller design intent (Principle 6): any new shader pair
 // (second pipeline, compute dispatch, post-process effect) is a
@@ -47,51 +45,36 @@ public:
     ShaderManager(ShaderManager&&)                 = delete;
     ShaderManager& operator=(ShaderManager&&)      = delete;
 
-    // Read a shader source file from disk, compile to SPIR-V, and
-    // create a VkShaderModule. Caller owns the returned handle and
-    // must `vkDestroyShaderModule` it (typically once the pipeline
-    // that consumes it has been created and the source modules are
-    // no longer needed, per the standard Vulkan idiom).
+    // Read an HLSL source file from disk, compile to SPIR-V via DXC,
+    // and create a VkShaderModule. Caller owns the returned handle
+    // and must `vkDestroyShaderModule` it (typically once the
+    // pipeline that consumes it has been created and the source
+    // modules are no longer needed, per the standard Vulkan idiom).
     //
-    // `entryPoint` defaults to "main" which matches the GLSL idiom
-    // (every GLSL shader has a single `void main()`). HLSL shaders
-    // name their entry points (`VSMain`, `PSMain`, etc.) so the HLSL
-    // path requires an explicit override.
+    // `entryPoint` names the HLSL entry function to compile — one
+    // file can contain multiple entry points (`VSMain`, `PSMain`,
+    // `CSMain`, etc.) so the name is always explicit. There is no
+    // default: HLSL convention is explicit naming, and forcing the
+    // caller to say "VSMain" prevents copy-paste bugs where the
+    // wrong stage silently compiles the wrong function.
     VkShaderModule compile(const std::filesystem::path& absolutePath,
                            Stage stage,
-                           const std::string& entryPoint = "main");
+                           const std::string& entryPoint);
 
     // Non-fatal variant of compile(). Returns VK_NULL_HANDLE on any
     // failure (missing file, syntax error, vkCreateShaderModule
-    // error) instead of asserting. Used by hot reload so a typo in a
-    // shader source does not crash the engine — the caller keeps its
-    // previous module/pipeline intact and the developer fixes and
-    // saves again.
+    // error) instead of asserting. Used by hot reload so a typo in
+    // a shader source does not crash the engine — the caller keeps
+    // its previous module/pipeline intact and the developer fixes
+    // and saves again.
     VkShaderModule tryCompile(const std::filesystem::path& absolutePath,
                               Stage stage,
-                              const std::string& entryPoint = "main");
+                              const std::string& entryPoint);
 
 private:
-    // Non-fatal HLSL compile path via DXC. Dispatched to from
-    // tryCompile() when the file extension is `.hlsl`. Kept as a
-    // private member function (rather than a free helper) so it
-    // can reach `m_dxcUtils` / `m_dxcCompiler` without plumbing.
-    VkShaderModule tryCompileHLSL(const std::filesystem::path& absolutePath,
-                                  Stage stage,
-                                  const std::string& entryPoint);
-
-    // Non-fatal GLSL compile path via shaderc. Used for `.vert` /
-    // `.frag` / `.glsl` extensions. Will be removed once the HLSL
-    // migration is complete.
-    VkShaderModule tryCompileGLSL(const std::filesystem::path& absolutePath,
-                                  Stage stage,
-                                  const std::string& entryPoint);
-
-    Device*                  m_device      = nullptr;
-    shaderc::Compiler*       m_compiler    = nullptr;
-    shaderc::CompileOptions* m_options     = nullptr;
-    IDxcUtils*               m_dxcUtils    = nullptr;
-    IDxcCompiler3*           m_dxcCompiler = nullptr;
+    Device*        m_device      = nullptr;
+    IDxcUtils*     m_dxcUtils    = nullptr;
+    IDxcCompiler3* m_dxcCompiler = nullptr;
 };
 
 } // namespace enigma::gfx

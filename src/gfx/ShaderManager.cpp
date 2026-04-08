@@ -4,8 +4,6 @@
 #include "core/Log.h"
 #include "gfx/Device.h"
 
-#include <shaderc/shaderc.hpp>
-
 // dxcapi.h uses Win32 typedefs (UINT32, LPCWSTR, LPCVOID) AND COM
 // types (IUnknown::Release, IID_PPV_ARGS) without including
 // <Windows.h> itself. WIN32_LEAN_AND_MEAN is deliberately NOT set
@@ -27,15 +25,6 @@
 namespace enigma::gfx {
 
 namespace {
-
-shaderc_shader_kind toShaderKind(ShaderManager::Stage stage) {
-    switch (stage) {
-        case ShaderManager::Stage::Vertex:   return shaderc_vertex_shader;
-        case ShaderManager::Stage::Fragment: return shaderc_fragment_shader;
-    }
-    ENIGMA_ASSERT(false && "unknown shader stage");
-    return shaderc_vertex_shader;
-}
 
 // Non-asserting source reader. Returns an empty string on any error
 // so the caller (tryCompile) can decide whether failure is fatal or
@@ -81,20 +70,7 @@ const wchar_t* dxcProfile(ShaderManager::Stage stage) {
 } // namespace
 
 ShaderManager::ShaderManager(Device& device)
-    : m_device(&device),
-      m_compiler(new shaderc::Compiler()),
-      m_options(new shaderc::CompileOptions()) {
-
-    m_options->SetTargetEnvironment(shaderc_target_env_vulkan,
-                                    shaderc_env_version_vulkan_1_3);
-    m_options->SetTargetSpirv(shaderc_spirv_version_1_6);
-#if ENIGMA_DEBUG
-    m_options->SetOptimizationLevel(shaderc_optimization_level_zero);
-    m_options->SetGenerateDebugInfo();
-#else
-    m_options->SetOptimizationLevel(shaderc_optimization_level_performance);
-#endif
-
+    : m_device(&device) {
     // DXC instances. `DxcCreateInstance` is a standalone factory and
     // does NOT require `CoInitialize` — see Microsoft DXC docs. Both
     // objects are thread-affine to the render thread in this engine,
@@ -108,68 +84,11 @@ ShaderManager::ShaderManager(Device& device)
 ShaderManager::~ShaderManager() {
     if (m_dxcCompiler) m_dxcCompiler->Release();
     if (m_dxcUtils)    m_dxcUtils->Release();
-    delete m_options;
-    delete m_compiler;
 }
 
 VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePath,
                                          Stage stage,
                                          const std::string& entryPoint) {
-    // Extension-based dispatch: `.hlsl` goes through DXC, everything
-    // else (`.vert`, `.frag`, `.glsl`) goes through shaderc. The HLSL
-    // migration will eventually delete the shaderc path; extension
-    // dispatch keeps both compilers coexisting during the transition.
-    const std::string ext = absolutePath.extension().string();
-    if (ext == ".hlsl" || ext == ".HLSL") {
-        return tryCompileHLSL(absolutePath, stage, entryPoint);
-    }
-    return tryCompileGLSL(absolutePath, stage, entryPoint);
-}
-
-VkShaderModule ShaderManager::tryCompileGLSL(const std::filesystem::path& absolutePath,
-                                             Stage stage,
-                                             const std::string& entryPoint) {
-    const std::string source = readTextFileSafe(absolutePath);
-    if (source.empty()) {
-        ENIGMA_LOG_ERROR("[shader] failed to open or empty source: {}", absolutePath.string());
-        return VK_NULL_HANDLE;
-    }
-
-    const std::string sourceName = absolutePath.filename().string();
-    const shaderc_shader_kind kind = toShaderKind(stage);
-
-    shaderc::SpvCompilationResult result =
-        m_compiler->CompileGlslToSpv(source, kind, sourceName.c_str(),
-                                     entryPoint.c_str(), *m_options);
-
-    if (result.GetCompilationStatus() != shaderc_compilation_status_success) {
-        ENIGMA_LOG_ERROR("[shader] compile failed: {}\n{}",
-                         sourceName, result.GetErrorMessage());
-        return VK_NULL_HANDLE;
-    }
-
-    const std::vector<u32> spirv(result.cbegin(), result.cend());
-
-    VkShaderModuleCreateInfo info{};
-    info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    info.codeSize = spirv.size() * sizeof(u32);
-    info.pCode    = spirv.data();
-
-    VkShaderModule module = VK_NULL_HANDLE;
-    const VkResult vr = vkCreateShaderModule(m_device->logical(), &info, nullptr, &module);
-    if (vr != VK_SUCCESS) {
-        ENIGMA_LOG_ERROR("[shader] vkCreateShaderModule failed: {} (VkResult={})",
-                         sourceName, static_cast<int>(vr));
-        return VK_NULL_HANDLE;
-    }
-
-    ENIGMA_LOG_INFO("[shader] compiled {} ({} words, glsl)", sourceName, spirv.size());
-    return module;
-}
-
-VkShaderModule ShaderManager::tryCompileHLSL(const std::filesystem::path& absolutePath,
-                                             Stage stage,
-                                             const std::string& entryPoint) {
     const std::string source = readTextFileSafe(absolutePath);
     if (source.empty()) {
         ENIGMA_LOG_ERROR("[shader] failed to open or empty source: {}", absolutePath.string());
@@ -284,7 +203,7 @@ VkShaderModule ShaderManager::tryCompileHLSL(const std::filesystem::path& absolu
         return VK_NULL_HANDLE;
     }
 
-    ENIGMA_LOG_INFO("[shader] compiled {} ({} bytes SPIR-V, hlsl, entry={})",
+    ENIGMA_LOG_INFO("[shader] compiled {} ({} bytes SPIR-V, entry={})",
                     sourceName, info.codeSize, entryPoint);
     return module;
 }
