@@ -75,9 +75,19 @@ Allocator::~Allocator() {
         return;
     }
 
-    // Leak assertion arrives at step 43 — this destructor only tears down
-    // the allocator here. When step 43 lands it inserts the
-    // vmaCalculateStatistics check immediately above the destroy call.
+    // VMA leak gate (AC13). Inspect live allocations before the
+    // allocator is destroyed; log both counts and assert that no live
+    // allocations remain. `blockCount` is INTENTIONALLY not asserted —
+    // VMA retains empty blocks in its block pool and blockCount > 0
+    // with allocationCount == 0 is documented as not-a-leak (see plan
+    // risk R6-blockcount).
+    VmaTotalStatistics stats{};
+    vmaCalculateStatistics(m_allocator, &stats);
+    ENIGMA_LOG_INFO("[vma] shutdown allocationCount = {} blockCount = {}",
+                    stats.total.statistics.allocationCount,
+                    stats.total.statistics.blockCount);
+    ENIGMA_ASSERT(stats.total.statistics.allocationCount == 0);
+
     vmaDestroyAllocator(m_allocator);
     m_allocator = nullptr;
 }
