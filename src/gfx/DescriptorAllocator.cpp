@@ -187,22 +187,61 @@ u32 DescriptorAllocator::registerStorageBuffer(VkBuffer buffer, VkDeviceSize siz
     return slot;
 }
 
-// Milestone-2 stubs. Pinning the API shape now so adding a texture later
-// is a method body change in this file, not a header edit propagating
-// through every caller.
-u32 DescriptorAllocator::registerSampledImage(VkImageView, VkImageLayout) {
-    ENIGMA_ASSERT(false && "registerSampledImage: not implemented until milestone 2");
-    return UINT32_MAX;
+// Milestone-2 implementations. Pattern mirrors registerStorageBuffer
+// above: descriptor image/buffer info + single vkUpdateDescriptorSets
+// write per call. UPDATE_AFTER_BIND + PARTIALLY_BOUND semantics make
+// these legal at any time, including after the set has been bound to
+// a command buffer.
+u32 DescriptorAllocator::registerSampledImage(VkImageView view, VkImageLayout layout) {
+    ENIGMA_ASSERT(m_nextSampledImage < m_caps.sampledImages);
+    const u32 slot = m_nextSampledImage++;
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.sampler     = VK_NULL_HANDLE;
+    imageInfo.imageView   = view;
+    imageInfo.imageLayout = layout;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = m_globalSet;
+    write.dstBinding      = kBindingSampledImage;
+    write.dstArrayElement = slot;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.pImageInfo      = &imageInfo;
+
+    vkUpdateDescriptorSets(m_device->logical(), 1, &write, 0, nullptr);
+    return slot;
 }
 
+// Remaining stub: storage image lands at a later milestone 2 step
+// (compute pass writing into a procedural storage image). Kept
+// asserting so any premature caller lights up immediately.
 u32 DescriptorAllocator::registerStorageImage(VkImageView) {
-    ENIGMA_ASSERT(false && "registerStorageImage: not implemented until milestone 2");
+    ENIGMA_ASSERT(false && "registerStorageImage: not implemented yet");
     return UINT32_MAX;
 }
 
-u32 DescriptorAllocator::registerSampler(VkSampler) {
-    ENIGMA_ASSERT(false && "registerSampler: not implemented until milestone 2");
-    return UINT32_MAX;
+u32 DescriptorAllocator::registerSampler(VkSampler sampler) {
+    ENIGMA_ASSERT(m_nextSampler < m_caps.samplers);
+    const u32 slot = m_nextSampler++;
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.sampler     = sampler;
+    imageInfo.imageView   = VK_NULL_HANDLE;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = m_globalSet;
+    write.dstBinding      = kBindingSampler;
+    write.dstArrayElement = slot;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
+    write.pImageInfo      = &imageInfo;
+
+    vkUpdateDescriptorSets(m_device->logical(), 1, &write, 0, nullptr);
+    return slot;
 }
 
 } // namespace enigma::gfx
