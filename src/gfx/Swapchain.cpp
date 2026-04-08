@@ -100,11 +100,31 @@ void Swapchain::create(u32 width, u32 height) {
     ENIGMA_VK_CHECK(vkCreateSwapchainKHR(m_device->logical(), &info, nullptr, &m_swapchain));
     ENIGMA_ASSERT(m_swapchain != VK_NULL_HANDLE);
 
-    // Retrieve the swapchain images. Views arrive at step 27.
+    // Retrieve the swapchain images and build a view per image for use
+    // as a color attachment under dynamic rendering.
     u32 actualImageCount = 0;
     vkGetSwapchainImagesKHR(m_device->logical(), m_swapchain, &actualImageCount, nullptr);
     m_images.resize(actualImageCount);
     vkGetSwapchainImagesKHR(m_device->logical(), m_swapchain, &actualImageCount, m_images.data());
+
+    m_views.resize(actualImageCount, VK_NULL_HANDLE);
+    for (u32 i = 0; i < actualImageCount; ++i) {
+        VkImageViewCreateInfo vi{};
+        vi.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        vi.image                           = m_images[i];
+        vi.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+        vi.format                          = m_format;
+        vi.components.r                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+        vi.components.g                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+        vi.components.b                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+        vi.components.a                    = VK_COMPONENT_SWIZZLE_IDENTITY;
+        vi.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+        vi.subresourceRange.baseMipLevel   = 0;
+        vi.subresourceRange.levelCount     = 1;
+        vi.subresourceRange.baseArrayLayer = 0;
+        vi.subresourceRange.layerCount     = 1;
+        ENIGMA_VK_CHECK(vkCreateImageView(m_device->logical(), &vi, nullptr, &m_views[i]));
+    }
 
     ENIGMA_LOG_INFO("[gfx] swapchain created ({}x{}, {} images, format {})",
                     m_extent.width, m_extent.height, actualImageCount,
