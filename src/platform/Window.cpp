@@ -57,6 +57,14 @@ Window::Window(u32 width, u32 height, const char* title) {
         ENIGMA_ASSERT(false);
         return;
     }
+
+    glfwSetWindowUserPointer(m_handle, this);
+    glfwSetFramebufferSizeCallback(m_handle, [](GLFWwindow* w, int, int) {
+        auto* self = static_cast<Window*>(glfwGetWindowUserPointer(w));
+        if (self != nullptr) {
+            self->m_resized = true;
+        }
+    });
 }
 
 Window::~Window() {
@@ -83,33 +91,34 @@ Window& Window::operator=(Window&& other) noexcept {
     return *this;
 }
 
-// --- Stubs that later steps (15) fill in -----------------------------------
-
 void Window::pollEvents() {
-    // Implemented in step 15.
+    glfwPollEvents();
 }
 
 bool Window::shouldClose() const {
-    // Implemented in step 15.
-    return true;
+    return m_handle != nullptr && glfwWindowShouldClose(m_handle) == GLFW_TRUE;
 }
 
 Window::Extent Window::framebufferSize() const {
-    // Implemented in step 15.
-    return {0, 0};
+    if (m_handle == nullptr) {
+        return {0, 0};
+    }
+    int w = 0;
+    int h = 0;
+    glfwGetFramebufferSize(m_handle, &w, &h);
+    return {static_cast<u32>(w), static_cast<u32>(h)};
 }
 
 bool Window::wasResized() const {
-    // Implemented in step 15.
-    return false;
+    return m_resized;
 }
 
 void Window::clearResized() {
-    // Implemented in step 15.
+    m_resized = false;
 }
 
 void Window::waitEvents() const {
-    // Implemented in step 15.
+    glfwWaitEvents();
 }
 
 } // namespace enigma
