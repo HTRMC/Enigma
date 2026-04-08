@@ -121,3 +121,26 @@ add_custom_command(TARGET Enigma POST_BUILD
             $<TARGET_FILE_DIR:Enigma>/shaders
     COMMENT "Copying shaders next to Enigma executable"
 )
+
+# -----------------------------------------------------------------------------
+# Vulkan SDK dxcompiler.dll copy: Windows has upwards of 20 copies of
+# dxcompiler.dll floating around (Windows 10/11 SDK, Visual Studio, Epic,
+# Unity, Chrome/Edge/Firefox, Steam, RenderDoc, ...). All of them except
+# the Vulkan SDK's are Microsoft's D3D-only build WITHOUT SPIR-V codegen —
+# they emit `SPIR-V CodeGen not available. Please recompile with
+# -DENABLE_SPIRV_CODEGEN=ON.` when called with `-spirv`. Windows' DLL
+# search order picks whichever one it finds first on PATH, so without an
+# explicit copy the Enigma binary is at the mercy of the dev environment's
+# PATH and loads whatever random D3D-only version wins the race.
+#
+# The fix is to copy the Vulkan-SPIR-V-enabled dxcompiler.dll next to the
+# exe before launch — Windows' DLL search order puts the application
+# directory FIRST, ahead of System32 / PATH / everything else. Our version
+# is then guaranteed to win regardless of dev-machine pollution.
+# -----------------------------------------------------------------------------
+add_custom_command(TARGET Enigma POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$ENV{VULKAN_SDK}/Bin/dxcompiler.dll"
+            "$<TARGET_FILE_DIR:Enigma>/dxcompiler.dll"
+    COMMENT "Copying Vulkan SDK dxcompiler.dll next to Enigma executable (SPIR-V-enabled)"
+)
