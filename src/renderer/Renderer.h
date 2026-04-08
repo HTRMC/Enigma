@@ -6,6 +6,7 @@
 #include "gfx/Device.h"
 #include "gfx/FrameContext.h"
 #include "gfx/Instance.h"
+#include "gfx/ShaderHotReload.h"
 #include "gfx/ShaderManager.h"
 #include "gfx/Swapchain.h"
 #include "renderer/TrianglePass.h"
@@ -43,6 +44,7 @@ private:
     std::unique_ptr<gfx::FrameContextSet>      m_frames;
     std::unique_ptr<gfx::DescriptorAllocator>  m_descriptorAllocator;
     std::unique_ptr<gfx::ShaderManager>        m_shaderManager;
+    std::unique_ptr<gfx::ShaderHotReload>      m_shaderHotReload;
     std::unique_ptr<TrianglePass>              m_trianglePass;
 
     u32 m_frameIndex = 0;

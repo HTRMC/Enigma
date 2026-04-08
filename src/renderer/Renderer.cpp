@@ -7,6 +7,7 @@
 #include "gfx/Device.h"
 #include "gfx/FrameContext.h"
 #include "gfx/Instance.h"
+#include "gfx/ShaderHotReload.h"
 #include "gfx/ShaderManager.h"
 #include "gfx/Swapchain.h"
 #include "gfx/Validation.h"
@@ -26,11 +27,13 @@ Renderer::Renderer(Window& window)
     , m_frames(std::make_unique<gfx::FrameContextSet>(*m_device))
     , m_descriptorAllocator(std::make_unique<gfx::DescriptorAllocator>(*m_device))
     , m_shaderManager(std::make_unique<gfx::ShaderManager>(*m_device))
+    , m_shaderHotReload(std::make_unique<gfx::ShaderHotReload>())
     , m_trianglePass(std::make_unique<TrianglePass>(*m_device, *m_allocator, *m_descriptorAllocator)) {
 
     m_trianglePass->buildPipeline(*m_shaderManager,
                                   m_descriptorAllocator->layout(),
                                   m_swapchain->format());
+    m_trianglePass->registerHotReload(*m_shaderHotReload);
 
     ENIGMA_LOG_INFO("[renderer] constructed");
 }
@@ -65,6 +68,13 @@ void Renderer::drawFrame() {
             return;
         }
     }
+
+    // Poll shader source files for edits. On a detected change the
+    // watcher invokes TrianglePass::rebuildPipeline() which does its
+    // own vkDeviceWaitIdle before swapping the pipeline — safe to
+    // run before frame submission, and cheap on the common no-change
+    // path (two `last_write_time` stats per watched file).
+    m_shaderHotReload->poll();
 
     VkDevice dev = m_device->logical();
     gfx::FrameContext& frame = m_frames->get(m_frameIndex);
