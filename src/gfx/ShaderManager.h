@@ -9,6 +9,12 @@
 
 namespace shaderc { class Compiler; class CompileOptions; }
 
+// Forward declarations for DXC's COM interfaces. The full dxcapi.h
+// pulls in Windows.h and the whole COM machinery, so we keep it out
+// of this header and include it only in ShaderManager.cpp.
+struct IDxcUtils;
+struct IDxcCompiler3;
+
 namespace enigma::gfx {
 
 class Device;
@@ -66,9 +72,26 @@ public:
                               const std::string& entryPoint = "main");
 
 private:
-    Device*                  m_device   = nullptr;
-    shaderc::Compiler*       m_compiler = nullptr;
-    shaderc::CompileOptions* m_options  = nullptr;
+    // Non-fatal HLSL compile path via DXC. Dispatched to from
+    // tryCompile() when the file extension is `.hlsl`. Kept as a
+    // private member function (rather than a free helper) so it
+    // can reach `m_dxcUtils` / `m_dxcCompiler` without plumbing.
+    VkShaderModule tryCompileHLSL(const std::filesystem::path& absolutePath,
+                                  Stage stage,
+                                  const std::string& entryPoint);
+
+    // Non-fatal GLSL compile path via shaderc. Used for `.vert` /
+    // `.frag` / `.glsl` extensions. Will be removed once the HLSL
+    // migration is complete.
+    VkShaderModule tryCompileGLSL(const std::filesystem::path& absolutePath,
+                                  Stage stage,
+                                  const std::string& entryPoint);
+
+    Device*                  m_device      = nullptr;
+    shaderc::Compiler*       m_compiler    = nullptr;
+    shaderc::CompileOptions* m_options     = nullptr;
+    IDxcUtils*               m_dxcUtils    = nullptr;
+    IDxcCompiler3*           m_dxcCompiler = nullptr;
 };
 
 } // namespace enigma::gfx
