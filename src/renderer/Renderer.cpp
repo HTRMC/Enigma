@@ -32,7 +32,8 @@ Renderer::Renderer(Window& window)
 
     m_trianglePass->buildPipeline(*m_shaderManager,
                                   m_descriptorAllocator->layout(),
-                                  m_swapchain->format());
+                                  m_swapchain->format(),
+                                  m_swapchain->depthFormat());
     m_trianglePass->registerHotReload(*m_shaderHotReload);
 
     ENIGMA_LOG_INFO("[renderer] constructed");
@@ -142,27 +143,52 @@ void Renderer::drawFrame() {
 
     VkImage     targetImage = m_swapchain->image(imageIndex);
     VkImageView targetView  = m_swapchain->view(imageIndex);
+    VkImage     depthImage  = m_swapchain->depthImage();
+    VkImageView depthView   = m_swapchain->depthView();
     const VkExtent2D extent = m_swapchain->extent();
 
-    // ---- UNDEFINED -> COLOR_ATTACHMENT_OPTIMAL (sync2 barrier) --------
+    // ---- UNDEFINED -> COLOR/DEPTH_ATTACHMENT_OPTIMAL (sync2 barriers) --
+    // Batched into a single VkDependencyInfo: one barrier for the
+    // swapchain color image and one for the shared depth image. Both
+    // use UNDEFINED as oldLayout so previous contents are explicitly
+    // discarded — matches the LOAD_OP_CLEAR we issue below for each.
     {
-        VkImageMemoryBarrier2 barrier{};
-        barrier.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        barrier.srcStageMask     = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
-        barrier.srcAccessMask    = 0;
-        barrier.dstStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-        barrier.dstAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-        barrier.oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED;
-        barrier.newLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image            = targetImage;
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        const VkImageMemoryBarrier2 barriers[2] = {
+            {
+                VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                nullptr,
+                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                0,
+                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_QUEUE_FAMILY_IGNORED,
+                VK_QUEUE_FAMILY_IGNORED,
+                targetImage,
+                {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+            },
+            {
+                VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                nullptr,
+                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                0,
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                    VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                VK_QUEUE_FAMILY_IGNORED,
+                VK_QUEUE_FAMILY_IGNORED,
+                depthImage,
+                {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1},
+            },
+        };
 
         VkDependencyInfo dep{};
         dep.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        dep.imageMemoryBarrierCount = 1;
-        dep.pImageMemoryBarriers    = &barrier;
+        dep.imageMemoryBarrierCount = 2;
+        dep.pImageMemoryBarriers    = barriers;
         vkCmdPipelineBarrier2(frame.commandBuffer, &dep);
     }
 
@@ -175,6 +201,14 @@ void Renderer::drawFrame() {
     colorAttach.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
     colorAttach.clearValue.color = {{0.02f, 0.02f, 0.05f, 1.0f}};
 
+    VkRenderingAttachmentInfo depthAttach{};
+    depthAttach.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    depthAttach.imageView   = depthView;
+    depthAttach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    depthAttach.loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttach.storeOp     = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    depthAttach.clearValue.depthStencil = {1.0f, 0};
+
     VkRenderingInfo renderingInfo{};
     renderingInfo.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
     renderingInfo.renderArea.offset    = {0, 0};
@@ -182,6 +216,7 @@ void Renderer::drawFrame() {
     renderingInfo.layerCount           = 1;
     renderingInfo.colorAttachmentCount = 1;
     renderingInfo.pColorAttachments    = &colorAttach;
+    renderingInfo.pDepthAttachment     = &depthAttach;
     vkCmdBeginRendering(frame.commandBuffer, &renderingInfo);
 
     // ---- Triangle draw ------------------------------------------------

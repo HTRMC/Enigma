@@ -78,7 +78,8 @@ TrianglePass::~TrianglePass() {
 
 void TrianglePass::buildPipeline(gfx::ShaderManager& shaderManager,
                                  VkDescriptorSetLayout globalSetLayout,
-                                 VkFormat colorAttachmentFormat) {
+                                 VkFormat colorAttachmentFormat,
+                                 VkFormat depthAttachmentFormat) {
     ENIGMA_ASSERT(m_pipeline == nullptr && "TrianglePass::buildPipeline called twice");
 
     // Capture everything rebuildPipeline() needs so a hot-reload
@@ -91,13 +92,15 @@ void TrianglePass::buildPipeline(gfx::ShaderManager& shaderManager,
     m_shaderManager   = &shaderManager;
     m_globalSetLayout = globalSetLayout;
     m_colorFormat     = colorAttachmentFormat;
+    m_depthFormat     = depthAttachmentFormat;
     m_vertPath        = Paths::shaderSourceDir() / "triangle.vert";
     m_fragPath        = Paths::shaderSourceDir() / "triangle.frag";
 
     VkShaderModule vert = shaderManager.compile(m_vertPath, gfx::ShaderManager::Stage::Vertex);
     VkShaderModule frag = shaderManager.compile(m_fragPath, gfx::ShaderManager::Stage::Fragment);
 
-    m_pipeline = new gfx::Pipeline(*m_device, vert, frag, globalSetLayout, colorAttachmentFormat);
+    m_pipeline = new gfx::Pipeline(*m_device, vert, frag, globalSetLayout,
+                                   colorAttachmentFormat, depthAttachmentFormat);
 
     // Shader modules can be destroyed as soon as the pipeline is built.
     vkDestroyShaderModule(m_device->logical(), vert, nullptr);
@@ -131,7 +134,8 @@ void TrianglePass::rebuildPipeline() {
     vkDeviceWaitIdle(m_device->logical());
 
     delete m_pipeline;
-    m_pipeline = new gfx::Pipeline(*m_device, vert, frag, m_globalSetLayout, m_colorFormat);
+    m_pipeline = new gfx::Pipeline(*m_device, vert, frag, m_globalSetLayout,
+                                   m_colorFormat, m_depthFormat);
 
     vkDestroyShaderModule(m_device->logical(), vert, nullptr);
     vkDestroyShaderModule(m_device->logical(), frag, nullptr);

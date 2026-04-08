@@ -42,12 +42,15 @@ public:
     TrianglePass(TrianglePass&&)                 = delete;
     TrianglePass& operator=(TrianglePass&&)      = delete;
 
-    // Second-phase init: build the pipeline once the swapchain format
-    // is known (step 37). Kept separate from the constructor so the
-    // SSBO can land at step 36 without requiring the pipeline.
+    // Second-phase init: build the pipeline once the swapchain color
+    // and depth formats are known (step 37). Kept separate from the
+    // constructor so the SSBO can land at step 36 without requiring
+    // the pipeline. `depthAttachmentFormat` flows straight into the
+    // Pipeline; passing `VK_FORMAT_UNDEFINED` disables depth testing.
     void buildPipeline(gfx::ShaderManager& shaderManager,
                        VkDescriptorSetLayout globalSetLayout,
-                       VkFormat colorAttachmentFormat);
+                       VkFormat colorAttachmentFormat,
+                       VkFormat depthAttachmentFormat);
 
     // Record the draw into `cmd`. Caller is responsible for vkCmdBeginRendering
     // / vkCmdEndRendering and image layout transitions.
@@ -85,6 +88,7 @@ private:
     gfx::ShaderManager*       m_shaderManager   = nullptr;
     VkDescriptorSetLayout     m_globalSetLayout = VK_NULL_HANDLE;
     VkFormat                  m_colorFormat     = VK_FORMAT_UNDEFINED;
+    VkFormat                  m_depthFormat     = VK_FORMAT_UNDEFINED;
     std::filesystem::path     m_vertPath;
     std::filesystem::path     m_fragPath;
 };
