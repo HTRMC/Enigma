@@ -41,4 +41,15 @@ std::filesystem::path shaderDir() {
     return exe.parent_path() / "shaders";
 }
 
+std::filesystem::path shaderSourceDir() {
+#ifdef ENIGMA_SHADER_SOURCE_DIR
+    std::filesystem::path source = ENIGMA_SHADER_SOURCE_DIR;
+    std::error_code ec;
+    if (std::filesystem::is_directory(source, ec)) {
+        return source;
+    }
+#endif
+    return shaderDir();
+}
+
 } // namespace enigma::Paths

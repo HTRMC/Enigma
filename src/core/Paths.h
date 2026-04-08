@@ -17,4 +17,13 @@ const std::filesystem::path& executablePath();
 // on every build via the POST_BUILD custom command in CMakeLists.txt.
 std::filesystem::path shaderDir();
 
+// <source tree>/shaders — the directory where shader sources live in
+// the repository, baked in at build time via the
+// ENIGMA_SHADER_SOURCE_DIR macro from CMakeLists.txt. Hot reload uses
+// this so edits to `shaders/*.{vert,frag}` in the source tree are
+// picked up without a rebuild. Returns `shaderDir()` as a fallback if
+// the source directory is not present on disk (e.g. the executable
+// was moved to a machine without the source tree).
+std::filesystem::path shaderSourceDir();
+
 } // namespace enigma::Paths
