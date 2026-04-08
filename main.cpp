@@ -1,6 +1,6 @@
-#include <iostream>
+#include "engine/Application.h"
 
-int main() {
-    std::cout << "Hello, World!" << std::endl;
-    return 0;
+int main(int argc, char** argv) {
+    enigma::Application app;
+    return app.run(argc, argv);
 }
