@@ -4,6 +4,7 @@
 #include "gfx/Allocator.h"
 #include "gfx/Device.h"
 #include "gfx/Instance.h"
+#include "gfx/Swapchain.h"
 
 #include <memory>
 
@@ -32,6 +33,7 @@ private:
     std::unique_ptr<gfx::Instance>  m_instance;
     std::unique_ptr<gfx::Device>    m_device;
     std::unique_ptr<gfx::Allocator> m_allocator;
+    std::unique_ptr<gfx::Swapchain> m_swapchain;
 };
 
 } // namespace enigma
