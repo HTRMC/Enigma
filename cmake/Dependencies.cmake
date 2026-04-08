@@ -46,3 +46,14 @@ FetchContent_Declare(
     GIT_TAG        7b6aead9fb88b3623e3b3725ebb42670cbe4c579
 )
 FetchContent_MakeAvailable(glfw)
+
+# -----------------------------------------------------------------------------
+# glm — header-only math library.
+# Tag: 1.0.1
+# -----------------------------------------------------------------------------
+FetchContent_Declare(
+    glm
+    GIT_REPOSITORY https://github.com/g-truc/glm.git
+    GIT_TAG        0af55ccecd98d4e5a8d1fad7de25ba429d60e863
+)
+FetchContent_MakeAvailable(glm)
