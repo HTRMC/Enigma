@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Math.h"
 #include "core/Types.h"
 
 #include <volk.h>
@@ -45,7 +46,9 @@ public:
                 VkDescriptorSet globalSet,
                 VkExtent2D extent,
                 const Scene& scene,
-                u32 cameraSlot);
+                u32 cameraSlot,
+                vec4 lightDirIntensity,
+                vec4 lightColor);
 
     void registerHotReload(gfx::ShaderHotReload& reloader);
 

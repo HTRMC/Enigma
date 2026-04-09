@@ -27,6 +27,11 @@ void Scene::destroy(gfx::Device& device, gfx::Allocator& allocator) {
     }
     ownedImages.clear();
 
+    if (materialBuffer.buffer != VK_NULL_HANDLE) {
+        vmaDestroyBuffer(allocator.handle(), materialBuffer.buffer, materialBuffer.allocation);
+        materialBuffer = {};
+    }
+
     for (auto& buf : ownedBuffers) {
         if (buf.buffer != VK_NULL_HANDLE) {
             vmaDestroyBuffer(allocator.handle(), buf.buffer, buf.allocation);

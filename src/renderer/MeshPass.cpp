@@ -14,15 +14,16 @@ namespace enigma {
 
 // Push constant layout — must match mesh.hlsl PushBlock exactly.
 struct MeshPushBlock {
-    mat4 model;
-    vec4 baseColorFactor;
-    u32  vertexSlot;
-    u32  cameraSlot;
-    u32  textureSlot;
-    u32  samplerSlot;
-};
+    mat4 model;               // 64 bytes
+    u32  vertexSlot;          //  4
+    u32  cameraSlot;          //  4
+    u32  materialBufferSlot;  //  4
+    u32  materialIndex;       //  4
+    vec4 lightDirIntensity;   // 16  (xyz=direction, w=intensity)
+    vec4 lightColor;          // 16  (xyz=color, w=unused)
+};                            // Total: 112 bytes (≤ 128 Vulkan minimum guarantee)
 
-static_assert(sizeof(MeshPushBlock) == 96);
+static_assert(sizeof(MeshPushBlock) == 112);
 
 MeshPass::MeshPass(gfx::Device& device)
     : m_device(&device) {}
@@ -116,7 +117,9 @@ void MeshPass::record(VkCommandBuffer cmd,
                       VkDescriptorSet globalSet,
                       VkExtent2D extent,
                       const Scene& scene,
-                      u32 cameraSlot) {
+                      u32 cameraSlot,
+                      vec4 lightDirIntensity,
+                      vec4 lightColor) {
     ENIGMA_ASSERT(m_pipeline != nullptr && "MeshPass::record before buildPipeline");
 
     // Viewport + scissor.
@@ -139,25 +142,21 @@ void MeshPass::record(VkCommandBuffer cmd,
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             m_pipeline->layout(), 0, 1, &globalSet, 0, nullptr);
 
-    // Default material fallback.
-    const Material defaultMat{};
-
     // Draw each node's primitives.
     for (const auto& node : scene.nodes) {
         for (u32 primIdx : node.primitiveIndices) {
             const auto& prim = scene.primitives[primIdx];
-            const Material& mat = (prim.materialIndex >= 0 &&
-                                   static_cast<usize>(prim.materialIndex) < scene.materials.size())
-                                      ? scene.materials[static_cast<usize>(prim.materialIndex)]
-                                      : defaultMat;
 
             MeshPushBlock pc{};
-            pc.model           = node.worldTransform;
-            pc.baseColorFactor = mat.baseColorFactor;
-            pc.vertexSlot      = prim.vertexBufferSlot;
-            pc.cameraSlot      = cameraSlot;
-            pc.textureSlot     = mat.baseColorTextureSlot;
-            pc.samplerSlot     = mat.samplerSlot;
+            pc.model               = node.worldTransform;
+            pc.vertexSlot          = prim.vertexBufferSlot;
+            pc.cameraSlot          = cameraSlot;
+            pc.materialBufferSlot  = scene.materialBufferSlot;
+            pc.materialIndex       = prim.materialIndex >= 0
+                                         ? static_cast<u32>(prim.materialIndex)
+                                         : 0u;
+            pc.lightDirIntensity   = lightDirIntensity;
+            pc.lightColor          = lightColor;
 
             vkCmdPushConstants(cmd, m_pipeline->layout(),
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

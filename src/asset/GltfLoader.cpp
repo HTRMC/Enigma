@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstring>
+#include <unordered_set>
 #include <vector>
 
 namespace enigma {
@@ -83,13 +84,15 @@ Scene::GpuBuffer createAndUploadIndexBuffer(gfx::Device& device, gfx::Allocator&
 
 u32 uploadTexture(gfx::Device& device, gfx::Allocator& allocator,
                   gfx::DescriptorAllocator& descriptorAllocator,
-                  const u8* pixels, u32 width, u32 height, Scene& scene) {
+                  const u8* pixels, u32 width, u32 height, Scene& scene,
+                  bool srgb = true) {
     const VkDeviceSize texSize = static_cast<VkDeviceSize>(width) * height * 4;
+    const VkFormat texFormat   = srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
 
     VkImageCreateInfo imgInfo{};
     imgInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.imageType     = VK_IMAGE_TYPE_2D;
-    imgInfo.format        = VK_FORMAT_R8G8B8A8_SRGB;
+    imgInfo.format        = texFormat;
     imgInfo.extent        = {width, height, 1};
     imgInfo.mipLevels     = 1;
     imgInfo.arrayLayers   = 1;
@@ -110,13 +113,13 @@ u32 uploadTexture(gfx::Device& device, gfx::Allocator& allocator,
     viewInfo.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
     viewInfo.image            = gpuImg.image;
     viewInfo.viewType         = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format           = VK_FORMAT_R8G8B8A8_SRGB;
+    viewInfo.format           = texFormat;
     viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     ENIGMA_VK_CHECK(vkCreateImageView(device.logical(), &viewInfo, nullptr, &gpuImg.view));
 
     {
         gfx::UploadContext ctx(device, allocator);
-        ctx.uploadImage(gpuImg.image, {width, height, 1}, VK_FORMAT_R8G8B8A8_SRGB,
+        ctx.uploadImage(gpuImg.image, {width, height, 1}, texFormat,
                         pixels, texSize);
         ctx.submitAndWait();
     }
@@ -294,36 +297,105 @@ std::optional<Scene> loadGltf(const std::filesystem::path& path,
     const u32 defaultTexSlot     = createDefaultWhiteTexture(device, allocator, descriptorAllocator, scene);
     const u32 defaultSamplerSlot = createDefaultSampler(device, descriptorAllocator, scene);
 
+    // --- Identify linear (non-color) images before uploading ---
+    // metalRoughness, normal, and occlusion textures must be uploaded as UNORM,
+    // not SRGB, to avoid double gamma-correction in the shader.
+    std::unordered_set<usize> linearImageIndices;
+    for (const auto& mat : asset.materials) {
+        auto markLinear = [&](const auto& texOpt) {
+            if (texOpt.has_value()) {
+                const auto& tex = asset.textures[texOpt->textureIndex];
+                if (tex.imageIndex.has_value())
+                    linearImageIndices.insert(tex.imageIndex.value());
+            }
+        };
+        markLinear(mat.pbrData.metallicRoughnessTexture);
+        markLinear(mat.normalTexture);
+        markLinear(mat.occlusionTexture);
+    }
+
     // --- Load textures ---
     std::vector<u32> imageSlots(asset.images.size(), defaultTexSlot);
     for (usize i = 0; i < asset.images.size(); ++i) {
         int w = 0, h = 0;
         u8* pixels = loadImagePixels(asset, asset.images[i], baseDir, &w, &h);
         if (pixels != nullptr) {
+            const bool srgb = (linearImageIndices.find(i) == linearImageIndices.end());
             imageSlots[i] = uploadTexture(device, allocator, descriptorAllocator,
-                                          pixels, static_cast<u32>(w), static_cast<u32>(h), scene);
+                                          pixels, static_cast<u32>(w), static_cast<u32>(h), scene, srgb);
             stbi_image_free(pixels);
-            ENIGMA_LOG_INFO("[gltf] loaded texture {}: {}x{}", i, w, h);
+            ENIGMA_LOG_INFO("[gltf] loaded texture {}: {}x{} ({})", i, w, h, srgb ? "srgb" : "linear");
         }
     }
 
     // --- Load materials ---
+    // Helper: resolve a texture reference to a bindless image slot.
+    auto resolveTexSlot = [&](const auto& texOpt) -> u32 {
+        if (!texOpt.has_value()) return 0xFFFFFFFFu;
+        const auto texIdx = texOpt->textureIndex;
+        if (texIdx >= asset.textures.size()) return 0xFFFFFFFFu;
+        const auto& tex = asset.textures[texIdx];
+        if (!tex.imageIndex.has_value() || tex.imageIndex.value() >= imageSlots.size())
+            return 0xFFFFFFFFu;
+        return imageSlots[tex.imageIndex.value()];
+    };
+
     for (const auto& mat : asset.materials) {
         Material material{};
-        material.baseColorTextureSlot = defaultTexSlot;
-        material.samplerSlot          = defaultSamplerSlot;
+        material.samplerSlot = defaultSamplerSlot;
+
+        // Base color
         material.baseColorFactor = vec4{
             mat.pbrData.baseColorFactor[0], mat.pbrData.baseColorFactor[1],
             mat.pbrData.baseColorFactor[2], mat.pbrData.baseColorFactor[3]};
+        material.baseColorTexIdx = resolveTexSlot(mat.pbrData.baseColorTexture);
 
-        if (mat.pbrData.baseColorTexture.has_value()) {
-            const auto texIdx = mat.pbrData.baseColorTexture->textureIndex;
-            const auto& texture = asset.textures[texIdx];
-            if (texture.imageIndex.has_value() && texture.imageIndex.value() < imageSlots.size()) {
-                material.baseColorTextureSlot = imageSlots[texture.imageIndex.value()];
-            }
+        // Metallic-roughness (G=roughness, B=metallic per glTF spec)
+        material.metallicFactor    = mat.pbrData.metallicFactor;
+        material.roughnessFactor   = mat.pbrData.roughnessFactor;
+        material.metalRoughTexIdx  = resolveTexSlot(mat.pbrData.metallicRoughnessTexture);
+
+        // Normal map
+        if (mat.normalTexture.has_value()) {
+            material.normalScale   = mat.normalTexture->scale;
+            material.normalTexIdx  = resolveTexSlot(mat.normalTexture);
         }
+
+        // Occlusion
+        if (mat.occlusionTexture.has_value()) {
+            material.occlusionStrength = mat.occlusionTexture->strength;
+            material.occlusionTexIdx   = resolveTexSlot(mat.occlusionTexture);
+        }
+
+        // Emissive
+        material.emissiveFactor = vec4{
+            mat.emissiveFactor[0], mat.emissiveFactor[1], mat.emissiveFactor[2],
+            mat.alphaCutoff}; // store alphaCutoff in .w
+        material.emissiveTexIdx = resolveTexSlot(mat.emissiveTexture);
+
+        // Alpha mode → flags
+        if (mat.alphaMode == fastgltf::AlphaMode::Blend) material.flags |= 1u;
+        if (mat.alphaMode == fastgltf::AlphaMode::Mask)  material.flags |= 2u;
+
         scene.materials.push_back(material);
+    }
+
+    // Ensure at least one default material so shaders always have something to index.
+    if (scene.materials.empty()) {
+        Material def{};
+        def.samplerSlot = defaultSamplerSlot;
+        scene.materials.push_back(def);
+    }
+
+    // --- Upload material SSBO ---
+    {
+        const VkDeviceSize matBufSize = scene.materials.size() * sizeof(Material);
+        scene.materialBuffer = createAndUploadSSBO(device, allocator,
+                                                   scene.materials.data(), matBufSize);
+        scene.materialBufferSlot = descriptorAllocator.registerStorageBuffer(
+            scene.materialBuffer.buffer, matBufSize);
+        ENIGMA_LOG_INFO("[gltf] uploaded material SSBO: {} materials ({} bytes)",
+                        scene.materials.size(), matBufSize);
     }
 
     // --- Load mesh primitives ---

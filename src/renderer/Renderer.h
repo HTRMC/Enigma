@@ -25,6 +25,14 @@ class Camera;
 class Window;
 struct Scene;
 
+// Configurable directional sun light. Direction need not be normalized —
+// the shader normalizes it. Intensity scales lightColor in the PBR evaluation.
+struct SunLight {
+    vec3  direction{0.5f, 1.0f, 0.3f};
+    float intensity{3.0f};
+    vec3  color{1.0f, 1.0f, 1.0f};
+};
+
 class Renderer {
 public:
     explicit Renderer(Window& window);
@@ -42,6 +50,9 @@ public:
 
     // Set the scene to render. Null reverts to TrianglePass fallback.
     void setScene(Scene* scene) { m_scene = scene; }
+
+    // Set the directional sun light. Takes effect on the next drawFrame().
+    void setLight(const SunLight& light) { m_light = light; }
 
     gfx::Device& device() { return *m_device; }
     gfx::Allocator& allocator() { return *m_allocator; }
@@ -68,6 +79,8 @@ private:
     // Camera state.
     Camera* m_camera = nullptr;
     Scene*  m_scene  = nullptr;
+
+    SunLight m_light{};
 
     // Per-frame camera SSBOs (one per frame-in-flight, double-buffered).
     struct CameraBuffer {

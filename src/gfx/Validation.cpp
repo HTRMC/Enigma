@@ -19,7 +19,7 @@ constexpr bool kValidationEnabled = false;
 
 VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     VkDebugUtilsMessageSeverityFlagBitsEXT      severity,
-    VkDebugUtilsMessageTypeFlagsEXT             /*type*/,
+    VkDebugUtilsMessageTypeFlagsEXT             type,
     const VkDebugUtilsMessengerCallbackDataEXT* data,
     void*                                       /*userData*/) {
 
@@ -28,10 +28,16 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
                           : "(null)";
 
     if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-        g_validationCounter.fetch_add(1, std::memory_order_relaxed);
+        // Only count real API validation errors, not loader/layer general messages
+        // (e.g. OBS duplicate-layer warnings are GENERAL_BIT, not VALIDATION_BIT).
+        if (type & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) {
+            g_validationCounter.fetch_add(1, std::memory_order_relaxed);
+        }
         ENIGMA_LOG_ERROR("[validation] {}", msg);
     } else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-        g_validationCounter.fetch_add(1, std::memory_order_relaxed);
+        if (type & VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT) {
+            g_validationCounter.fetch_add(1, std::memory_order_relaxed);
+        }
         ENIGMA_LOG_WARN("[validation] {}", msg);
     } else if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
         ENIGMA_LOG_INFO("[validation] {}", msg);

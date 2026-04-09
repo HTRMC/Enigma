@@ -27,10 +27,22 @@ struct Vertex {
 };
 
 struct Material {
-    u32  baseColorTextureSlot = 0; // bindless sampled image (binding 0)
-    u32  samplerSlot          = 0; // bindless sampler (binding 3)
     vec4 baseColorFactor{1.0f, 1.0f, 1.0f, 1.0f};
+    vec4 emissiveFactor{0.0f, 0.0f, 0.0f, 0.0f}; // .w = alphaCutoff
+    f32  metallicFactor     = 1.0f;
+    f32  roughnessFactor    = 1.0f;
+    f32  normalScale        = 1.0f;
+    f32  occlusionStrength  = 1.0f;
+    u32  baseColorTexIdx    = 0xFFFFFFFFu; // 0xFFFFFFFF = no texture
+    u32  metalRoughTexIdx   = 0xFFFFFFFFu;
+    u32  normalTexIdx       = 0xFFFFFFFFu;
+    u32  emissiveTexIdx     = 0xFFFFFFFFu;
+    u32  occlusionTexIdx    = 0xFFFFFFFFu;
+    u32  flags              = 0u;          // bit0=BLEND, bit1=MASK
+    u32  samplerSlot        = 0u;
+    u32  _pad               = 0u;
 };
+static_assert(sizeof(Material) == 80, "Material must be 80 bytes for std430 SSBO layout");
 
 struct MeshPrimitive {
     u32       vertexBufferSlot = 0;  // bindless SSBO slot (binding 2)
@@ -61,6 +73,10 @@ struct Scene {
         VmaAllocation allocation = nullptr;
         VkImageView   view       = VK_NULL_HANDLE;
     };
+
+    // Bindless SSBO slot for the packed material array (one entry per material).
+    u32       materialBufferSlot = 0xFFFFFFFFu;
+    GpuBuffer materialBuffer{};
 
     std::vector<GpuBuffer>  ownedBuffers;
     std::vector<GpuImage>   ownedImages;

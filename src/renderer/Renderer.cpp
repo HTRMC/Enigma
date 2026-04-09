@@ -251,7 +251,9 @@ void Renderer::drawFrame() {
     if (m_scene != nullptr) {
         m_meshPass->record(frame.commandBuffer,
                            m_descriptorAllocator->globalSet(),
-                           extent, *m_scene, cameraSlot);
+                           extent, *m_scene, cameraSlot,
+                           vec4{m_light.direction, m_light.intensity},
+                           vec4{m_light.color, 0.0f});
     } else {
         m_trianglePass->record(frame.commandBuffer,
                                m_descriptorAllocator->globalSet(),
