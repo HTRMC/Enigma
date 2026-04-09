@@ -74,6 +74,7 @@ target_link_libraries(Enigma PRIVATE
     glfw
     glm::glm
     Vulkan::dxc_lib
+    fastgltf
 )
 
 # -----------------------------------------------------------------------------
@@ -87,7 +88,7 @@ target_include_directories(Enigma SYSTEM PRIVATE
     ${VulkanMemoryAllocator_SOURCE_DIR}/include
     ${glfw_SOURCE_DIR}/include
     ${glm_SOURCE_DIR}
-    ${cgltf_SOURCE_DIR}
+    ${fastgltf_SOURCE_DIR}/include
     ${stb_SOURCE_DIR}
 )
 

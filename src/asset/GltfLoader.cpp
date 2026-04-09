@@ -13,13 +13,16 @@
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
 #include <vk_mem_alloc.h>
 
-#define CGLTF_IMPLEMENTATION
-#include <cgltf.h>
+#include <fastgltf/core.hpp>
+#include <fastgltf/tools.hpp>
+#include <fastgltf/types.hpp>
+#include <fastgltf/glm_element_traits.hpp>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
 #include <algorithm>
+#include <climits>
 #include <cstring>
 #include <vector>
 
@@ -27,7 +30,6 @@ namespace enigma {
 
 namespace {
 
-// Pack vertices into float4 triplets for GPU (matches mesh.hlsl layout).
 std::vector<vec4> packVertices(const std::vector<Vertex>& verts) {
     std::vector<vec4> packed;
     packed.reserve(verts.size() * 3);
@@ -53,7 +55,6 @@ Scene::GpuBuffer createAndUploadSSBO(gfx::Device& device, gfx::Allocator& alloca
     Scene::GpuBuffer result{};
     ENIGMA_VK_CHECK(vmaCreateBuffer(allocator.handle(), &bufInfo, &allocInfo,
                                     &result.buffer, &result.allocation, nullptr));
-
     gfx::UploadContext ctx(device, allocator);
     ctx.uploadBuffer(result.buffer, data, size);
     ctx.submitAndWait();
@@ -74,7 +75,6 @@ Scene::GpuBuffer createAndUploadIndexBuffer(gfx::Device& device, gfx::Allocator&
     Scene::GpuBuffer result{};
     ENIGMA_VK_CHECK(vmaCreateBuffer(allocator.handle(), &bufInfo, &allocInfo,
                                     &result.buffer, &result.allocation, nullptr));
-
     gfx::UploadContext ctx(device, allocator);
     ctx.uploadBuffer(result.buffer, data, size);
     ctx.submitAndWait();
@@ -83,8 +83,7 @@ Scene::GpuBuffer createAndUploadIndexBuffer(gfx::Device& device, gfx::Allocator&
 
 u32 uploadTexture(gfx::Device& device, gfx::Allocator& allocator,
                   gfx::DescriptorAllocator& descriptorAllocator,
-                  const u8* pixels, u32 width, u32 height,
-                  Scene& scene) {
+                  const u8* pixels, u32 width, u32 height, Scene& scene) {
     const VkDeviceSize texSize = static_cast<VkDeviceSize>(width) * height * 4;
 
     VkImageCreateInfo imgInfo{};
@@ -129,16 +128,14 @@ u32 uploadTexture(gfx::Device& device, gfx::Allocator& allocator,
 }
 
 u32 createDefaultWhiteTexture(gfx::Device& device, gfx::Allocator& allocator,
-                              gfx::DescriptorAllocator& descriptorAllocator,
-                              Scene& scene) {
+                              gfx::DescriptorAllocator& descriptorAllocator, Scene& scene) {
     const u32 white = 0xFFFFFFFFu;
     return uploadTexture(device, allocator, descriptorAllocator,
                          reinterpret_cast<const u8*>(&white), 1, 1, scene);
 }
 
 u32 createDefaultSampler(gfx::Device& device,
-                         gfx::DescriptorAllocator& descriptorAllocator,
-                         Scene& scene) {
+                         gfx::DescriptorAllocator& descriptorAllocator, Scene& scene) {
     const f32 maxAniso = device.properties().limits.maxSamplerAnisotropy;
 
     VkSamplerCreateInfo samplerInfo{};
@@ -161,47 +158,106 @@ u32 createDefaultSampler(gfx::Device& device,
     return slot;
 }
 
-// Compute the world transform for a node by walking up the hierarchy.
-mat4 computeWorldTransform(const cgltf_node* node) {
-    f32 m[16];
-    cgltf_node_transform_world(node, m);
-    // cgltf outputs column-major, same as glm.
-    mat4 result;
-    std::memcpy(&result, m, sizeof(mat4));
-    return result;
+// Load image pixel data via stb_image from a fastgltf image source.
+u8* loadImagePixels(const fastgltf::Asset& asset, const fastgltf::Image& image,
+                    const std::filesystem::path& baseDir, int* outW, int* outH) {
+    u8* pixels = nullptr;
+    int ch = 0;
+
+    // Helper: decode from raw byte span.
+    auto decodeFromMemory = [&](const u8* ptr, usize len) {
+        if (len > static_cast<usize>(INT_MAX)) return;
+        pixels = stbi_load_from_memory(ptr, static_cast<int>(len), outW, outH, &ch, 4);
+    };
+
+    // Helper: extract bytes from a buffer's DataSource at a given offset+length.
+    auto readFromBuffer = [&](const fastgltf::Buffer& buffer, usize offset, usize length) {
+        std::visit(fastgltf::visitor{
+            [](auto&) {},
+            [&](const fastgltf::sources::Vector& v) {
+                decodeFromMemory(reinterpret_cast<const u8*>(v.bytes.data()) + offset, length);
+            },
+            [&](const fastgltf::sources::ByteView& v) {
+                decodeFromMemory(reinterpret_cast<const u8*>(v.bytes.data()) + offset, length);
+            },
+            [&](const fastgltf::sources::Array& v) {
+                decodeFromMemory(reinterpret_cast<const u8*>(v.bytes.data()) + offset, length);
+            },
+        }, buffer.data);
+    };
+
+    std::visit(fastgltf::visitor{
+        [](auto&) {},
+        [&](const fastgltf::sources::URI& uri) {
+            const auto imgPath = std::filesystem::weakly_canonical(baseDir / uri.uri.fspath());
+            const auto safeBase = std::filesystem::weakly_canonical(baseDir);
+            if (imgPath.string().compare(0, safeBase.string().size(), safeBase.string()) != 0) {
+                ENIGMA_LOG_WARN("[gltf] image URI escapes base directory: {}", uri.uri.string());
+                return;
+            }
+            pixels = stbi_load(imgPath.string().c_str(), outW, outH, &ch, 4);
+        },
+        [&](const fastgltf::sources::Vector& vec) {
+            decodeFromMemory(reinterpret_cast<const u8*>(vec.bytes.data()), vec.bytes.size());
+        },
+        [&](const fastgltf::sources::Array& arr) {
+            decodeFromMemory(reinterpret_cast<const u8*>(arr.bytes.data()), arr.bytes.size());
+        },
+        [&](const fastgltf::sources::BufferView& bv) {
+            const auto& view = asset.bufferViews[bv.bufferViewIndex];
+            readFromBuffer(asset.buffers[view.bufferIndex], view.byteOffset, view.byteLength);
+        },
+    }, image.data);
+
+    return pixels;
 }
 
-// Load an image referenced by a cgltf_image. Returns pixel data (RGBA8) via stb_image.
-u8* loadImage(const cgltf_image* image, const std::filesystem::path& baseDir,
-              int* outW, int* outH) {
-    // Embedded buffer view.
-    if (image->buffer_view != nullptr) {
-        const cgltf_buffer_view* bv = image->buffer_view;
-        // Guard against integer truncation: stbi takes int length.
-        if (bv->size > static_cast<cgltf_size>(INT_MAX)) {
-            ENIGMA_LOG_WARN("[gltf] image buffer view too large ({} bytes), skipping", bv->size);
-            return nullptr;
-        }
-        const u8* ptr = static_cast<const u8*>(bv->buffer->data) + bv->offset;
-        int ch = 0;
-        return stbi_load_from_memory(ptr, static_cast<int>(bv->size), outW, outH, &ch, 4);
+// Compute world transform for a node by walking up the tree.
+mat4 computeWorldTransform(const fastgltf::Asset& asset, usize nodeIdx) {
+    const auto& node = asset.nodes[nodeIdx];
+
+    mat4 local{1.0f};
+    if (const auto* trs = std::get_if<fastgltf::TRS>(&node.transform)) {
+        const mat4 T = glm::translate(mat4{1.0f},
+            vec3{trs->translation[0], trs->translation[1], trs->translation[2]});
+        const quat Q{static_cast<f32>(trs->rotation[3]),
+                     static_cast<f32>(trs->rotation[0]),
+                     static_cast<f32>(trs->rotation[1]),
+                     static_cast<f32>(trs->rotation[2])};
+        const mat4 R = glm::mat4_cast(Q);
+        const mat4 S = glm::scale(mat4{1.0f},
+            vec3{trs->scale[0], trs->scale[1], trs->scale[2]});
+        local = T * R * S;
+    } else if (const auto* m = std::get_if<fastgltf::Node::TransformMatrix>(&node.transform)) {
+        std::memcpy(&local, m->data(), sizeof(mat4));
     }
-    // External URI — canonicalize and verify path stays within baseDir
-    // to prevent path traversal via crafted glTF files.
-    if (image->uri != nullptr) {
-        const auto imgPath = std::filesystem::weakly_canonical(baseDir / image->uri);
-        const auto safeBase = std::filesystem::weakly_canonical(baseDir);
-        const auto imgStr = imgPath.string();
-        const auto baseStr = safeBase.string();
-        if (imgStr.size() < baseStr.size() ||
-            imgStr.compare(0, baseStr.size(), baseStr) != 0) {
-            ENIGMA_LOG_WARN("[gltf] image URI escapes base directory: {}", image->uri);
-            return nullptr;
+
+    return local;
+}
+
+void flattenNodes(const fastgltf::Asset& asset, usize nodeIdx, const mat4& parentTransform,
+                  const std::vector<usize>& meshBasePrimitive, Scene& scene) {
+    const auto& node = asset.nodes[nodeIdx];
+    const mat4 world = parentTransform * computeWorldTransform(asset, nodeIdx);
+
+    if (node.meshIndex.has_value()) {
+        const usize meshIdx = node.meshIndex.value();
+        MeshNode meshNode{};
+        meshNode.worldTransform = world;
+
+        const auto& mesh = asset.meshes[meshIdx];
+        const usize basePrim = meshBasePrimitive[meshIdx];
+        for (usize p = 0; p < mesh.primitives.size(); ++p) {
+            if (basePrim + p < scene.primitives.size()) {
+                meshNode.primitiveIndices.push_back(static_cast<u32>(basePrim + p));
+            }
         }
-        int ch = 0;
-        return stbi_load(imgPath.string().c_str(), outW, outH, &ch, 4);
+        scene.nodes.push_back(std::move(meshNode));
     }
-    return nullptr;
+
+    for (usize child : node.children) {
+        flattenNodes(asset, child, world, meshBasePrimitive, scene);
+    }
 }
 
 } // namespace
@@ -212,33 +268,37 @@ std::optional<Scene> loadGltf(const std::filesystem::path& path,
                               gfx::DescriptorAllocator& descriptorAllocator) {
     ENIGMA_LOG_INFO("[gltf] loading: {}", path.string());
 
-    cgltf_options options{};
-    cgltf_data* data = nullptr;
-    cgltf_result parseResult = cgltf_parse_file(&options, path.string().c_str(), &data);
-    if (parseResult != cgltf_result_success) {
-        ENIGMA_LOG_ERROR("[gltf] failed to parse: {}", path.string());
+    fastgltf::Parser parser;
+    fastgltf::GltfDataBuffer data;
+    if (!data.loadFromFile(path)) {
+        ENIGMA_LOG_ERROR("[gltf] failed to read file: {}", path.string());
         return std::nullopt;
     }
 
-    cgltf_result loadResult = cgltf_load_buffers(&options, data, path.string().c_str());
-    if (loadResult != cgltf_result_success) {
-        ENIGMA_LOG_ERROR("[gltf] failed to load buffers: {}", path.string());
-        cgltf_free(data);
+    const auto parentDir = path.parent_path();
+    constexpr auto options = fastgltf::Options::LoadExternalBuffers
+                           | fastgltf::Options::LoadGLBBuffers
+                           | fastgltf::Options::GenerateMeshIndices;
+
+    auto result = parser.loadGltf(&data, parentDir, options);
+    if (result.error() != fastgltf::Error::None) {
+        ENIGMA_LOG_ERROR("[gltf] parse error: {}", fastgltf::getErrorMessage(result.error()));
         return std::nullopt;
     }
 
-    const auto baseDir = path.parent_path();
+    auto& asset = result.get();
     Scene scene{};
+    const auto baseDir = path.parent_path();
 
     // Default resources.
     const u32 defaultTexSlot     = createDefaultWhiteTexture(device, allocator, descriptorAllocator, scene);
     const u32 defaultSamplerSlot = createDefaultSampler(device, descriptorAllocator, scene);
 
     // --- Load textures ---
-    std::vector<u32> imageSlots(data->images_count, defaultTexSlot);
-    for (cgltf_size i = 0; i < data->images_count; ++i) {
+    std::vector<u32> imageSlots(asset.images.size(), defaultTexSlot);
+    for (usize i = 0; i < asset.images.size(); ++i) {
         int w = 0, h = 0;
-        u8* pixels = loadImage(&data->images[i], baseDir, &w, &h);
+        u8* pixels = loadImagePixels(asset, asset.images[i], baseDir, &w, &h);
         if (pixels != nullptr) {
             imageSlots[i] = uploadTexture(device, allocator, descriptorAllocator,
                                           pixels, static_cast<u32>(w), static_cast<u32>(h), scene);
@@ -248,99 +308,67 @@ std::optional<Scene> loadGltf(const std::filesystem::path& path,
     }
 
     // --- Load materials ---
-    for (cgltf_size i = 0; i < data->materials_count; ++i) {
-        const cgltf_material* mat = &data->materials[i];
+    for (const auto& mat : asset.materials) {
         Material material{};
         material.baseColorTextureSlot = defaultTexSlot;
         material.samplerSlot          = defaultSamplerSlot;
+        material.baseColorFactor = vec4{
+            mat.pbrData.baseColorFactor[0], mat.pbrData.baseColorFactor[1],
+            mat.pbrData.baseColorFactor[2], mat.pbrData.baseColorFactor[3]};
 
-        if (mat->has_pbr_metallic_roughness) {
-            const auto& pbr = mat->pbr_metallic_roughness;
-            const auto* f = pbr.base_color_factor;
-            material.baseColorFactor = vec4{f[0], f[1], f[2], f[3]};
-
-            if (pbr.base_color_texture.texture != nullptr) {
-                const cgltf_texture* tex = pbr.base_color_texture.texture;
-                if (tex->image != nullptr) {
-                    const cgltf_size imgIdx = static_cast<cgltf_size>(tex->image - data->images);
-                    if (imgIdx < data->images_count) {
-                        material.baseColorTextureSlot = imageSlots[imgIdx];
-                    }
-                }
+        if (mat.pbrData.baseColorTexture.has_value()) {
+            const auto texIdx = mat.pbrData.baseColorTexture->textureIndex;
+            const auto& texture = asset.textures[texIdx];
+            if (texture.imageIndex.has_value() && texture.imageIndex.value() < imageSlots.size()) {
+                material.baseColorTextureSlot = imageSlots[texture.imageIndex.value()];
             }
         }
-
         scene.materials.push_back(material);
     }
 
     // --- Load mesh primitives ---
-    // Track base primitive index per mesh for node lookups.
     std::vector<usize> meshBasePrimitive;
-    for (cgltf_size mi = 0; mi < data->meshes_count; ++mi) {
+    for (const auto& mesh : asset.meshes) {
         meshBasePrimitive.push_back(scene.primitives.size());
-        const cgltf_mesh* mesh = &data->meshes[mi];
 
-        for (cgltf_size pi = 0; pi < mesh->primitives_count; ++pi) {
-            const cgltf_primitive* prim = &mesh->primitives[pi];
-            if (prim->type != cgltf_primitive_type_triangles) {
+        for (const auto& prim : mesh.primitives) {
+            if (prim.type != fastgltf::PrimitiveType::Triangles) {
                 ENIGMA_LOG_WARN("[gltf] skipping non-triangle primitive");
                 continue;
             }
 
-            // Find accessors.
-            const cgltf_accessor* posAcc  = nullptr;
-            const cgltf_accessor* normAcc = nullptr;
-            const cgltf_accessor* uvAcc   = nullptr;
-            const cgltf_accessor* tanAcc  = nullptr;
-            for (cgltf_size ai = 0; ai < prim->attributes_count; ++ai) {
-                const cgltf_attribute* attr = &prim->attributes[ai];
-                switch (attr->type) {
-                    case cgltf_attribute_type_position: posAcc  = attr->data; break;
-                    case cgltf_attribute_type_normal:   normAcc = attr->data; break;
-                    case cgltf_attribute_type_texcoord: uvAcc   = attr->data; break;
-                    case cgltf_attribute_type_tangent:  tanAcc  = attr->data; break;
-                    default: break;
-                }
-            }
-            if (posAcc == nullptr) {
+            auto posIt = prim.findAttribute("POSITION");
+            if (posIt == prim.attributes.end()) {
                 ENIGMA_LOG_WARN("[gltf] primitive missing POSITION, skipping");
                 continue;
             }
 
-            const usize vertCount = posAcc->count;
+            const auto& posAccessor = asset.accessors[posIt->second];
+            const usize vertCount = posAccessor.count;
             std::vector<Vertex> vertices(vertCount);
 
             // Positions.
-            for (usize v = 0; v < vertCount; ++v) {
-                f32 buf[3] = {};
-                cgltf_accessor_read_float(posAcc, v, buf, 3);
-                vertices[v].position = vec3{buf[0], buf[1], buf[2]};
-            }
+            fastgltf::iterateAccessorWithIndex<vec3>(asset, posAccessor,
+                [&](vec3 p, usize i) { vertices[i].position = p; });
+
             // Normals.
-            if (normAcc != nullptr) {
-                for (usize v = 0; v < vertCount; ++v) {
-                    f32 buf[3] = {};
-                    cgltf_accessor_read_float(normAcc, v, buf, 3);
-                    vertices[v].normal = vec3{buf[0], buf[1], buf[2]};
-                }
+            if (auto it = prim.findAttribute("NORMAL"); it != prim.attributes.end()) {
+                fastgltf::iterateAccessorWithIndex<vec3>(asset, asset.accessors[it->second],
+                    [&](vec3 n, usize i) { vertices[i].normal = n; });
             } else {
                 for (auto& v : vertices) v.normal = vec3{0.0f, 1.0f, 0.0f};
             }
+
             // UVs.
-            if (uvAcc != nullptr) {
-                for (usize v = 0; v < vertCount; ++v) {
-                    f32 buf[2] = {};
-                    cgltf_accessor_read_float(uvAcc, v, buf, 2);
-                    vertices[v].uv = vec2{buf[0], buf[1]};
-                }
+            if (auto it = prim.findAttribute("TEXCOORD_0"); it != prim.attributes.end()) {
+                fastgltf::iterateAccessorWithIndex<vec2>(asset, asset.accessors[it->second],
+                    [&](vec2 uv, usize i) { vertices[i].uv = uv; });
             }
+
             // Tangents.
-            if (tanAcc != nullptr) {
-                for (usize v = 0; v < vertCount; ++v) {
-                    f32 buf[4] = {};
-                    cgltf_accessor_read_float(tanAcc, v, buf, 4);
-                    vertices[v].tangent = vec4{buf[0], buf[1], buf[2], buf[3]};
-                }
+            if (auto it = prim.findAttribute("TANGENT"); it != prim.attributes.end()) {
+                fastgltf::iterateAccessorWithIndex<vec4>(asset, asset.accessors[it->second],
+                    [&](vec4 t, usize i) { vertices[i].tangent = t; });
             } else {
                 for (auto& v : vertices) v.tangent = vec4{1.0f, 0.0f, 0.0f, 1.0f};
             }
@@ -354,14 +382,14 @@ std::optional<Scene> loadGltf(const std::filesystem::path& path,
 
             // Indices.
             std::vector<u32> indices;
-            if (prim->indices != nullptr) {
-                indices.resize(prim->indices->count);
-                for (usize idx = 0; idx < prim->indices->count; ++idx) {
-                    indices[idx] = static_cast<u32>(cgltf_accessor_read_index(prim->indices, idx));
-                }
+            if (prim.indicesAccessor.has_value()) {
+                const auto& idxAccessor = asset.accessors[prim.indicesAccessor.value()];
+                indices.resize(idxAccessor.count);
+                fastgltf::iterateAccessorWithIndex<u32>(asset, idxAccessor,
+                    [&](u32 idx, usize i) { indices[i] = idx; });
             } else {
                 indices.resize(vertCount);
-                for (usize idx = 0; idx < vertCount; ++idx) indices[idx] = static_cast<u32>(idx);
+                for (usize i = 0; i < vertCount; ++i) indices[i] = static_cast<u32>(i);
             }
 
             const VkDeviceSize idxSize = indices.size() * sizeof(u32);
@@ -372,37 +400,22 @@ std::optional<Scene> loadGltf(const std::filesystem::path& path,
             meshPrim.vertexBufferSlot = ssboSlot;
             meshPrim.indexCount       = static_cast<u32>(indices.size());
             meshPrim.indexBuffer      = idxBuf.buffer;
-            meshPrim.materialIndex    = prim->material != nullptr
-                                            ? static_cast<i32>(prim->material - data->materials)
+            meshPrim.materialIndex    = prim.materialIndex.has_value()
+                                            ? static_cast<i32>(prim.materialIndex.value())
                                             : -1;
             scene.primitives.push_back(meshPrim);
         }
     }
 
     // --- Flatten node hierarchy ---
-    for (cgltf_size ni = 0; ni < data->nodes_count; ++ni) {
-        const cgltf_node* node = &data->nodes[ni];
-        if (node->mesh == nullptr) continue;
-
-        const cgltf_size meshIdx = static_cast<cgltf_size>(node->mesh - data->meshes);
-        if (meshIdx >= data->meshes_count) continue;
-
-        MeshNode meshNode{};
-        meshNode.worldTransform = computeWorldTransform(node);
-
-        const usize basePrim = meshBasePrimitive[meshIdx];
-        const usize primCount = node->mesh->primitives_count;
-        for (usize p = 0; p < primCount; ++p) {
-            if (basePrim + p < scene.primitives.size()) {
-                meshNode.primitiveIndices.push_back(static_cast<u32>(basePrim + p));
-            }
+    if (!asset.scenes.empty()) {
+        const auto& defaultScene = asset.scenes[asset.defaultScene.value_or(0)];
+        for (usize nodeIdx : defaultScene.nodeIndices) {
+            flattenNodes(asset, nodeIdx, mat4{1.0f}, meshBasePrimitive, scene);
         }
-        scene.nodes.push_back(std::move(meshNode));
     }
 
-    cgltf_free(data);
-
-    ENIGMA_LOG_INFO("[gltf] loaded: {} primitives, {} nodes, {} materials, {} images",
+    ENIGMA_LOG_INFO("[gltf] loaded: {} primitives, {} nodes, {} materials, {} textures",
                     scene.primitives.size(), scene.nodes.size(),
                     scene.materials.size(), imageSlots.size());
     return scene;

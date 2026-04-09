@@ -8,6 +8,13 @@
 
 include(FetchContent)
 
+# cgltf and stb are header-only C libraries with no CMakeLists.txt, so
+# FetchContent_MakeAvailable cannot be used. Allow the legacy
+# FetchContent_Populate path on CMake 4.x without a dev warning.
+if(POLICY CMP0169)
+    cmake_policy(SET CMP0169 OLD)
+endif()
+
 # -----------------------------------------------------------------------------
 # volk — meta-loader for Vulkan. Eliminates the need to link against the
 # Vulkan loader directly; loads entry points at runtime.
@@ -59,19 +66,17 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(glm)
 
 # -----------------------------------------------------------------------------
-# cgltf — single-file C99 glTF 2.0 parser. No build system, no dependencies,
-# no C++ standard compatibility concerns. Header-only.
-# Tag: v1.14
+# fastgltf — modern C++17 glTF 2.0 parser. SIMD-accelerated JSON parsing
+# via simdjson, zero-copy buffer views, type-safe accessor iteration.
+# Tag: v0.7.2 (v0.8.0 has C++23 template compat issues on MSVC /std:c++latest)
 # -----------------------------------------------------------------------------
+set(FASTGLTF_COMPILE_AS_CPP20 ON CACHE BOOL "" FORCE)
 FetchContent_Declare(
-    cgltf
-    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
-    GIT_TAG        v1.14
+    fastgltf
+    GIT_REPOSITORY https://github.com/spnda/fastgltf.git
+    GIT_TAG        v0.7.2
 )
-FetchContent_GetProperties(cgltf)
-if(NOT cgltf_POPULATED)
-    FetchContent_Populate(cgltf)
-endif()
+FetchContent_MakeAvailable(fastgltf)
 
 # -----------------------------------------------------------------------------
 # stb — Sean Barrett's single-file public domain libraries. Only stb_image.h
