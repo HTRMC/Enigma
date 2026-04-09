@@ -1,94 +1,59 @@
 # Enigma
 
-A self-authored C++26 rendering engine with an architectural posture
-inspired by Unreal Engine 5 and Decima. Milestone 1 is a
-validation-clean, resize-safe, bindless-driven triangle rendered via
-Vulkan 1.3 dynamic rendering.
+A C++26 Vulkan 1.3 rendering engine built from scratch.
 
-## Requirements
+![Overview](readmeassets/render_overview.png)
+![Detail](readmeassets/render_detail.png)
 
-- **Windows 10 or 11** (primary verified platform)
-- **CMake >= 3.28**
-- **Vulkan SDK >= 1.3** (the build uses `Vulkan::shaderc_combined` for
-  runtime GLSL compilation; set the `VULKAN_SDK` environment variable)
-- **MSVC 17.10+** (or a Clang / GCC toolchain with C++26 preview
-  support; `/std:c++latest` on MSVC, `-std=c++2c` elsewhere)
-- **Internet access on first build** (volk, VMA, GLFW, and glm are
-  pulled in via CMake `FetchContent` at configure time)
+## What it does
 
-## Build
+Loads glTF 2.0 scenes and renders them with a Cook-Torrance PBR pipeline. Metallic-roughness workflow, normal mapping, ACES tone mapping, reverse-Z depth. The DamagedHelmet above uses five 2048px texture channels loaded straight from the .glb.
 
-```sh
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-cmake --build build --config Debug
-./build/Debug/Enigma.exe
-```
+Materials are stored in a single bindless SSBO. The shader indexes into it by material index rather than receiving texture slots through push constants. Vertices follow the same pattern, packed into storage buffers and accessed bindlessly.
 
-The `POST_BUILD` step copies `shaders/*.vert` and `shaders/*.frag`
-next to the executable, so you can run `Enigma.exe` from any working
-directory.
+## Stack
 
-## Architecture
+- Vulkan 1.3 with dynamic rendering (no VkRenderPass or VkFramebuffer)
+- HLSL shaders compiled at runtime via DXC to SPIR-V, with hot-reload on file change
+- Bindless global descriptor set covering textures, samplers, and SSBOs
+- fastgltf for SIMD-accelerated glTF 2.0 parsing
+- VulkanMemoryAllocator for GPU memory
+- C++26 on MSVC (/std:c++latest)
 
-Milestone 1 subsystem layout under `src/`:
+External deps (volk, VMA, GLFW, GLM, fastgltf, stb_image) are fetched automatically via CMake FetchContent.
 
-```
-core/      Types, Assert, Log, Paths
-platform/  Window (GLFW)
-gfx/       Instance, Device, Allocator (VMA), Swapchain, FrameContext,
-           DescriptorAllocator (bindless), ShaderManager (shaderc),
-           Pipeline, Validation
-renderer/  Renderer, TrianglePass
-```
+## Building
 
-Key design commitments:
-
-- **Vulkan 1.3 dynamic rendering only** — no `VkRenderPass`, no
-  `VkFramebuffer` anywhere.
-- **4-binding bindless global descriptor set**
-  (sampled image / storage image / storage buffer / sampler) with
-  `UPDATE_AFTER_BIND` + `PARTIALLY_BOUND` on all bindings and
-  `VARIABLE_DESCRIPTOR_COUNT` on the sampler binding (the only
-  variable-count slot per Vulkan spec).
-- **Triangle vertex positions flow through the bindless storage
-  buffer binding** (not hardcoded in shader, not a per-draw VBO).
-  `nonuniformEXT` indexing is live.
-- **Hybrid sync model** — binary semaphores for image acquire /
-  present, timeline semaphore for CPU/GPU frame pipelining.
-- **Validation-clean via counter**, not abort-on-warning. The debug
-  messenger increments an atomic counter on any WARNING / ERROR; the
-  `Renderer` destructor asserts the counter is zero after
-  `vkDeviceWaitIdle`.
-- **BDA is explicitly dropped** at this milestone — scaffold-without-
-  usage violates the "bindless actually used" principle.
-
-## Verification
-
-Shell requirement: **POSIX-ish** (Git Bash, MSYS2, or WSL on Windows).
-The verification checks use POSIX shell syntax:
+Requirements: Windows 10/11, CMake 3.28+, Vulkan SDK 1.3+, MSVC 17.10+
 
 ```sh
-# 1. Clean build
-rm -rf build && cmake -S . -B build && cmake --build build
-
-# 7. Commit hygiene
-test $(git log --all --format='%B' | grep -ci 'co-authored') -eq 0 \
-    || echo "FAIL: co-authored trailer present"
-test $(git log --oneline | wc -l) -ge 30 \
-    || echo "FAIL: commit count below fine-grained bar"
-
-# 9. No legacy render pass API
-test $(grep -rE 'VkRenderPass|VkFramebuffer|vkCreateRenderPass|vkCreateFramebuffer' src/ shaders/ | wc -l) -eq 0 \
-    || echo "FAIL: legacy render pass API present"
-
-# 10. No BDA
-test $(grep -rE 'BUFFER_DEVICE_ADDRESS|bufferDeviceAddress|vkGetBufferDeviceAddress' src/ | wc -l) -eq 0 \
-    || echo "FAIL: BDA references present"
-
-# 11. nonuniformEXT usage in vertex shader (AC8)
-grep -q 'nonuniformEXT' shaders/triangle.vert \
-    || echo "FAIL: triangle.vert missing nonuniformEXT"
+cmake -S . -B cmake-build-debug -G "NMake Makefiles"
+cmake --build cmake-build-debug --target Enigma
 ```
 
-See `.omc/plans/enigma-triangle-plan.md` for the full verification
-suite and the commit-by-commit implementation plan.
+The build copies shaders and assets next to the executable.
+
+## Layout
+
+```
+src/
+  core/       Types, Assert, Log, Paths
+  platform/   Window (GLFW)
+  input/      Keyboard and mouse
+  engine/     Engine, Application, Clock
+  gfx/        Instance, Device, Allocator, Swapchain, FrameContext,
+              DescriptorAllocator, ShaderManager, ShaderHotReload,
+              Pipeline, UploadContext, Validation
+  renderer/   Renderer, MeshPass, TrianglePass
+  scene/      Scene, Camera, CameraController, Transform
+  asset/      GltfLoader
+shaders/
+  mesh.hlsl       PBR vertex + fragment
+  triangle.hlsl   Fallback debug pass
+```
+
+## Notes
+
+Bindless from the start. Everything that could be a descriptor is a slot in the global array. The material system is where this pays off most visibly.
+
+No render passes. Dynamic rendering keeps the frame loop simple.
