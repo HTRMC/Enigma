@@ -11,7 +11,6 @@
 // (IUnknown) and <combaseapi.h> (IID_PPV_ARGS) — both of which the
 // DXC COM interfaces need at the call site. We still set NOMINMAX
 // to keep `min`/`max` from becoming macros.
-#define NOMINMAX
 #include <Windows.h>
 #include <dxc/dxcapi.h>
 
@@ -79,11 +78,15 @@ ShaderManager::ShaderManager(Device& device)
     ENIGMA_ASSERT(SUCCEEDED(utilsHr) && "DxcCreateInstance(CLSID_DxcUtils) failed");
     const HRESULT compilerHr = DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&m_dxcCompiler));
     ENIGMA_ASSERT(SUCCEEDED(compilerHr) && "DxcCreateInstance(CLSID_DxcCompiler) failed");
+
+    const HRESULT includeHr = m_dxcUtils->CreateDefaultIncludeHandler(&m_includeHandler);
+    ENIGMA_ASSERT(SUCCEEDED(includeHr) && "CreateDefaultIncludeHandler failed");
 }
 
 ShaderManager::~ShaderManager() {
-    if (m_dxcCompiler) m_dxcCompiler->Release();
-    if (m_dxcUtils)    m_dxcUtils->Release();
+    if (m_includeHandler) m_includeHandler->Release();
+    if (m_dxcCompiler)    m_dxcCompiler->Release();
+    if (m_dxcUtils)       m_dxcUtils->Release();
 }
 
 VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePath,
@@ -97,6 +100,7 @@ VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePa
 
     const std::string sourceName = absolutePath.filename().string();
     const std::wstring wEntry = widenAscii(entryPoint);
+    const std::wstring wIncludeDir = absolutePath.parent_path().wstring();
     const wchar_t* profile = dxcProfile(stage);
 
     // DXC source buffer — UTF-8 matches what ifstream gives us.
@@ -121,6 +125,9 @@ VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePa
     args.push_back(profile);
     args.push_back(L"-spirv");
     args.push_back(L"-fvk-use-dx-layout");
+    args.push_back(L"-Zpc");  // column-major matrices (match glm layout)
+    args.push_back(L"-I");
+    args.push_back(wIncludeDir.c_str());
     args.push_back(L"-HV");
     args.push_back(L"2021");
 #if ENIGMA_DEBUG
@@ -136,7 +143,7 @@ VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePa
         &sourceBuffer,
         args.data(),
         static_cast<UINT32>(args.size()),
-        nullptr, // no include handler — shaders are single-file
+        m_includeHandler,
         IID_PPV_ARGS(&result));
 
     if (FAILED(compileHr) || result == nullptr) {

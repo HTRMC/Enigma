@@ -7,34 +7,27 @@
 
 namespace enigma::gfx {
 
-Pipeline::Pipeline(Device& device,
-                   VkShaderModule vertShader,
-                   const char* vertEntryPoint,
-                   VkShaderModule fragShader,
-                   const char* fragEntryPoint,
-                   VkDescriptorSetLayout globalSetLayout,
-                   VkFormat colorAttachmentFormat,
-                   VkFormat depthAttachmentFormat)
+Pipeline::Pipeline(Device& device, const CreateInfo& info)
     : m_device(&device) {
-    ENIGMA_ASSERT(vertShader != VK_NULL_HANDLE);
-    ENIGMA_ASSERT(fragShader != VK_NULL_HANDLE);
-    ENIGMA_ASSERT(vertEntryPoint != nullptr);
-    ENIGMA_ASSERT(fragEntryPoint != nullptr);
-    ENIGMA_ASSERT(globalSetLayout != VK_NULL_HANDLE);
+    ENIGMA_ASSERT(info.vertShader != VK_NULL_HANDLE);
+    ENIGMA_ASSERT(info.fragShader != VK_NULL_HANDLE);
+    ENIGMA_ASSERT(info.vertEntryPoint != nullptr);
+    ENIGMA_ASSERT(info.fragEntryPoint != nullptr);
+    ENIGMA_ASSERT(info.globalSetLayout != VK_NULL_HANDLE);
 
     // -------------------------------------------------------------------
     // Pipeline layout: set=0 is the global bindless set, push constant
-    // range is 16 bytes spanning vertex + fragment stages.
+    // range spans vertex + fragment stages.
     // -------------------------------------------------------------------
     VkPushConstantRange pushRange{};
     pushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pushRange.offset     = 0;
-    pushRange.size       = 16;
+    pushRange.size       = info.pushConstantSize;
 
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     layoutInfo.setLayoutCount         = 1;
-    layoutInfo.pSetLayouts            = &globalSetLayout;
+    layoutInfo.pSetLayouts            = &info.globalSetLayout;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges    = &pushRange;
 
@@ -48,16 +41,16 @@ Pipeline::Pipeline(Device& device,
             VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             nullptr, 0,
             VK_SHADER_STAGE_VERTEX_BIT,
-            vertShader,
-            vertEntryPoint,
+            info.vertShader,
+            info.vertEntryPoint,
             nullptr,
         },
         {
             VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
             nullptr, 0,
             VK_SHADER_STAGE_FRAGMENT_BIT,
-            fragShader,
-            fragEntryPoint,
+            info.fragShader,
+            info.fragEntryPoint,
             nullptr,
         },
     }};
@@ -91,7 +84,7 @@ Pipeline::Pipeline(Device& device,
     VkPipelineRasterizationStateCreateInfo rasterizer{};
     rasterizer.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.cullMode    = VK_CULL_MODE_NONE; // triangle is 1-sided; no cull
+    rasterizer.cullMode    = info.cullMode;
     rasterizer.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rasterizer.lineWidth   = 1.0f;
 
@@ -135,13 +128,13 @@ Pipeline::Pipeline(Device& device,
     // to `pDepthStencilState` unconditionally — the test/write flags
     // are what gate depth behavior, not the pointer being non-null.
     // -------------------------------------------------------------------
-    const bool depthEnabled = depthAttachmentFormat != VK_FORMAT_UNDEFINED;
+    const bool depthEnabled = info.depthAttachmentFormat != VK_FORMAT_UNDEFINED;
 
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable       = depthEnabled ? VK_TRUE : VK_FALSE;
     depthStencil.depthWriteEnable      = depthEnabled ? VK_TRUE : VK_FALSE;
-    depthStencil.depthCompareOp        = VK_COMPARE_OP_LESS;
+    depthStencil.depthCompareOp        = info.depthCompareOp;
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable     = VK_FALSE;
 
@@ -152,8 +145,8 @@ Pipeline::Pipeline(Device& device,
     VkPipelineRenderingCreateInfo renderingInfo{};
     renderingInfo.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
     renderingInfo.colorAttachmentCount    = 1;
-    renderingInfo.pColorAttachmentFormats = &colorAttachmentFormat;
-    renderingInfo.depthAttachmentFormat   = depthAttachmentFormat; // UNDEFINED = no depth
+    renderingInfo.pColorAttachmentFormats = &info.colorAttachmentFormat;
+    renderingInfo.depthAttachmentFormat   = info.depthAttachmentFormat; // UNDEFINED = no depth
 
     // -------------------------------------------------------------------
     // Assemble the graphics pipeline.

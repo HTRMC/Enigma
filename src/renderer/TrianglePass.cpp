@@ -315,11 +315,18 @@ void TrianglePass::buildPipeline(gfx::ShaderManager& shaderManager,
     VkShaderModule vert = shaderManager.compile(m_shaderPath, gfx::ShaderManager::Stage::Vertex, "VSMain");
     VkShaderModule frag = shaderManager.compile(m_shaderPath, gfx::ShaderManager::Stage::Fragment, "PSMain");
 
-    m_pipeline = new gfx::Pipeline(*m_device,
-                                   vert, "VSMain",
-                                   frag, "PSMain",
-                                   globalSetLayout,
-                                   colorAttachmentFormat, depthAttachmentFormat);
+    gfx::Pipeline::CreateInfo ci{};
+    ci.vertShader            = vert;
+    ci.vertEntryPoint        = "VSMain";
+    ci.fragShader            = frag;
+    ci.fragEntryPoint        = "PSMain";
+    ci.globalSetLayout       = globalSetLayout;
+    ci.colorAttachmentFormat = colorAttachmentFormat;
+    ci.depthAttachmentFormat = depthAttachmentFormat;
+    ci.pushConstantSize      = 16;
+    ci.depthCompareOp        = VK_COMPARE_OP_GREATER_OR_EQUAL; // reverse-Z
+    ci.cullMode              = VK_CULL_MODE_NONE;
+    m_pipeline = new gfx::Pipeline(*m_device, ci);
 
     // Shader modules can be destroyed as soon as the pipeline is built.
     vkDestroyShaderModule(m_device->logical(), vert, nullptr);
@@ -354,11 +361,19 @@ void TrianglePass::rebuildPipeline() {
     vkDeviceWaitIdle(m_device->logical());
 
     delete m_pipeline;
-    m_pipeline = new gfx::Pipeline(*m_device,
-                                   vert, "VSMain",
-                                   frag, "PSMain",
-                                   m_globalSetLayout,
-                                   m_colorFormat, m_depthFormat);
+
+    gfx::Pipeline::CreateInfo ci{};
+    ci.vertShader            = vert;
+    ci.vertEntryPoint        = "VSMain";
+    ci.fragShader            = frag;
+    ci.fragEntryPoint        = "PSMain";
+    ci.globalSetLayout       = m_globalSetLayout;
+    ci.colorAttachmentFormat = m_colorFormat;
+    ci.depthAttachmentFormat = m_depthFormat;
+    ci.pushConstantSize      = 16;
+    ci.depthCompareOp        = VK_COMPARE_OP_GREATER_OR_EQUAL; // reverse-Z
+    ci.cullMode              = VK_CULL_MODE_NONE;
+    m_pipeline = new gfx::Pipeline(*m_device, ci);
 
     vkDestroyShaderModule(m_device->logical(), vert, nullptr);
     vkDestroyShaderModule(m_device->logical(), frag, nullptr);

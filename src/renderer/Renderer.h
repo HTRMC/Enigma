@@ -9,19 +9,22 @@
 #include "gfx/ShaderHotReload.h"
 #include "gfx/ShaderManager.h"
 #include "gfx/Swapchain.h"
+#include "renderer/MeshPass.h"
 #include "renderer/TrianglePass.h"
+
+#include <volk.h>
 
 #include <memory>
 
+struct VmaAllocation_T;
+using VmaAllocation = VmaAllocation_T*;
+
 namespace enigma {
 
+class Camera;
 class Window;
+struct Scene;
 
-// The top-level graphics facade. Owns the long-lived Vulkan objects and
-// drives one frame per `drawFrame()`. Construction order matches the
-// Renderer's member-initializer list; destruction is reverse order so
-// the bottom of the stack (Instance) outlives everything that depends
-// on it.
 class Renderer {
 public:
     explicit Renderer(Window& window);
@@ -34,7 +37,19 @@ public:
 
     void drawFrame();
 
+    // Set the active camera for rendering. Null reverts to identity.
+    void setCamera(Camera* camera) { m_camera = camera; }
+
+    // Set the scene to render. Null reverts to TrianglePass fallback.
+    void setScene(Scene* scene) { m_scene = scene; }
+
+    gfx::Device& device() { return *m_device; }
+    gfx::Allocator& allocator() { return *m_allocator; }
+    gfx::DescriptorAllocator& descriptorAllocator() { return *m_descriptorAllocator; }
+
 private:
+    void uploadCameraData();
+
     Window& m_window;
 
     std::unique_ptr<gfx::Instance>             m_instance;
@@ -46,8 +61,22 @@ private:
     std::unique_ptr<gfx::ShaderManager>        m_shaderManager;
     std::unique_ptr<gfx::ShaderHotReload>      m_shaderHotReload;
     std::unique_ptr<TrianglePass>              m_trianglePass;
+    std::unique_ptr<MeshPass>                  m_meshPass;
 
     u32 m_frameIndex = 0;
+
+    // Camera state.
+    Camera* m_camera = nullptr;
+    Scene*  m_scene  = nullptr;
+
+    // Per-frame camera SSBOs (one per frame-in-flight, double-buffered).
+    struct CameraBuffer {
+        VkBuffer      buffer     = VK_NULL_HANDLE;
+        VmaAllocation allocation = nullptr;
+        void*         mapped     = nullptr;
+        u32           bindlessSlot = 0;
+    };
+    CameraBuffer m_cameraBuffers[gfx::MAX_FRAMES_IN_FLIGHT]{};
 };
 
 } // namespace enigma

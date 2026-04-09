@@ -12,6 +12,7 @@ constexpr u32 kDefaultWindowHeight = 720;
 Engine::Engine()
     : m_window(kDefaultWindowWidth, kDefaultWindowHeight, "Enigma")
     , m_renderer(m_window)
+    , m_input(m_window)
     , m_clock() {
     ENIGMA_LOG_INFO("[engine] constructed ({}x{})", kDefaultWindowWidth, kDefaultWindowHeight);
 }

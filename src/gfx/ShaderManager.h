@@ -12,6 +12,7 @@
 // of this header and include it only in ShaderManager.cpp.
 struct IDxcUtils;
 struct IDxcCompiler3;
+struct IDxcIncludeHandler;
 
 namespace enigma::gfx {
 
@@ -72,9 +73,10 @@ public:
                               const std::string& entryPoint);
 
 private:
-    Device*        m_device      = nullptr;
-    IDxcUtils*     m_dxcUtils    = nullptr;
-    IDxcCompiler3* m_dxcCompiler = nullptr;
+    Device*              m_device         = nullptr;
+    IDxcUtils*           m_dxcUtils       = nullptr;
+    IDxcCompiler3*       m_dxcCompiler    = nullptr;
+    IDxcIncludeHandler*  m_includeHandler = nullptr;
 };
 
 } // namespace enigma::gfx

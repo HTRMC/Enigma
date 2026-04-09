@@ -103,6 +103,7 @@ void RequiredFeatures::requestAllRequired() {
 
     features2 = {};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2.features.samplerAnisotropy = VK_TRUE;
 
     features2.pNext = &v11;
     v11.pNext       = &v12;
@@ -156,6 +157,7 @@ Device::Device(Instance& instance) {
     ok &= check(have.v12.descriptorBindingStorageImageUpdateAfterBind,  "Vulkan12.descriptorBindingStorageImageUpdateAfterBind");
     ok &= check(have.v12.descriptorBindingStorageBufferUpdateAfterBind, "Vulkan12.descriptorBindingStorageBufferUpdateAfterBind");
     ok &= check(have.v12.timelineSemaphore,                        "Vulkan12.timelineSemaphore");
+    ok &= check(have.features2.features.samplerAnisotropy,        "features.samplerAnisotropy");
     if (!ok) {
         ENIGMA_ASSERT(false);
         return;

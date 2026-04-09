@@ -48,14 +48,20 @@ public:
     // strings and must outlive the Pipeline constructor call (string
     // literals are fine; any dynamic storage must live at least that
     // long).
-    Pipeline(Device& device,
-             VkShaderModule vertShader,
-             const char* vertEntryPoint,
-             VkShaderModule fragShader,
-             const char* fragEntryPoint,
-             VkDescriptorSetLayout globalSetLayout,
-             VkFormat colorAttachmentFormat,
-             VkFormat depthAttachmentFormat = VK_FORMAT_UNDEFINED);
+    struct CreateInfo {
+        VkShaderModule        vertShader          = VK_NULL_HANDLE;
+        const char*           vertEntryPoint      = "VSMain";
+        VkShaderModule        fragShader          = VK_NULL_HANDLE;
+        const char*           fragEntryPoint      = "PSMain";
+        VkDescriptorSetLayout globalSetLayout     = VK_NULL_HANDLE;
+        VkFormat              colorAttachmentFormat = VK_FORMAT_UNDEFINED;
+        VkFormat              depthAttachmentFormat = VK_FORMAT_UNDEFINED;
+        u32                   pushConstantSize    = 16;
+        VkCompareOp           depthCompareOp      = VK_COMPARE_OP_LESS;
+        VkCullModeFlagBits    cullMode            = VK_CULL_MODE_NONE;
+    };
+
+    Pipeline(Device& device, const CreateInfo& info);
     ~Pipeline();
 
     Pipeline(const Pipeline&)            = delete;

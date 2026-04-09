@@ -40,10 +40,16 @@ target_sources(Enigma PRIVATE
     src/core/Log.cpp
     src/core/Paths.cpp
     src/platform/Window.cpp
+    src/input/Input.cpp
     src/engine/Clock.cpp
     src/engine/Application.cpp
     src/engine/Engine.cpp
+    src/scene/Camera.cpp
+    src/scene/CameraController.cpp
+    src/scene/Scene.cpp
+    src/asset/GltfLoader.cpp
     src/renderer/Renderer.cpp
+    src/renderer/MeshPass.cpp
     src/gfx/Instance.cpp
     src/gfx/Validation.cpp
     src/gfx/Device.cpp
@@ -53,6 +59,7 @@ target_sources(Enigma PRIVATE
     src/gfx/DescriptorAllocator.cpp
     src/gfx/ShaderManager.cpp
     src/gfx/ShaderHotReload.cpp
+    src/gfx/UploadContext.cpp
     src/gfx/Pipeline.cpp
     src/renderer/TrianglePass.cpp
 )
@@ -80,6 +87,8 @@ target_include_directories(Enigma SYSTEM PRIVATE
     ${VulkanMemoryAllocator_SOURCE_DIR}/include
     ${glfw_SOURCE_DIR}/include
     ${glm_SOURCE_DIR}
+    ${cgltf_SOURCE_DIR}
+    ${stb_SOURCE_DIR}
 )
 
 # volk loads Vulkan at runtime; we only need the Vulkan headers transitively
@@ -87,6 +96,7 @@ target_include_directories(Enigma SYSTEM PRIVATE
 target_compile_definitions(Enigma PRIVATE
     VK_NO_PROTOTYPES
     $<$<PLATFORM_ID:Windows>:VK_USE_PLATFORM_WIN32_KHR>
+    $<$<PLATFORM_ID:Windows>:NOMINMAX>
     GLFW_INCLUDE_NONE
     ENIGMA_SHADER_SOURCE_DIR="${CMAKE_SOURCE_DIR}/shaders"
 )
@@ -121,6 +131,16 @@ add_custom_command(TARGET Enigma POST_BUILD
             $<TARGET_FILE_DIR:Enigma>/shaders
     COMMENT "Copying shaders next to Enigma executable"
 )
+
+# Copy bundled assets (default glTF model) next to the executable.
+if(EXISTS "${CMAKE_SOURCE_DIR}/assets")
+    add_custom_command(TARGET Enigma POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                ${CMAKE_SOURCE_DIR}/assets
+                $<TARGET_FILE_DIR:Enigma>/assets
+        COMMENT "Copying assets next to Enigma executable"
+    )
+endif()
 
 # -----------------------------------------------------------------------------
 # Vulkan SDK dxcompiler.dll copy: Windows has upwards of 20 copies of

@@ -2,14 +2,12 @@
 
 #include "core/Types.h"
 #include "engine/Clock.h"
+#include "input/Input.h"
 #include "platform/Window.h"
 #include "renderer/Renderer.h"
 
 namespace enigma {
 
-// Owns the long-lived subsystems. Construction order = `Window -> Renderer
-// -> Clock`; destruction is reverse. The Engine does not own the Application
-// loop; Application drives frame stepping.
 class Engine {
 public:
     Engine();
@@ -23,10 +21,12 @@ public:
     Window&   window()   { return m_window;   }
     Renderer& renderer() { return m_renderer; }
     Clock&    clock()    { return m_clock;    }
+    Input&    input()    { return m_input;    }
 
 private:
     Window   m_window;
     Renderer m_renderer;
+    Input    m_input;
     Clock    m_clock;
 };
 

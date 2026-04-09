@@ -57,3 +57,33 @@ FetchContent_Declare(
     GIT_TAG        0af55ccecd98d4e5a8d1fad7de25ba429d60e863
 )
 FetchContent_MakeAvailable(glm)
+
+# -----------------------------------------------------------------------------
+# cgltf — single-file C99 glTF 2.0 parser. No build system, no dependencies,
+# no C++ standard compatibility concerns. Header-only.
+# Tag: v1.14
+# -----------------------------------------------------------------------------
+FetchContent_Declare(
+    cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG        v1.14
+)
+FetchContent_GetProperties(cgltf)
+if(NOT cgltf_POPULATED)
+    FetchContent_Populate(cgltf)
+endif()
+
+# -----------------------------------------------------------------------------
+# stb — Sean Barrett's single-file public domain libraries. Only stb_image.h
+# is used (PNG/JPEG/BMP/TGA decoding for glTF texture loading). Header-only.
+# Commit: latest as of 2024-07 (no versioned releases)
+# -----------------------------------------------------------------------------
+FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG        f75e8d1cad7d90d72ef7a4661f1b994ef78b4e31
+)
+FetchContent_GetProperties(stb)
+if(NOT stb_POPULATED)
+    FetchContent_Populate(stb)
+endif()

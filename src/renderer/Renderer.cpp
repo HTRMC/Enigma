@@ -12,9 +12,17 @@
 #include "gfx/Swapchain.h"
 #include "gfx/Validation.h"
 #include "platform/Window.h"
+#include "renderer/MeshPass.h"
 #include "renderer/TrianglePass.h"
+#include "scene/Camera.h"
+#include "scene/Scene.h"
+
+#define VMA_STATIC_VULKAN_FUNCTIONS  0
+#define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
+#include <vk_mem_alloc.h>
 
 #include <algorithm>
+#include <cstring>
 
 namespace enigma {
 
@@ -28,7 +36,8 @@ Renderer::Renderer(Window& window)
     , m_descriptorAllocator(std::make_unique<gfx::DescriptorAllocator>(*m_device))
     , m_shaderManager(std::make_unique<gfx::ShaderManager>(*m_device))
     , m_shaderHotReload(std::make_unique<gfx::ShaderHotReload>())
-    , m_trianglePass(std::make_unique<TrianglePass>(*m_device, *m_allocator, *m_descriptorAllocator)) {
+    , m_trianglePass(std::make_unique<TrianglePass>(*m_device, *m_allocator, *m_descriptorAllocator))
+    , m_meshPass(std::make_unique<MeshPass>(*m_device)) {
 
     m_trianglePass->buildPipeline(*m_shaderManager,
                                   m_descriptorAllocator->layout(),
@@ -36,7 +45,43 @@ Renderer::Renderer(Window& window)
                                   m_swapchain->depthFormat());
     m_trianglePass->registerHotReload(*m_shaderHotReload);
 
-    ENIGMA_LOG_INFO("[renderer] constructed");
+    m_meshPass->buildPipeline(*m_shaderManager,
+                              m_descriptorAllocator->layout(),
+                              m_swapchain->format(),
+                              m_swapchain->depthFormat());
+    m_meshPass->registerHotReload(*m_shaderHotReload);
+
+    // Create per-frame camera SSBOs (host-visible, persistently mapped).
+    // 13 float4s = 208 bytes per camera buffer.
+    constexpr VkDeviceSize kCameraBufferSize = sizeof(GpuCameraData);
+    for (u32 i = 0; i < gfx::MAX_FRAMES_IN_FLIGHT; ++i) {
+        VkBufferCreateInfo bufInfo{};
+        bufInfo.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufInfo.size        = kCameraBufferSize;
+        bufInfo.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+        bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        VmaAllocationCreateInfo allocInfo{};
+        allocInfo.usage = VMA_MEMORY_USAGE_AUTO;
+        allocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                        | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+        VmaAllocationInfo allocResult{};
+        ENIGMA_VK_CHECK(vmaCreateBuffer(m_allocator->handle(), &bufInfo, &allocInfo,
+                                        &m_cameraBuffers[i].buffer,
+                                        &m_cameraBuffers[i].allocation,
+                                        &allocResult));
+        m_cameraBuffers[i].mapped = allocResult.pMappedData;
+        ENIGMA_ASSERT(m_cameraBuffers[i].mapped != nullptr);
+
+        m_cameraBuffers[i].bindlessSlot =
+            m_descriptorAllocator->registerStorageBuffer(
+                m_cameraBuffers[i].buffer, kCameraBufferSize);
+    }
+
+    ENIGMA_LOG_INFO("[renderer] constructed (camera slots: {}, {})",
+                    m_cameraBuffers[0].bindlessSlot,
+                    m_cameraBuffers[1].bindlessSlot);
 }
 
 Renderer::~Renderer() {
@@ -44,13 +89,13 @@ Renderer::~Renderer() {
         vkDeviceWaitIdle(m_device->logical());
     }
 
-    // -------------------------------------------------------------------
-    // Validation counter shutdown gate (AC6). This is the ONLY place
-    // the plan asserts validation-clean. Any WARNING_BIT/ERROR_BIT
-    // fired across init, steady-state, resize, minimize, or teardown
-    // would have incremented the counter; a non-zero value here is a
-    // milestone regression.
-    // -------------------------------------------------------------------
+    // Clean up camera buffers.
+    for (auto& cb : m_cameraBuffers) {
+        if (cb.buffer != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(m_allocator->handle(), cb.buffer, cb.allocation);
+        }
+    }
+
     const u32 validationCount = gfx::getValidationCounter();
     ENIGMA_LOG_INFO("[renderer] shutdown g_validationCounter = {}", validationCount);
     ENIGMA_ASSERT(validationCount == 0);
@@ -58,10 +103,28 @@ Renderer::~Renderer() {
     ENIGMA_LOG_INFO("[renderer] shutdown");
 }
 
+void Renderer::uploadCameraData() {
+    const auto& cb = m_cameraBuffers[m_frameIndex];
+    const auto extent = m_swapchain->extent();
+    const f32 aspect = (extent.height > 0)
+        ? static_cast<f32>(extent.width) / static_cast<f32>(extent.height)
+        : 1.0f;
+
+    GpuCameraData data{};
+    if (m_camera != nullptr) {
+        data = m_camera->gpuData(aspect);
+    } else {
+        // Identity camera fallback.
+        data.view     = mat4{1.0f};
+        data.proj     = mat4{1.0f};
+        data.viewProj = mat4{1.0f};
+        data.worldPos = vec4{0.0f, 0.0f, 0.0f, 1.0f};
+    }
+
+    std::memcpy(cb.mapped, &data, sizeof(data));
+}
+
 void Renderer::drawFrame() {
-    // Minimized window (0x0): block until an event arrives so the
-    // frame loop does not spin, and return without submitting any
-    // Vulkan work. Zero contribution to the validation counter.
     {
         const auto fb = m_window.framebufferSize();
         if (fb.width == 0 || fb.height == 0) {
@@ -70,27 +133,11 @@ void Renderer::drawFrame() {
         }
     }
 
-    // Poll shader source files for edits. On a detected change the
-    // watcher invokes TrianglePass::rebuildPipeline() which does its
-    // own vkDeviceWaitIdle before swapping the pipeline — safe to
-    // run before frame submission, and cheap on the common no-change
-    // path (two `last_write_time` stats per watched file).
     m_shaderHotReload->poll();
 
     VkDevice dev = m_device->logical();
     gfx::FrameContext& frame = m_frames->get(m_frameIndex);
 
-    // -------------------------------------------------------------------
-    // Timeline semaphore wait: hold off until this FrameContext's last
-    // submission has fully retired. `frame.frameValue` is the timeline
-    // value signaled by that submission (0 if the slot has never been
-    // used yet). Waiting on the last signaled value is exactly what
-    // gates slot reuse — the old "-MAX_FRAMES_IN_FLIGHT + 1" formula
-    // was a typo that looked at the wrong slot's value and let the
-    // CPU race past still-in-flight command buffers, causing the
-    // cascade of `command buffer in use` / `semaphore has pending
-    // operations` validation errors and eventually VK_ERROR_DEVICE_LOST.
-    // -------------------------------------------------------------------
     if (frame.frameValue > 0) {
         VkSemaphoreWaitInfo waitInfo{};
         waitInfo.sType          = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO;
@@ -100,11 +147,6 @@ void Renderer::drawFrame() {
         ENIGMA_VK_CHECK(vkWaitSemaphores(dev, &waitInfo, UINT64_MAX));
     }
 
-    // -------------------------------------------------------------------
-    // Acquire next swapchain image. OUT_OF_DATE triggers a rebuild and
-    // skips the frame; SUBOPTIMAL is accepted and flagged to rebuild
-    // after present.
-    // -------------------------------------------------------------------
     u32 imageIndex = 0;
     {
         const VkResult acquireResult = vkAcquireNextImageKHR(
@@ -120,20 +162,9 @@ void Renderer::drawFrame() {
         }
     }
 
-    // -------------------------------------------------------------------
-    // Record. Reset the per-frame command pool, begin the command
-    // buffer, record the triangle pass, end.
-    //
-    // NOTE: At step 39 the color attachment is still in UNDEFINED layout
-    // and no dynamic-rendering begin/end is wired. Validation will fire
-    // at this commit. Step 40 adds the sync2 layout transitions and
-    // vkCmdBeginRendering/vkCmdEndRendering to make the frame
-    // validation-clean.
-    //
-    // BISECT WARNING: do not `git bisect` any unrelated regression
-    // across the boundary between this commit and step 40 — the engine
-    // is intentionally not validation-clean at this intermediate state.
-    // -------------------------------------------------------------------
+    // Upload camera data for this frame.
+    uploadCameraData();
+
     ENIGMA_VK_CHECK(vkResetCommandPool(dev, frame.commandPool, 0));
 
     VkCommandBufferBeginInfo beginInfo{};
@@ -147,11 +178,7 @@ void Renderer::drawFrame() {
     VkImageView depthView   = m_swapchain->depthView();
     const VkExtent2D extent = m_swapchain->extent();
 
-    // ---- UNDEFINED -> COLOR/DEPTH_ATTACHMENT_OPTIMAL (sync2 barriers) --
-    // Batched into a single VkDependencyInfo: one barrier for the
-    // swapchain color image and one for the shared depth image. Both
-    // use UNDEFINED as oldLayout so previous contents are explicitly
-    // discarded — matches the LOAD_OP_CLEAR we issue below for each.
+    // UNDEFINED -> COLOR/DEPTH_ATTACHMENT_OPTIMAL
     {
         const VkImageMemoryBarrier2 barriers[2] = {
             {
@@ -192,7 +219,7 @@ void Renderer::drawFrame() {
         vkCmdPipelineBarrier2(frame.commandBuffer, &dep);
     }
 
-    // ---- Dynamic rendering begin --------------------------------------
+    // Dynamic rendering begin.
     VkRenderingAttachmentInfo colorAttach{};
     colorAttach.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
     colorAttach.imageView   = targetView;
@@ -207,7 +234,7 @@ void Renderer::drawFrame() {
     depthAttach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     depthAttach.loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR;
     depthAttach.storeOp     = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttach.clearValue.depthStencil = {1.0f, 0};
+    depthAttach.clearValue.depthStencil = {0.0f, 0}; // reverse-Z: far=0
 
     VkRenderingInfo renderingInfo{};
     renderingInfo.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
@@ -219,15 +246,21 @@ void Renderer::drawFrame() {
     renderingInfo.pDepthAttachment     = &depthAttach;
     vkCmdBeginRendering(frame.commandBuffer, &renderingInfo);
 
-    // ---- Triangle draw ------------------------------------------------
-    m_trianglePass->record(frame.commandBuffer,
+    // Draw scene or fallback triangle.
+    const u32 cameraSlot = m_cameraBuffers[m_frameIndex].bindlessSlot;
+    if (m_scene != nullptr) {
+        m_meshPass->record(frame.commandBuffer,
                            m_descriptorAllocator->globalSet(),
-                           extent);
+                           extent, *m_scene, cameraSlot);
+    } else {
+        m_trianglePass->record(frame.commandBuffer,
+                               m_descriptorAllocator->globalSet(),
+                               extent);
+    }
 
-    // ---- Dynamic rendering end ----------------------------------------
     vkCmdEndRendering(frame.commandBuffer);
 
-    // ---- COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC_KHR ------------------
+    // COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC_KHR
     {
         VkImageMemoryBarrier2 barrier{};
         barrier.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -251,19 +284,13 @@ void Renderer::drawFrame() {
 
     ENIGMA_VK_CHECK(vkEndCommandBuffer(frame.commandBuffer));
 
-    // -------------------------------------------------------------------
-    // Submit. Waits on `imageAvailable` (binary), signals the
-    // swapchain's per-image `renderFinished` (binary) for present, plus
-    // the timeline `inFlight` at value `frameValue + 1` for CPU/GPU
-    // pipelining.
-    // -------------------------------------------------------------------
+    // Submit.
     const u64 signalValue = frame.frameValue + 1;
-
     const VkSemaphore imageRenderFinished = m_swapchain->renderFinished(imageIndex);
 
-    const VkSemaphore        waitSems[]   = { frame.imageAvailable };
+    const VkSemaphore        waitSems[]    = { frame.imageAvailable };
     const VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
-    const VkSemaphore        signalSems[] = { imageRenderFinished, frame.inFlight };
+    const VkSemaphore        signalSems[]  = { imageRenderFinished, frame.inFlight };
     const u64                signalValues[] = { 0, signalValue };
 
     VkTimelineSemaphoreSubmitInfo timelineInfo{};
@@ -287,9 +314,7 @@ void Renderer::drawFrame() {
     ENIGMA_VK_CHECK(vkQueueSubmit(m_device->graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
     frame.frameValue = signalValue;
 
-    // -------------------------------------------------------------------
     // Present.
-    // -------------------------------------------------------------------
     VkSwapchainKHR swapchain = m_swapchain->handle();
 
     VkPresentInfoKHR presentInfo{};
