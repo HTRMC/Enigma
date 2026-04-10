@@ -20,8 +20,7 @@ GpuProfiler::GpuProfiler(Device& device)
     info.queryType  = VK_QUERY_TYPE_TIMESTAMP;
     info.queryCount = kMaxZones * 2; // begin + end per zone
 
-    const VkResult vr = vkCreateQueryPool(m_device, &info, nullptr, &m_queryPool);
-    ENIGMA_ASSERT(vr == VK_SUCCESS && "vkCreateQueryPool failed for GpuProfiler");
+    ENIGMA_VK_CHECK(vkCreateQueryPool(m_device, &info, nullptr, &m_queryPool));
     ENIGMA_LOG_INFO("[gfx] GpuProfiler created ({} timestamp slots)", kMaxZones * 2);
 }
 
