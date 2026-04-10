@@ -2,13 +2,16 @@
 
 #include "core/Assert.h"
 #include "core/Log.h"
+#include "gfx/Allocator.h"
 #include "gfx/Device.h"
 #include "scene/Scene.h"
 
 #include <volk.h>
+#include <vk_mem_alloc.h>
 
 #include <algorithm>
 #include <cstring>
+#include <vector>
 
 namespace enigma {
 
@@ -22,7 +25,6 @@ void DeformationSystem::registerPrimitive(u32 primitiveIndex,
     state.originalPositions = std::move(originalPositions);
     state.deformedPositions = state.originalPositions;
     state.zone              = std::move(zone);
-    state.largeDisplacementCount = 0;
 
     m_primitives.push_back(std::move(state));
 }
@@ -53,11 +55,6 @@ f32 DeformationSystem::applyImpact(const ImpactEvent& event, f32 radius) {
             if (displacement > 0.0f) {
                 ps.deformedPositions[i] += event.direction * displacement;
                 maxDisp = std::max(maxDisp, displacement);
-
-                // Track large displacements for rebuild decision.
-                if (displacement > vert.maxDisplacement * 0.3f) {
-                    ++ps.largeDisplacementCount;
-                }
             }
         }
 
@@ -72,21 +69,55 @@ f32 DeformationSystem::applyImpact(const ImpactEvent& event, f32 radius) {
 
 void DeformationSystem::uploadDeformedPositions(u32 primitiveIndex,
                                                   VkBuffer vertexBuffer,
-                                                  gfx::Device& device) {
+                                                  gfx::Device& device,
+                                                  gfx::Allocator& allocator) {
     const PrimitiveState* ps = findPrimitive(primitiveIndex);
     if (ps == nullptr) return;
+
+    const u32 vertexCount = static_cast<u32>(ps->deformedPositions.size());
+    if (vertexCount == 0) return;
 
     // Vertex layout: position(vec3) + normal(vec3) + uv(vec2) + tangent(vec4) = 48 bytes.
     constexpr VkDeviceSize kVertexStride = 48;
     constexpr VkDeviceSize kPositionSize = sizeof(vec3); // 12 bytes
 
-    // Get buffer memory via vkMapMemory on the device memory bound to vertexBuffer.
-    VkMemoryRequirements memReqs{};
-    vkGetBufferMemoryRequirements(device.logical(), vertexBuffer, &memReqs);
+    const VkDeviceSize stagingSize = static_cast<VkDeviceSize>(vertexCount) * kPositionSize;
 
-    // Use an immediate command buffer to copy position data via staging.
-    // For simplicity, we use vkCmdUpdateBuffer which supports small updates
-    // inline in the command buffer (max 65536 bytes per call).
+    // Allocate host-visible staging buffer.
+    VkBufferCreateInfo stagingCI{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    stagingCI.size  = stagingSize;
+    stagingCI.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+    VmaAllocationCreateInfo stagingAllocCI{};
+    stagingAllocCI.usage = VMA_MEMORY_USAGE_AUTO;
+    stagingAllocCI.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT |
+                           VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+    VkBuffer      stagingBuf{};
+    VmaAllocation stagingAlloc{};
+    VmaAllocationInfo stagingInfo{};
+    ENIGMA_VK_CHECK(vmaCreateBuffer(allocator.handle(), &stagingCI, &stagingAllocCI,
+                                    &stagingBuf, &stagingAlloc, &stagingInfo));
+
+    // Copy deformed positions into staging (packed, one vec3 per vertex).
+    auto* dst = static_cast<vec3*>(stagingInfo.pMappedData);
+    for (u32 i = 0; i < vertexCount; ++i) {
+        dst[i] = ps->deformedPositions[i];
+    }
+    vmaFlushAllocation(allocator.handle(), stagingAlloc, 0, VK_WHOLE_SIZE);
+
+    // Build one copy region per vertex: staging[i*12] -> vertexBuffer[i*48], 12 bytes.
+    std::vector<VkBufferCopy> regions;
+    regions.reserve(vertexCount);
+    for (u32 i = 0; i < vertexCount; ++i) {
+        VkBufferCopy r{};
+        r.srcOffset = static_cast<VkDeviceSize>(i) * kPositionSize;
+        r.dstOffset = static_cast<VkDeviceSize>(i) * kVertexStride;
+        r.size      = kPositionSize;
+        regions.push_back(r);
+    }
+
+    // Immediate submit: single vkCmdCopyBuffer with N regions instead of N vkCmdUpdateBuffer calls.
     VkCommandPoolCreateInfo poolCI{};
     poolCI.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolCI.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -109,11 +140,8 @@ void DeformationSystem::uploadDeformedPositions(u32 primitiveIndex,
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     ENIGMA_VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
 
-    const u32 vertexCount = static_cast<u32>(ps->deformedPositions.size());
-    for (u32 i = 0; i < vertexCount; ++i) {
-        const VkDeviceSize offset = static_cast<VkDeviceSize>(i) * kVertexStride;
-        vkCmdUpdateBuffer(cmd, vertexBuffer, offset, kPositionSize, &ps->deformedPositions[i]);
-    }
+    vkCmdCopyBuffer(cmd, stagingBuf, vertexBuffer,
+                    static_cast<u32>(regions.size()), regions.data());
 
     ENIGMA_VK_CHECK(vkEndCommandBuffer(cmd));
 
@@ -125,17 +153,27 @@ void DeformationSystem::uploadDeformedPositions(u32 primitiveIndex,
     ENIGMA_VK_CHECK(vkQueueWaitIdle(device.graphicsQueue()));
 
     vkDestroyCommandPool(device.logical(), cmdPool, nullptr);
+    vmaDestroyBuffer(allocator.handle(), stagingBuf, stagingAlloc);
 }
 
 bool DeformationSystem::requiresBlasRebuild(u32 primitiveIndex) const {
     const PrimitiveState* ps = findPrimitive(primitiveIndex);
     if (ps == nullptr) return false;
 
-    const u32 totalVertices = static_cast<u32>(ps->deformedPositions.size());
-    if (totalVertices == 0) return false;
+    const u32 vertexCount = static_cast<u32>(ps->deformedPositions.size());
+    if (vertexCount == 0) return false;
 
-    // Rebuild if > 30% of vertices have large displacements.
-    const f32 ratio = static_cast<f32>(ps->largeDisplacementCount) / static_cast<f32>(totalVertices);
+    // Count vertices whose total displacement from original exceeds 30% of their max.
+    u32 largeCount = 0;
+    for (u32 i = 0; i < vertexCount; ++i) {
+        const f32 totalDisp = glm::length(ps->deformedPositions[i] - ps->originalPositions[i]);
+        const f32 threshold = ps->zone.vertices[i].maxDisplacement * 0.3f;
+        if (totalDisp > threshold) {
+            ++largeCount;
+        }
+    }
+
+    const f32 ratio = static_cast<f32>(largeCount) / static_cast<f32>(vertexCount);
     return ratio > 0.3f;
 }
 
@@ -143,8 +181,7 @@ void DeformationSystem::reset(u32 primitiveIndex) {
     PrimitiveState* ps = findPrimitive(primitiveIndex);
     if (ps == nullptr) return;
 
-    ps->deformedPositions = ps->originalPositions;
-    ps->largeDisplacementCount = 0;
+    ps->deformedPositions  = ps->originalPositions;
     ps->zone.currentDamage = 0.0f;
 }
 

@@ -321,7 +321,7 @@ void Renderer::drawFrame() {
             if (!prim.blas.has_value()) continue;
 
             // uploadDeformedPositions no-ops for unregistered primitives.
-            m_deformationSystem.uploadDeformedPositions(i, prim.vertexBuffer, *m_device);
+            m_deformationSystem.uploadDeformedPositions(i, prim.vertexBuffer, *m_device, *m_allocator);
 
             if (m_deformationSystem.requiresBlasRebuild(i)) {
                 prim.blas->rebuild(*m_device, *m_allocator,

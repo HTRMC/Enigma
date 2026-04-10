@@ -51,7 +51,8 @@ public:
     // Only updates the position component of each vertex (leaves normal/uv/tangent intact).
     void uploadDeformedPositions(u32 primitiveIndex,
                                  VkBuffer vertexBuffer,
-                                 gfx::Device& device);
+                                 gfx::Device& device,
+                                 gfx::Allocator& allocator);
 
     // Returns true if the deformation is large enough to require a BLAS rebuild
     // (> 30% of vertices displaced > maxDisplacement * 0.3).
@@ -70,7 +71,6 @@ private:
         std::vector<vec3> originalPositions;
         std::vector<vec3> deformedPositions;
         CrumpleZone       zone;
-        u32               largeDisplacementCount = 0; // for rebuild decision
     };
 
     std::vector<PrimitiveState> m_primitives;
