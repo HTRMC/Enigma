@@ -7,6 +7,7 @@
 #include "gfx/Device.h"
 #include "gfx/FrameContext.h"
 #include "gfx/Instance.h"
+#include "gfx/GpuProfiler.h"
 #include "gfx/ShaderHotReload.h"
 #include "gfx/ShaderManager.h"
 #include "gfx/Swapchain.h"
@@ -34,6 +35,7 @@ Renderer::Renderer(Window& window)
     , m_swapchain(std::make_unique<gfx::Swapchain>(*m_instance, *m_device, *m_allocator, m_window))
     , m_frames(std::make_unique<gfx::FrameContextSet>(*m_device))
     , m_descriptorAllocator(std::make_unique<gfx::DescriptorAllocator>(*m_device))
+    , m_gpuProfiler(std::make_unique<gfx::GpuProfiler>(*m_device))
     , m_shaderManager(std::make_unique<gfx::ShaderManager>(*m_device))
     , m_shaderHotReload(std::make_unique<gfx::ShaderHotReload>())
     , m_trianglePass(std::make_unique<TrianglePass>(*m_device, *m_allocator, *m_descriptorAllocator))
@@ -167,10 +169,21 @@ void Renderer::drawFrame() {
 
     ENIGMA_VK_CHECK(vkResetCommandPool(dev, frame.commandPool, 0));
 
+    // Read back GPU timings from the previous frame before resetting the pool.
+    // (The previous frame's submissions are guaranteed done by the timeline wait above.)
+    if (frame.frameValue > 0) {
+        const auto results = m_gpuProfiler->readback();
+        for (const auto& r : results) {
+            ENIGMA_LOG_INFO("[gpu] {} = {:.3f} ms", r.name, r.durationMs);
+        }
+    }
+
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     ENIGMA_VK_CHECK(vkBeginCommandBuffer(frame.commandBuffer, &beginInfo));
+
+    m_gpuProfiler->reset(frame.commandBuffer);
 
     VkImage     targetImage = m_swapchain->image(imageIndex);
     VkImageView targetView  = m_swapchain->view(imageIndex);
@@ -248,6 +261,7 @@ void Renderer::drawFrame() {
 
     // Draw scene or fallback triangle.
     const u32 cameraSlot = m_cameraBuffers[m_frameIndex].bindlessSlot;
+    m_gpuProfiler->beginZone(frame.commandBuffer, "MeshPass");
     if (m_scene != nullptr) {
         m_meshPass->record(frame.commandBuffer,
                            m_descriptorAllocator->globalSet(),
@@ -259,6 +273,7 @@ void Renderer::drawFrame() {
                                m_descriptorAllocator->globalSet(),
                                extent);
     }
+    m_gpuProfiler->endZone(frame.commandBuffer);
 
     vkCmdEndRendering(frame.commandBuffer);
 
