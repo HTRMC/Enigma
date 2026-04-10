@@ -105,11 +105,6 @@ set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
 set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
 set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
 set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
-# Match Enigma's $<$<CONFIG:Debug>:JPH_ENABLE_ASSERTS> so the define is
-# consistent between the Jolt library and every TU that includes Jolt headers.
-if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(ENABLE_ASSERTS ON CACHE BOOL "" FORCE)
-endif()
 FetchContent_Declare(
     JoltPhysics
     GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git

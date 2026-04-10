@@ -126,7 +126,6 @@ target_compile_definitions(Enigma PRIVATE
     $<$<PLATFORM_ID:Windows>:NOMINMAX>
     GLFW_INCLUDE_NONE
     ENIGMA_SHADER_SOURCE_DIR="${CMAKE_SOURCE_DIR}/shaders"
-    $<$<CONFIG:Debug>:JPH_ENABLE_ASSERTS>
     $<$<CONFIG:Release>:JPH_NO_DEBUG>
 )
 
