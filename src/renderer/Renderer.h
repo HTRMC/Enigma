@@ -137,6 +137,9 @@ private:
     std::chrono::steady_clock::time_point m_lastFrameTime{};
     f32                                   m_cpuFrameTimeMs = 0.f;
 
+    // Cached memory properties — queried once at construction, never changes.
+    VkPhysicalDeviceMemoryProperties m_memoryProperties{};
+
     // Camera state.
     Camera* m_camera = nullptr;
     Scene*  m_scene  = nullptr;

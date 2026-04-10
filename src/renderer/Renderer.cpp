@@ -212,6 +212,8 @@ Renderer::Renderer(Window& window)
                 m_cameraBuffers[i].buffer, kCameraBufferSize);
     }
 
+    vkGetPhysicalDeviceMemoryProperties(m_device->physical(), &m_memoryProperties);
+
     ENIGMA_LOG_INFO("[renderer] constructed (camera slots: {}, {})",
                     m_cameraBuffers[0].bindlessSlot,
                     m_cameraBuffers[1].bindlessSlot);
@@ -371,9 +373,6 @@ void Renderer::drawFrame() {
     // (The previous frame's submissions are guaranteed done by the timeline wait above.)
     if (frame.frameValue > 0) {
         m_lastGpuTimings = m_gpuProfiler->readback();
-        for (const auto& r : m_lastGpuTimings) {
-            ENIGMA_LOG_INFO("[gpu] {} = {:.3f} ms", r.name, r.durationMs);
-        }
     }
 
     VkCommandBufferBeginInfo beginInfo{};
@@ -390,12 +389,10 @@ void Renderer::drawFrame() {
         // Query device-local VRAM budget for the perf panel.
         f32 vramUsedMb = 0.f, vramBudgetMb = 0.f;
         {
-            VkPhysicalDeviceMemoryProperties memProps{};
-            vkGetPhysicalDeviceMemoryProperties(m_device->physical(), &memProps);
-            std::vector<VmaBudget> budgets(memProps.memoryHeapCount);
+            std::vector<VmaBudget> budgets(m_memoryProperties.memoryHeapCount);
             vmaGetHeapBudgets(m_allocator->handle(), budgets.data());
-            for (u32 i = 0; i < memProps.memoryHeapCount; ++i) {
-                if (memProps.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            for (u32 i = 0; i < m_memoryProperties.memoryHeapCount; ++i) {
+                if (m_memoryProperties.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
                     vramUsedMb   += static_cast<f32>(budgets[i].usage)  / (1024.f * 1024.f);
                     vramBudgetMb += static_cast<f32>(budgets[i].budget) / (1024.f * 1024.f);
                 }
