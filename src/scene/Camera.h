@@ -8,14 +8,20 @@ namespace enigma {
 // GPU-side camera data layout. All members are 16-byte aligned so
 // std430 layout matches C++ natural alignment — no scalarBlockLayout
 // needed. Uploaded to a bindless SSBO (binding 2) each frame.
+//
+// Buffer indices (each mat4 = 4×float4 rows; worldPos at slot 20):
+//   view[0..3]  proj[4..7]  viewProj[8..11]  prevViewProj[12..15]
+//   invViewProj[16..19]  worldPos[20]
 struct GpuCameraData {
     mat4 view;
     mat4 proj;
     mat4 viewProj;
-    vec4 worldPos; // xyz = position, w unused
+    mat4 prevViewProj;  // previous frame — patched by Renderer for motion vectors
+    mat4 invViewProj;   // inverse viewProj — for depth → world-pos reconstruction
+    vec4 worldPos;      // xyz = position, w unused
 };
 
-static_assert(sizeof(GpuCameraData) == 208);
+static_assert(sizeof(GpuCameraData) == 336);
 
 // First-person camera with reverse-Z infinite perspective projection.
 // Orientation is quaternion-based (no gimbal lock). Aspect ratio is

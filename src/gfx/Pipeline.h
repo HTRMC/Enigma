@@ -49,16 +49,23 @@ public:
     // literals are fine; any dynamic storage must live at least that
     // long).
     struct CreateInfo {
-        VkShaderModule        vertShader          = VK_NULL_HANDLE;
-        const char*           vertEntryPoint      = "VSMain";
-        VkShaderModule        fragShader          = VK_NULL_HANDLE;
-        const char*           fragEntryPoint      = "PSMain";
-        VkDescriptorSetLayout globalSetLayout     = VK_NULL_HANDLE;
+        VkShaderModule        vertShader            = VK_NULL_HANDLE;
+        const char*           vertEntryPoint        = "VSMain";
+        VkShaderModule        fragShader            = VK_NULL_HANDLE;
+        const char*           fragEntryPoint        = "PSMain";
+        VkDescriptorSetLayout globalSetLayout       = VK_NULL_HANDLE;
+        // Single color attachment (legacy / simple pass). Ignored when
+        // colorAttachmentCount > 0.
         VkFormat              colorAttachmentFormat = VK_FORMAT_UNDEFINED;
         VkFormat              depthAttachmentFormat = VK_FORMAT_UNDEFINED;
-        u32                   pushConstantSize    = 16;
-        VkCompareOp           depthCompareOp      = VK_COMPARE_OP_LESS;
-        VkCullModeFlagBits    cullMode            = VK_CULL_MODE_NONE;
+        u32                   pushConstantSize      = 16;
+        VkCompareOp           depthCompareOp        = VK_COMPARE_OP_LESS;
+        VkCullModeFlagBits    cullMode              = VK_CULL_MODE_NONE;
+        // MRT: populate these for multi-render-target pipelines.
+        // When colorAttachmentCount > 0 these take precedence over
+        // colorAttachmentFormat. Up to 8 color attachments supported.
+        VkFormat              colorAttachmentFormats[8] = {};
+        u32                   colorAttachmentCount      = 0;
     };
 
     Pipeline(Device& device, const CreateInfo& info);

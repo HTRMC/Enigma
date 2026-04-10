@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Math.h"
 #include "core/Types.h"
 #include "gfx/Allocator.h"
 #include "gfx/DescriptorAllocator.h"
@@ -11,6 +12,8 @@
 #include "gfx/ShaderHotReload.h"
 #include "gfx/ShaderManager.h"
 #include "gfx/Swapchain.h"
+#include "renderer/GBufferPass.h"
+#include "renderer/LightingPass.h"
 #include "renderer/MeshPass.h"
 #include "renderer/TrianglePass.h"
 
@@ -62,6 +65,8 @@ public:
 
 private:
     void uploadCameraData();
+    // Re-allocate G-buffer images and update bindless descriptors after resize.
+    void resizeGBuffer(VkExtent2D extent);
 
     Window& m_window;
 
@@ -77,6 +82,8 @@ private:
     std::unique_ptr<gfx::ShaderHotReload>      m_shaderHotReload;
     std::unique_ptr<TrianglePass>              m_trianglePass;
     std::unique_ptr<MeshPass>                  m_meshPass;
+    std::unique_ptr<GBufferPass>              m_gbufferPass;
+    std::unique_ptr<LightingPass>             m_lightingPass;
 
     u32 m_frameIndex = 0;
 
@@ -85,6 +92,20 @@ private:
     Scene*  m_scene  = nullptr;
 
     SunLight m_light{};
+
+    // Previous frame's viewProj — uploaded to the camera SSBO for motion vectors.
+    mat4 m_prevViewProj{1.0f};
+
+    // Nearest-neighbour sampler for G-buffer reads in the lighting pass.
+    VkSampler m_gbufferSampler = VK_NULL_HANDLE;
+
+    // Bindless slots for the five G-buffer textures.
+    u32 m_gbufAlbedoSlot     = 0;
+    u32 m_gbufNormalSlot     = 0;
+    u32 m_gbufMetalRoughSlot = 0;
+    u32 m_gbufMotionVecSlot  = 0;
+    u32 m_gbufDepthSlot      = 0;
+    u32 m_gbufferSamplerSlot = 0;
 
     // Per-frame camera SSBOs (one per frame-in-flight, double-buffered).
     struct CameraBuffer {

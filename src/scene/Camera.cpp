@@ -1,6 +1,7 @@
 #include "scene/Camera.h"
 
 #include <cmath>
+#include <glm/gtc/matrix_inverse.hpp>
 
 namespace enigma {
 
@@ -60,10 +61,12 @@ vec3 Camera::up() const {
 
 GpuCameraData Camera::gpuData(f32 aspect) const {
     GpuCameraData data{};
-    data.view     = viewMatrix();
-    data.proj     = projMatrix(aspect);
-    data.viewProj = data.proj * data.view;
-    data.worldPos = vec4{position, 1.0f};
+    data.view        = viewMatrix();
+    data.proj        = projMatrix(aspect);
+    data.viewProj    = data.proj * data.view;
+    data.invViewProj = glm::inverse(data.viewProj);
+    data.worldPos    = vec4{position, 1.0f};
+    // prevViewProj is zero-initialized; Renderer patches it each frame.
     return data;
 }
 

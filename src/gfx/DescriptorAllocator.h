@@ -67,6 +67,10 @@ public:
     u32 registerStorageImage(VkImageView view);
     u32 registerSampler(VkSampler sampler);
 
+    // Re-write an existing sampled-image slot without allocating a new one.
+    // Used when G-buffer images are reallocated on swapchain resize.
+    void updateSampledImage(u32 slot, VkImageView view, VkImageLayout layout);
+
 private:
     Device*               m_device     = nullptr;
     Caps                  m_caps{};

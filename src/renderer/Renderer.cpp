@@ -14,6 +14,8 @@
 #include "gfx/Swapchain.h"
 #include "gfx/Validation.h"
 #include "platform/Window.h"
+#include "renderer/GBufferPass.h"
+#include "renderer/LightingPass.h"
 #include "renderer/MeshPass.h"
 #include "renderer/TrianglePass.h"
 #include "scene/Camera.h"
@@ -55,6 +57,43 @@ Renderer::Renderer(Window& window)
                               m_swapchain->depthFormat());
     m_meshPass->registerHotReload(*m_shaderHotReload);
 
+    // Deferred G-buffer pass — allocate images at swapchain resolution.
+    m_gbufferPass = std::make_unique<GBufferPass>(*m_device, *m_allocator);
+    m_gbufferPass->allocate(m_swapchain->extent());
+    m_gbufferPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
+    m_gbufferPass->registerHotReload(*m_shaderHotReload);
+
+    // Register G-buffer textures as bindless sampled images.
+    m_gbufAlbedoSlot     = m_descriptorAllocator->registerSampledImage(
+        m_gbufferPass->albedoView(),     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m_gbufNormalSlot     = m_descriptorAllocator->registerSampledImage(
+        m_gbufferPass->normalView(),     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m_gbufMetalRoughSlot = m_descriptorAllocator->registerSampledImage(
+        m_gbufferPass->metalRoughView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m_gbufMotionVecSlot  = m_descriptorAllocator->registerSampledImage(
+        m_gbufferPass->motionVecView(),  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m_gbufDepthSlot      = m_descriptorAllocator->registerSampledImage(
+        m_gbufferPass->depthView(),      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // Nearest-neighbour sampler for G-buffer reads in the lighting pass.
+    VkSamplerCreateInfo samplerCI{};
+    samplerCI.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerCI.magFilter    = VK_FILTER_NEAREST;
+    samplerCI.minFilter    = VK_FILTER_NEAREST;
+    samplerCI.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    samplerCI.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerCI.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerCI.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    ENIGMA_VK_CHECK(vkCreateSampler(m_device->logical(), &samplerCI, nullptr, &m_gbufferSampler));
+    m_gbufferSamplerSlot = m_descriptorAllocator->registerSampler(m_gbufferSampler);
+
+    // Deferred lighting pass.
+    m_lightingPass = std::make_unique<LightingPass>(*m_device);
+    m_lightingPass->buildPipeline(*m_shaderManager,
+                                   m_descriptorAllocator->layout(),
+                                   m_swapchain->format());
+    m_lightingPass->registerHotReload(*m_shaderHotReload);
+
     // Create per-frame camera SSBOs (host-visible, persistently mapped).
     // 13 float4s = 208 bytes per camera buffer.
     constexpr VkDeviceSize kCameraBufferSize = sizeof(GpuCameraData);
@@ -93,6 +132,11 @@ Renderer::~Renderer() {
         vkDeviceWaitIdle(m_device->logical());
     }
 
+    // Clean up G-buffer sampler (pass objects destroy their own images/pipelines).
+    if (m_gbufferSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device->logical(), m_gbufferSampler, nullptr);
+    }
+
     // Clean up camera buffers.
     for (auto& cb : m_cameraBuffers) {
         if (cb.buffer != VK_NULL_HANDLE) {
@@ -119,13 +163,19 @@ void Renderer::uploadCameraData() {
         data = m_camera->gpuData(aspect);
     } else {
         // Identity camera fallback.
-        data.view     = mat4{1.0f};
-        data.proj     = mat4{1.0f};
-        data.viewProj = mat4{1.0f};
-        data.worldPos = vec4{0.0f, 0.0f, 0.0f, 1.0f};
+        data.view        = mat4{1.0f};
+        data.proj        = mat4{1.0f};
+        data.viewProj    = mat4{1.0f};
+        data.invViewProj = mat4{1.0f};
+        data.worldPos    = vec4{0.0f, 0.0f, 0.0f, 1.0f};
     }
 
+    // Inject previous frame's viewProj for motion vector computation.
+    data.prevViewProj = m_prevViewProj;
     std::memcpy(cb.mapped, &data, sizeof(data));
+
+    // Save current viewProj so next frame can use it as prevViewProj.
+    m_prevViewProj = data.viewProj;
 }
 
 void Renderer::drawFrame() {
@@ -159,6 +209,7 @@ void Renderer::drawFrame() {
         if (acquireResult == VK_ERROR_OUT_OF_DATE_KHR) {
             const auto [w, h] = m_window.framebufferSize();
             m_swapchain->recreate(w, h);
+            resizeGBuffer(m_swapchain->extent());
             return;
         }
         if (acquireResult != VK_SUCCESS && acquireResult != VK_SUBOPTIMAL_KHR) {
@@ -204,37 +255,88 @@ void Renderer::drawFrame() {
         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, // must end ready for present
         VK_IMAGE_ASPECT_COLOR_BIT);
 
-    const auto depthHandle = m_renderGraph->importImage(
-        "swapchain_depth",
-        depthImage, depthView, m_swapchain->depthFormat(),
-        VK_IMAGE_LAYOUT_UNDEFINED,  // re-cleared every frame
-        VK_IMAGE_LAYOUT_UNDEFINED,  // don't care about final layout
-        VK_IMAGE_ASPECT_DEPTH_BIT);
-
     const u32 cameraSlot = m_cameraBuffers[m_frameIndex].bindlessSlot;
 
-    gfx::RenderGraph::RasterPassDesc meshPassDesc{};
-    meshPassDesc.name         = "MeshPass";
-    meshPassDesc.colorTargets = {colorHandle};
-    meshPassDesc.depthTarget  = depthHandle;
-    meshPassDesc.clearColor   = {{0.02f, 0.02f, 0.05f, 1.0f}};
-    meshPassDesc.clearDepth   = {0.0f, 0}; // reverse-Z: far = 0
-    meshPassDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
-        m_gpuProfiler->beginZone(cmd, "MeshPass");
-        if (m_scene != nullptr) {
-            m_meshPass->record(cmd,
-                               m_descriptorAllocator->globalSet(),
-                               ext, *m_scene, cameraSlot,
-                               vec4{m_light.direction, m_light.intensity},
-                               vec4{m_light.color, 0.0f});
-        } else {
-            m_trianglePass->record(cmd,
-                                   m_descriptorAllocator->globalSet(),
-                                   ext);
-        }
-        m_gpuProfiler->endZone(cmd);
-    };
-    m_renderGraph->addRasterPass(std::move(meshPassDesc));
+    if (m_scene != nullptr) {
+        // ---- Deferred path: GBufferPass → LightingPass ----
+        const auto gbufAlbedo = m_renderGraph->importImage(
+            "gbuf_albedo", m_gbufferPass->albedoImage(), m_gbufferPass->albedoView(),
+            GBufferPass::kAlbedoFormat,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_ASPECT_COLOR_BIT);
+        const auto gbufNormal = m_renderGraph->importImage(
+            "gbuf_normal", m_gbufferPass->normalImage(), m_gbufferPass->normalView(),
+            GBufferPass::kNormalFormat,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_ASPECT_COLOR_BIT);
+        const auto gbufMetalRough = m_renderGraph->importImage(
+            "gbuf_metalrough", m_gbufferPass->metalRoughImage(), m_gbufferPass->metalRoughView(),
+            GBufferPass::kMetalRoughFormat,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_ASPECT_COLOR_BIT);
+        const auto gbufMotionVec = m_renderGraph->importImage(
+            "gbuf_motionvec", m_gbufferPass->motionVecImage(), m_gbufferPass->motionVecView(),
+            GBufferPass::kMotionVecFormat,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_ASPECT_COLOR_BIT);
+        const auto gbufDepth = m_renderGraph->importImage(
+            "gbuf_depth", m_gbufferPass->depthImage(), m_gbufferPass->depthView(),
+            GBufferPass::kDepthFormat,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_ASPECT_DEPTH_BIT);
+
+        gfx::RenderGraph::RasterPassDesc gbufPassDesc{};
+        gbufPassDesc.name         = "GBufferPass";
+        gbufPassDesc.colorTargets = {gbufAlbedo, gbufNormal, gbufMetalRough, gbufMotionVec};
+        gbufPassDesc.depthTarget  = gbufDepth;
+        gbufPassDesc.clearColor   = {{0.0f, 0.0f, 0.0f, 0.0f}};
+        gbufPassDesc.clearDepth   = {0.0f, 0}; // reverse-Z: far = 0
+        gbufPassDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+            m_gpuProfiler->beginZone(cmd, "GBufferPass");
+            m_gbufferPass->record(cmd, m_descriptorAllocator->globalSet(),
+                                   ext, *m_scene, cameraSlot);
+            m_gpuProfiler->endZone(cmd);
+        };
+        m_renderGraph->addRasterPass(std::move(gbufPassDesc));
+
+        gfx::RenderGraph::RasterPassDesc lightPassDesc{};
+        lightPassDesc.name          = "LightingPass";
+        lightPassDesc.colorTargets  = {colorHandle};
+        lightPassDesc.sampledInputs = {gbufAlbedo, gbufNormal, gbufMetalRough, gbufDepth};
+        lightPassDesc.clearColor    = {{0.02f, 0.02f, 0.05f, 1.0f}};
+        lightPassDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+            m_gpuProfiler->beginZone(cmd, "LightingPass");
+            m_lightingPass->record(cmd, m_descriptorAllocator->globalSet(), ext,
+                                    m_gbufAlbedoSlot, m_gbufNormalSlot,
+                                    m_gbufMetalRoughSlot, m_gbufDepthSlot,
+                                    cameraSlot, m_gbufferSamplerSlot,
+                                    vec4{m_light.direction, m_light.intensity},
+                                    vec4{m_light.color, 0.0f});
+            m_gpuProfiler->endZone(cmd);
+        };
+        m_renderGraph->addRasterPass(std::move(lightPassDesc));
+
+    } else {
+        // ---- Forward fallback: TrianglePass ----
+        const auto depthHandle = m_renderGraph->importImage(
+            "swapchain_depth",
+            depthImage, depthView, m_swapchain->depthFormat(),
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_ASPECT_DEPTH_BIT);
+
+        gfx::RenderGraph::RasterPassDesc triPassDesc{};
+        triPassDesc.name         = "TrianglePass";
+        triPassDesc.colorTargets = {colorHandle};
+        triPassDesc.depthTarget  = depthHandle;
+        triPassDesc.clearColor   = {{0.02f, 0.02f, 0.05f, 1.0f}};
+        triPassDesc.clearDepth   = {0.0f, 0};
+        triPassDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+            m_gpuProfiler->beginZone(cmd, "TrianglePass");
+            m_trianglePass->record(cmd, m_descriptorAllocator->globalSet(), ext);
+            m_gpuProfiler->endZone(cmd);
+        };
+        m_renderGraph->addRasterPass(std::move(triPassDesc));
+    }
 
     m_renderGraph->execute(frame.commandBuffer, extent);
 
@@ -285,11 +387,30 @@ void Renderer::drawFrame() {
     if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR) {
         const auto [w, h] = m_window.framebufferSize();
         m_swapchain->recreate(w, h);
+        resizeGBuffer(m_swapchain->extent());
     } else if (presentResult != VK_SUCCESS) {
         ENIGMA_VK_CHECK(presentResult);
     }
 
     m_frameIndex = (m_frameIndex + 1) % gfx::MAX_FRAMES_IN_FLIGHT;
+}
+
+void Renderer::resizeGBuffer(VkExtent2D extent) {
+    // GBufferPass::allocate() calls vkDeviceWaitIdle internally before
+    // destroying existing images, so no explicit idle needed here.
+    m_gbufferPass->allocate(extent);
+
+    // Re-write the bindless descriptor slots to point at the new image views.
+    m_descriptorAllocator->updateSampledImage(
+        m_gbufAlbedoSlot,     m_gbufferPass->albedoView(),     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m_descriptorAllocator->updateSampledImage(
+        m_gbufNormalSlot,     m_gbufferPass->normalView(),     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m_descriptorAllocator->updateSampledImage(
+        m_gbufMetalRoughSlot, m_gbufferPass->metalRoughView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m_descriptorAllocator->updateSampledImage(
+        m_gbufMotionVecSlot,  m_gbufferPass->motionVecView(),  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    m_descriptorAllocator->updateSampledImage(
+        m_gbufDepthSlot,      m_gbufferPass->depthView(),      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 } // namespace enigma

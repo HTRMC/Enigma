@@ -214,6 +214,26 @@ u32 DescriptorAllocator::registerSampledImage(VkImageView view, VkImageLayout la
     return slot;
 }
 
+void DescriptorAllocator::updateSampledImage(u32 slot, VkImageView view, VkImageLayout layout) {
+    ENIGMA_ASSERT(slot < m_nextSampledImage && "slot was never registered");
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.sampler     = VK_NULL_HANDLE;
+    imageInfo.imageView   = view;
+    imageInfo.imageLayout = layout;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = m_globalSet;
+    write.dstBinding      = kBindingSampledImage;
+    write.dstArrayElement = slot;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.pImageInfo      = &imageInfo;
+
+    vkUpdateDescriptorSets(m_device->logical(), 1, &write, 0, nullptr);
+}
+
 // Remaining stub: storage image lands at a later milestone 2 step
 // (compute pass writing into a procedural storage image). Kept
 // asserting so any premature caller lights up immediately.

@@ -1,18 +1,18 @@
-// mesh.hlsl
-// =========
-// Bindless PBR mesh shader for Enigma. Cook-Torrance BRDF with normal mapping.
+// gbuffer.hlsl
+// ============
+// Deferred geometry pass. Identical vertex transform to mesh.hlsl but the
+// pixel shader writes to four MRT targets instead of computing lighting:
 //
-// Vertex data packed as StructuredBuffer<float4>, 3 entries per vertex:
-//   [vid*3+0] = (position.x, position.y, position.z, normal.x)
-//   [vid*3+1] = (normal.y,   normal.z,   uv.x,       uv.y)
-//   [vid*3+2] = (tangent.x,  tangent.y,  tangent.z,  tangent.w)  // w = bitangent sign
+//   SV_Target0  albedo      VK_FORMAT_R8G8B8A8_UNORM
+//               rgb = baseColor, a = ambient occlusion
+//   SV_Target1  normal      VK_FORMAT_A2B10G10R10_UNORM_PACK32
+//               rgb = world-space normal packed to [0,1]
+//   SV_Target2  metalRough  VK_FORMAT_R8G8_UNORM
+//               r = metallic, g = roughness (perceptual, not squared)
+//   SV_Target3  motionVec   VK_FORMAT_R16G16_SFLOAT
+//               rg = NDC-space velocity (current − previous clip pos / w)
 //
-// Material SSBO: 5 float4s per material (80 bytes, std430):
-//   [0]  baseColorFactor (float4)
-//   [1]  emissiveFactor.xyz + alphaCutoff.w (float4)
-//   [2]  metallicFactor, roughnessFactor, normalScale, occlusionStrength (float4)
-//   [3]  baseColorTexIdx, metalRoughTexIdx, normalTexIdx, emissiveTexIdx (uint4)
-//   [4]  occlusionTexIdx, flags, samplerSlot, _pad (uint4)
+// Depth writes to VK_FORMAT_D32_SFLOAT (reverse-Z, far = 0).
 
 #include "common.hlsl"
 
@@ -26,26 +26,23 @@ Texture2D g_textures[] : register(t0, space0);
 [[vk::binding(3, 0)]]
 SamplerState g_samplers[] : register(s0, space0);
 
-// --- Push constants (112 bytes) ---
+// --- Push constants (80 bytes) ---
 struct PushBlock {
     float4x4 model;
     uint     vertexSlot;
     uint     cameraSlot;
     uint     materialBufferSlot;
     uint     materialIndex;
-    float4   lightDirIntensity;  // xyz = direction (prenormalized by CPU), w = intensity
-    float4   lightColor;          // xyz = color, w = unused
 };
 
 [[vk::push_constant]] PushBlock pc;
 
 // --- Constants ---
-static const float PI          = 3.14159265359;
-static const uint  INVALID_TEX = 0xFFFFFFFFu;
-static const uint  FLAG_BLEND  = 1u;
-static const uint  FLAG_MASK   = 2u;
+static const uint INVALID_TEX = 0xFFFFFFFFu;
+static const uint FLAG_BLEND  = 1u;
+static const uint FLAG_MASK   = 2u;
 
-// --- Material struct (mirrors CPU Material, read from SSBO) ---
+// --- Material struct (mirrors GpuMaterial in mesh.hlsl) ---
 struct GpuMaterial {
     float4 baseColorFactor;
     float4 emissiveFactor;    // .w = alphaCutoff
@@ -88,7 +85,6 @@ GpuMaterial loadMaterial(uint bufSlot, uint idx) {
     return m;
 }
 
-// --- Camera load (column-major GLM → HLSL row-major) ---
 CameraData loadCamera(uint slot) {
     StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(slot)];
     CameraData cam;
@@ -101,33 +97,6 @@ CameraData loadCamera(uint slot) {
     return cam;
 }
 
-// --- PBR functions ---
-
-// GGX normal distribution function.
-float D_GGX(float NdotH, float alpha) {
-    float a2 = alpha * alpha;
-    float d  = NdotH * NdotH * (a2 - 1.0) + 1.0;
-    return a2 / max(PI * d * d, 1e-7);
-}
-
-// Height-correlated Smith GGX visibility (Heitz 2014).
-float V_SmithGGXCorrelated(float NdotV, float NdotL, float alpha) {
-    float a2   = alpha * alpha;
-    float GGXV = NdotL * sqrt(max(NdotV * NdotV * (1.0 - a2) + a2, 1e-7));
-    float GGXL = NdotV * sqrt(max(NdotL * NdotL * (1.0 - a2) + a2, 1e-7));
-    return 0.5 / max(GGXV + GGXL, 1e-7);
-}
-
-// Schlick Fresnel.
-float3 F_Schlick(float VdotH, float3 F0) {
-    return F0 + (1.0 - F0) * pow(saturate(1.0 - VdotH), 5.0);
-}
-
-// ACES tone mapping approximation (Narkowicz 2015).
-float3 ACES(float3 x) {
-    return saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14));
-}
-
 // --- Vertex shader ---
 struct VSOut {
     float4 pos           : SV_Position;
@@ -136,6 +105,9 @@ struct VSOut {
     float2 uv            : TEXCOORD2;
     float3 tangent       : TEXCOORD3;
     float  bitangentSign : TEXCOORD4;
+    // Current and previous clip-space positions for motion vector computation.
+    float4 clipPos       : TEXCOORD5;
+    float4 prevClipPos   : TEXCOORD6;
 };
 
 VSOut VSMain(uint vid : SV_VertexID) {
@@ -155,19 +127,32 @@ VSOut VSMain(uint vid : SV_VertexID) {
 
     float3x3 normalMat = (float3x3)pc.model;
 
+    float4 clipPos     = mul(cam.viewProj,     worldPos);
+    float4 prevClipPos = mul(cam.prevViewProj, worldPos);
+
     VSOut o;
-    o.pos           = mul(cam.viewProj, worldPos);
+    o.pos           = clipPos;
     o.worldPos      = worldPos.xyz;
     o.normal        = normalize(mul(normalMat, normal));
     o.tangent       = normalize(mul(normalMat, tangent));
     o.bitangentSign = bitSign;
     o.uv            = uv;
+    o.clipPos       = clipPos;
+    o.prevClipPos   = prevClipPos;
     return o;
 }
 
-// --- Fragment shader ---
-float4 PSMain(VSOut vs) : SV_Target {
-    GpuMaterial mat = loadMaterial(pc.materialBufferSlot, pc.materialIndex);
+// --- G-buffer output struct ---
+struct GBufferOut {
+    float4 albedo     : SV_Target0; // rgb=baseColor, a=occlusion
+    float4 normal     : SV_Target1; // rgb=world normal packed to [0,1], a=unused
+    float2 metalRough : SV_Target2; // r=metallic, g=roughness (perceptual)
+    float2 motionVec  : SV_Target3; // rg=NDC-space velocity
+};
+
+// --- Pixel shader ---
+GBufferOut PSMain(VSOut vs) {
+    GpuMaterial mat  = loadMaterial(pc.materialBufferSlot, pc.materialIndex);
     SamplerState samp = g_samplers[NonUniformResourceIndex(mat.samplerSlot)];
 
     // Base color
@@ -181,7 +166,7 @@ float4 PSMain(VSOut vs) : SV_Target {
         if (baseColor.a < mat.emissiveFactor.w) discard;
     }
 
-    // Metallic + roughness (G=roughness, B=metallic per glTF spec)
+    // Metallic + roughness (glTF: G=roughness, B=metallic)
     float metallic  = mat.metallicFactor;
     float roughness = mat.roughnessFactor;
     if (mat.metalRoughTexIdx != INVALID_TEX) {
@@ -189,69 +174,37 @@ float4 PSMain(VSOut vs) : SV_Target {
         roughness *= mr.g;
         metallic  *= mr.b;
     }
-    // Squaring roughness: perceptual → linear (critical — don't skip this)
-    float alpha = roughness * roughness;
 
-    // Normal mapping via TBN
+    // World-space normal via TBN
     float3 N = normalize(vs.normal);
     if (mat.normalTexIdx != INVALID_TEX) {
         float3 T = normalize(vs.tangent);
         float3 B = normalize(cross(N, T) * vs.bitangentSign);
-        float3x3 TBN = float3x3(T, B, N); // tangent-space → world-space
+        float3x3 TBN = float3x3(T, B, N);
 
         float4 normalSample = g_textures[NonUniformResourceIndex(mat.normalTexIdx)].Sample(samp, vs.uv);
         float3 tn = normalSample.xyz * 2.0 - 1.0;
         tn.xy    *= mat.normalScale;
-        tn.y      = -tn.y; // glTF uses OpenGL +Y convention; flip for DX/Vulkan NDC
+        tn.y      = -tn.y; // glTF +Y flip for DX/Vulkan NDC
         N = normalize(mul(tn, TBN));
     }
 
-    // Occlusion (R channel)
+    // Ambient occlusion (R channel, packed into albedo.a)
     float occlusion = 1.0;
     if (mat.occlusionTexIdx != INVALID_TEX) {
         float4 occSample = g_textures[NonUniformResourceIndex(mat.occlusionTexIdx)].Sample(samp, vs.uv);
         occlusion = lerp(1.0, occSample.r, mat.occlusionStrength);
     }
 
-    // Directional sun light from push constants.
-    float3 lightDir   = normalize(pc.lightDirIntensity.xyz);
-    float3 lightColor = pc.lightColor.xyz * pc.lightDirIntensity.w;
+    // Motion vector: NDC-space velocity (current − previous)
+    float2 currentNDC = vs.clipPos.xy    / vs.clipPos.w;
+    float2 prevNDC    = vs.prevClipPos.xy / vs.prevClipPos.w;
+    float2 motion     = currentNDC - prevNDC;
 
-    float3 V = normalize(loadCamera(pc.cameraSlot).worldPos.xyz - vs.worldPos);
-    float3 L = lightDir;
-    float3 H = normalize(V + L);
-
-    float NdotL = saturate(dot(N, L));
-    float NdotV = saturate(dot(N, V)) + 1e-5;
-    float NdotH = saturate(dot(N, H));
-    float VdotH = saturate(dot(V, H));
-
-    // Cook-Torrance specular
-    float3 F0      = lerp(float3(0.04, 0.04, 0.04), baseColor.rgb, metallic);
-    float  D       = D_GGX(NdotH, alpha);
-    float  Vis     = V_SmithGGXCorrelated(NdotV, NdotL, alpha);
-    float3 F       = F_Schlick(VdotH, F0);
-    float3 specular = D * Vis * F;
-
-    // Lambertian diffuse (energy conserving: metals have no diffuse)
-    float3 kD      = (1.0 - F) * (1.0 - metallic);
-    float3 diffuse = kD * baseColor.rgb / PI;
-
-    float3 Lo = (diffuse + specular) * lightColor * NdotL;
-
-    // Ambient (IBL placeholder — simple constant)
-    float3 ambient = 0.03 * baseColor.rgb * occlusion;
-
-    // Emissive
-    float3 emissive = mat.emissiveFactor.rgb;
-    if (mat.emissiveTexIdx != INVALID_TEX) {
-        emissive *= g_textures[NonUniformResourceIndex(mat.emissiveTexIdx)].Sample(samp, vs.uv).rgb;
-    }
-
-    float3 color = ambient + Lo + emissive;
-
-    // ACES tone mapping
-    color = ACES(color);
-
-    return float4(color, baseColor.a);
+    GBufferOut o;
+    o.albedo     = float4(baseColor.rgb, occlusion);
+    o.normal     = float4(N.xyz * 0.5 + 0.5, 0.0); // encode [-1,1] → [0,1]
+    o.metalRough = float2(metallic, roughness);
+    o.motionVec  = motion;
+    return o;
 }

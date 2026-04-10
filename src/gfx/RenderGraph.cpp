@@ -115,20 +115,35 @@ RGImageHandle RenderGraph::importImage(std::string_view   name,
 
 void RenderGraph::addRasterPass(RasterPassDesc desc) {
     RasterPassNode node{};
-    node.name         = std::move(desc.name);
-    node.colorTargets = std::move(desc.colorTargets);
-    node.depthTarget  = desc.depthTarget;
-    node.clearColor   = desc.clearColor;
-    node.clearDepth   = desc.clearDepth;
-    node.colorLoadOp  = desc.colorLoadOp;
-    node.depthLoadOp  = desc.depthLoadOp;
-    node.execute      = std::move(desc.execute);
+    node.name          = std::move(desc.name);
+    node.colorTargets  = std::move(desc.colorTargets);
+    node.depthTarget   = desc.depthTarget;
+    node.sampledInputs = std::move(desc.sampledInputs);
+    node.clearColor    = desc.clearColor;
+    node.clearDepth    = desc.clearDepth;
+    node.colorLoadOp   = desc.colorLoadOp;
+    node.depthLoadOp   = desc.depthLoadOp;
+    node.execute       = std::move(desc.execute);
     m_passes.push_back(std::move(node));
 }
 
 void RenderGraph::execute(VkCommandBuffer cmd, VkExtent2D extent) {
     for (auto& pass : m_passes) {
-        // Pre-pass barriers: transition each attachment to the required layout.
+        // Pre-pass barriers (1): transition sampled inputs to SHADER_READ_ONLY_OPTIMAL.
+        // These must be emitted before attachment barriers and before BeginRendering.
+        for (const RGImageHandle h : pass.sampledInputs) {
+            ENIGMA_ASSERT(h.valid());
+            auto& img = m_images[h.index];
+            constexpr VkImageLayout kReadLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            if (img.currentLayout != kReadLayout) {
+                emitBarrier(cmd, img, kReadLayout,
+                            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+                            VK_ACCESS_2_SHADER_READ_BIT);
+                img.currentLayout = kReadLayout;
+            }
+        }
+
+        // Pre-pass barriers (2): transition each attachment to the required layout.
         for (const RGImageHandle h : pass.colorTargets) {
             ENIGMA_ASSERT(h.valid());
             auto& img = m_images[h.index];

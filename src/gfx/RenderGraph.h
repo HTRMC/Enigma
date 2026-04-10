@@ -65,6 +65,12 @@ public:
         // Optional depth attachment. Cleared via clearDepth.
         RGImageHandle            depthTarget;
 
+        // Images read as shader inputs in this pass. The render graph
+        // emits layout transitions to SHADER_READ_ONLY_OPTIMAL for each
+        // handle before vkCmdBeginRendering. An image must be imported
+        // and must NOT also appear in colorTargets / depthTarget.
+        std::vector<RGImageHandle> sampledInputs;
+
         VkClearColorValue        clearColor = {{0.0f, 0.0f, 0.0f, 1.0f}};
         VkClearDepthStencilValue clearDepth = {0.0f, 0};
 
@@ -106,6 +112,7 @@ private:
         std::string                   name;
         std::vector<RGImageHandle>    colorTargets;
         RGImageHandle                 depthTarget;
+        std::vector<RGImageHandle>    sampledInputs;
         VkClearColorValue             clearColor;
         VkClearDepthStencilValue      clearDepth;
         VkAttachmentLoadOp            colorLoadOp;

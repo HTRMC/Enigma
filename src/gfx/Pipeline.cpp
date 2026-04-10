@@ -96,18 +96,21 @@ Pipeline::Pipeline(Device& device, const CreateInfo& info)
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
     // -------------------------------------------------------------------
-    // Color blend: none (opaque overwrite on a single attachment).
+    // Color blend: none (opaque overwrite). One blend state per target.
     // -------------------------------------------------------------------
-    VkPipelineColorBlendAttachmentState colorBlendAttachment{};
-    colorBlendAttachment.blendEnable    = VK_FALSE;
-    colorBlendAttachment.colorWriteMask =
-        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    const u32 numColorTargets = info.colorAttachmentCount > 0 ? info.colorAttachmentCount : 1;
+    std::array<VkPipelineColorBlendAttachmentState, 8> colorBlendAttachments{};
+    for (u32 i = 0; i < numColorTargets; ++i) {
+        colorBlendAttachments[i].blendEnable    = VK_FALSE;
+        colorBlendAttachments[i].colorWriteMask =
+            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    }
 
     VkPipelineColorBlendStateCreateInfo colorBlend{};
     colorBlend.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-    colorBlend.attachmentCount = 1;
-    colorBlend.pAttachments    = &colorBlendAttachment;
+    colorBlend.attachmentCount = numColorTargets;
+    colorBlend.pAttachments    = colorBlendAttachments.data();
 
     // -------------------------------------------------------------------
     // Dynamic states: viewport + scissor (set each frame).
@@ -140,12 +143,17 @@ Pipeline::Pipeline(Device& device, const CreateInfo& info)
 
     // -------------------------------------------------------------------
     // Dynamic rendering: VkPipelineRenderingCreateInfo in pNext. No
-    // VkRenderPass anywhere.
+    // VkRenderPass anywhere. Supports single-attachment (legacy) and
+    // multi-render-target (MRT) via colorAttachmentCount > 0.
     // -------------------------------------------------------------------
+    const VkFormat* pColorFormats = info.colorAttachmentCount > 0
+        ? info.colorAttachmentFormats
+        : &info.colorAttachmentFormat;
+
     VkPipelineRenderingCreateInfo renderingInfo{};
     renderingInfo.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-    renderingInfo.colorAttachmentCount    = 1;
-    renderingInfo.pColorAttachmentFormats = &info.colorAttachmentFormat;
+    renderingInfo.colorAttachmentCount    = numColorTargets;
+    renderingInfo.pColorAttachmentFormats = pColorFormats;
     renderingInfo.depthAttachmentFormat   = info.depthAttachmentFormat; // UNDEFINED = no depth
 
     // -------------------------------------------------------------------
