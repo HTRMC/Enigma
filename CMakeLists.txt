@@ -129,8 +129,12 @@ target_include_directories(Enigma SYSTEM PRIVATE
 
 # volk loads Vulkan at runtime; we only need the Vulkan headers transitively
 # through volk. We do NOT link Vulkan::Vulkan directly.
+# IMGUI_IMPL_VULKAN_USE_VOLK: tells imgui_impl_vulkan.cpp to include volk.h
+# instead of vulkan.h and to skip the LoadFunctions() assertion — required
+# because VK_NO_PROTOTYPES suppresses all extern Vulkan declarations.
 target_compile_definitions(Enigma PRIVATE
     VK_NO_PROTOTYPES
+    IMGUI_IMPL_VULKAN_USE_VOLK
     $<$<PLATFORM_ID:Windows>:VK_USE_PLATFORM_WIN32_KHR>
     $<$<PLATFORM_ID:Windows>:NOMINMAX>
     GLFW_INCLUDE_NONE
