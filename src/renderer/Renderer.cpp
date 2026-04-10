@@ -212,12 +212,22 @@ Renderer::Renderer(Window& window)
     m_upscaler = UpscalerFactory::create(m_device->properties(), m_device->gpuTier());
     m_upscaler->init(m_device->logical(), m_device->physical(),
                      m_swapchain->extent(), m_upscalerSettings.quality);
+
+    // ImGui overlay — must be created after swapchain (needs format + imageCount).
+    m_imguiLayer = std::make_unique<gfx::ImGuiLayer>(
+        *m_device,
+        m_window.handle(),
+        m_swapchain->format(),
+        m_swapchain->imageCount());
 }
 
 Renderer::~Renderer() {
     if (m_device) {
         vkDeviceWaitIdle(m_device->logical());
     }
+
+    // Shut down ImGui before destroying Vulkan resources.
+    m_imguiLayer.reset();
 
     // Shut down the upscaler before device destruction.
     if (m_upscaler) {
@@ -342,8 +352,8 @@ void Renderer::drawFrame() {
     // Read back GPU timings from the previous frame before resetting the pool.
     // (The previous frame's submissions are guaranteed done by the timeline wait above.)
     if (frame.frameValue > 0) {
-        const auto results = m_gpuProfiler->readback();
-        for (const auto& r : results) {
+        m_lastGpuTimings = m_gpuProfiler->readback();
+        for (const auto& r : m_lastGpuTimings) {
             ENIGMA_LOG_INFO("[gpu] {} = {:.3f} ms", r.name, r.durationMs);
         }
     }
@@ -354,6 +364,17 @@ void Renderer::drawFrame() {
     ENIGMA_VK_CHECK(vkBeginCommandBuffer(frame.commandBuffer, &beginInfo));
 
     m_gpuProfiler->reset(frame.commandBuffer);
+
+    // ImGui new frame -- must be called before any ImGui:: window calls this frame.
+    if (m_imguiLayer) {
+        m_imguiLayer->newFrame();
+        m_imguiLayer->drawGpuTimings(m_lastGpuTimings);
+        m_imguiLayer->drawSceneInfo(
+            m_scene ? static_cast<u32>(m_scene->primitives.size()) : 0u,
+            m_tlasSlot > 0 ? 1u : 0u);
+        m_imguiLayer->drawUpscalerSettings(m_upscalerSettings);
+        m_imguiLayer->drawPhysicsStats(0.0f, 0u); // wired up later when physics is exposed
+    }
 
     VkImage     targetImage = m_swapchain->image(imageIndex);
     VkImageView targetView  = m_swapchain->view(imageIndex);
@@ -551,6 +572,11 @@ void Renderer::drawFrame() {
     const f32 jx = haltonJitter(m_jitterIndex, 2) - 0.5f;
     const f32 jy = haltonJitter(m_jitterIndex, 3) - 0.5f;
 
+    // Track the swapchain image layout so ImGuiLayer can emit the correct
+    // pre-barrier. The render graph leaves it in PRESENT_SRC_KHR; the
+    // upscaler (when real) writes to it with outputLayout COLOR_ATTACHMENT_OPTIMAL.
+    VkImageLayout swapchainLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
     if (m_upscaler && m_scene != nullptr) {
         m_upscaler->evaluate(frame.commandBuffer,
                              m_swapchain->view(imageIndex),
@@ -565,6 +591,16 @@ void Renderer::drawFrame() {
                              jx, jy,
                              m_upscalerSettings.sharpness,
                              false);
+        swapchainLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+
+    // ImGui render -- after scene, before end command buffer.
+    if (m_imguiLayer) {
+        m_imguiLayer->render(frame.commandBuffer,
+                             targetImage,
+                             targetView,
+                             extent,
+                             swapchainLayout);
     }
 
     ENIGMA_VK_CHECK(vkEndCommandBuffer(frame.commandBuffer));

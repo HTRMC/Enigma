@@ -9,6 +9,7 @@
 #include "gfx/Instance.h"
 #include "gfx/GpuProfiler.h"
 #include "gfx/RenderGraph.h"
+#include "gfx/ImGuiLayer.h"
 #include "gfx/ShaderHotReload.h"
 #include "gfx/ShaderManager.h"
 #include "gfx/Swapchain.h"
@@ -28,6 +29,7 @@
 #include <volk.h>
 
 #include <memory>
+#include <vector>
 
 struct VmaAllocation_T;
 using VmaAllocation = VmaAllocation_T*;
@@ -83,6 +85,10 @@ public:
     gfx::Allocator& allocator() { return *m_allocator; }
     gfx::DescriptorAllocator& descriptorAllocator() { return *m_descriptorAllocator; }
 
+    // Expose the last frame's GPU timing results for ImGui display.
+    // Call after drawFrame() to get the previous frame's timings.
+    const std::vector<gfx::GpuProfiler::ZoneResult>& gpuTimings() const { return m_lastGpuTimings; }
+
 private:
     void uploadCameraData();
     // Re-allocate G-buffer images and update bindless descriptors after resize.
@@ -102,6 +108,7 @@ private:
     std::unique_ptr<gfx::RenderGraph>           m_renderGraph;
     std::unique_ptr<gfx::ShaderManager>        m_shaderManager;
     std::unique_ptr<gfx::ShaderHotReload>      m_shaderHotReload;
+    std::unique_ptr<gfx::ImGuiLayer>           m_imguiLayer;
     std::unique_ptr<TrianglePass>              m_trianglePass;
     std::unique_ptr<MeshPass>                  m_meshPass;
     std::unique_ptr<GBufferPass>              m_gbufferPass;
@@ -121,6 +128,9 @@ private:
     u32 m_jitterIndex = 0;
 
     u32 m_frameIndex = 0;
+
+    std::vector<gfx::GpuProfiler::ZoneResult>  m_lastGpuTimings;
+    bool                                        m_showImGui = true;
 
     // Camera state.
     Camera* m_camera = nullptr;

@@ -113,3 +113,18 @@ FetchContent_Declare(
     SOURCE_SUBDIR  Build
 )
 FetchContent_MakeAvailable(JoltPhysics)
+
+# -----------------------------------------------------------------------------
+# Dear ImGui — immediate-mode GUI library. Docking branch for future docking
+# support. No CMakeLists.txt for library use; sources added directly to target.
+# Tag: v1.91.5 (docking branch)
+# -----------------------------------------------------------------------------
+FetchContent_Declare(
+    imgui
+    GIT_REPOSITORY https://github.com/ocornut/imgui.git
+    GIT_TAG        v1.91.5
+)
+FetchContent_GetProperties(imgui)
+if(NOT imgui_POPULATED)
+    FetchContent_Populate(imgui)
+endif()
