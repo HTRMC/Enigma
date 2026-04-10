@@ -26,6 +26,20 @@ public:
     VkAccelerationStructureKHR handle()        const { return m_as; }
     VkDeviceAddress            deviceAddress() const { return m_address; }
 
+    // Refit: update BLAS geometry in-place (cheap, ~10% of rebuild cost).
+    // Valid when vertex positions change but topology (triangle count) is unchanged.
+    // AS quality degrades slightly; rebuild after major deformation.
+    // Uses an immediate command buffer internally (synchronous, blocks until done).
+    void refit(Device& device, Allocator& allocator,
+               VkBuffer vertexBuffer, u32 vertexCount, VkDeviceSize vertexStride,
+               VkBuffer indexBuffer, u32 indexCount);
+
+    // Rebuild BLAS from scratch (full quality, higher cost).
+    // Uses an immediate command buffer internally (synchronous, blocks until done).
+    void rebuild(Device& device, Allocator& allocator,
+                 VkBuffer vertexBuffer, u32 vertexCount, VkDeviceSize vertexStride,
+                 VkBuffer indexBuffer, u32 indexCount);
+
 private:
     VkAccelerationStructureKHR m_as         = VK_NULL_HANDLE;
     VkBuffer                   m_buffer     = VK_NULL_HANDLE;

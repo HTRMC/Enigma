@@ -312,6 +312,31 @@ void Renderer::drawFrame() {
     // Upload camera data for this frame.
     uploadCameraData();
 
+    // Process pending deformation: upload deformed vertices and update BLASes.
+    if (m_deformationPending && m_scene != nullptr) {
+        constexpr VkDeviceSize kVertexStride = 3 * sizeof(vec4); // 48 bytes
+
+        for (u32 i = 0; i < static_cast<u32>(m_scene->primitives.size()); ++i) {
+            auto& prim = m_scene->primitives[i];
+            if (!prim.blas.has_value()) continue;
+
+            // uploadDeformedPositions no-ops for unregistered primitives.
+            m_deformationSystem.uploadDeformedPositions(i, prim.vertexBuffer, *m_device);
+
+            if (m_deformationSystem.requiresBlasRebuild(i)) {
+                prim.blas->rebuild(*m_device, *m_allocator,
+                                   prim.vertexBuffer, prim.vertexCount, kVertexStride,
+                                   prim.indexBuffer, prim.indexCount);
+            } else {
+                prim.blas->refit(*m_device, *m_allocator,
+                                 prim.vertexBuffer, prim.vertexCount, kVertexStride,
+                                 prim.indexBuffer, prim.indexCount);
+            }
+        }
+
+        m_deformationPending = false;
+    }
+
     ENIGMA_VK_CHECK(vkResetCommandPool(dev, frame.commandPool, 0));
 
     // Read back GPU timings from the previous frame before resetting the pool.
@@ -690,6 +715,11 @@ void Renderer::buildAccelerationStructures() {
 
     ENIGMA_LOG_INFO("[renderer] acceleration structures built ({} BLASes, TLAS slot={})",
                     m_scene->primitives.size(), m_tlasSlot);
+}
+
+void Renderer::applyImpact(const ImpactEvent& event) {
+    m_deformationSystem.applyImpact(event);
+    m_deformationPending = true;
 }
 
 void Renderer::setUpscalerSettings(const UpscalerSettings& s) {

@@ -84,6 +84,8 @@ target_sources(Enigma PRIVATE
     src/physics/VehicleConfig.cpp
     src/physics/VehicleController.cpp
     src/physics/PhysicsInterpolation.cpp
+    src/physics/CrumpleZone.cpp
+    src/physics/DeformationSystem.cpp
 )
 
 target_include_directories(Enigma PRIVATE

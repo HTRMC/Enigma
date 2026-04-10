@@ -23,6 +23,7 @@
 #include "renderer/TrianglePass.h"
 #include "renderer/Upscaler.h"
 #include "renderer/UpscalerSettings.h"
+#include "physics/DeformationSystem.h"
 
 #include <volk.h>
 
@@ -70,6 +71,9 @@ public:
 
     // Set wet road factor (0.0 = dry, 1.0 = standing water).
     void setWetness(f32 w) { m_wetnessFactor = w; }
+
+    // Apply a deformation impact to scene primitives near the event.
+    void applyImpact(const ImpactEvent& event);
 
     // Exposes settings to caller (Engine can wire this to a settings menu).
     void setUpscalerSettings(const UpscalerSettings& s);
@@ -149,6 +153,9 @@ private:
     u32 m_reflDenoiseSlot    = 0;
 
     f32 m_wetnessFactor      = 0.0f;
+
+    DeformationSystem m_deformationSystem;
+    bool              m_deformationPending = false;
 
     // Per-frame camera SSBOs (one per frame-in-flight, double-buffered).
     struct CameraBuffer {

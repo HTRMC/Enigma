@@ -54,7 +54,8 @@ BLAS BLAS::build(Device& device, Allocator& allocator,
     VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
     buildInfo.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
     buildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
-    buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
+    buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
     if (allowCompaction) {
         buildInfo.flags |= VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_COMPACTION_BIT_KHR;
     }
@@ -165,6 +166,266 @@ BLAS BLAS::build(Device& device, Allocator& allocator,
     result.m_address = vkGetAccelerationStructureDeviceAddressKHR(dev, &addrInfo);
 
     return result;
+}
+
+void BLAS::refit(Device& device, Allocator& allocator,
+                 VkBuffer vertexBuffer, u32 vertexCount, VkDeviceSize vertexStride,
+                 VkBuffer indexBuffer, u32 indexCount) {
+    ENIGMA_ASSERT(m_as != VK_NULL_HANDLE);
+    VkDevice dev = device.logical();
+
+    VkBufferDeviceAddressInfo vertAddrInfo{};
+    vertAddrInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    vertAddrInfo.buffer = vertexBuffer;
+    const VkDeviceAddress vertAddress = vkGetBufferDeviceAddress(dev, &vertAddrInfo);
+
+    VkBufferDeviceAddressInfo idxAddrInfo{};
+    idxAddrInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    idxAddrInfo.buffer = indexBuffer;
+    const VkDeviceAddress idxAddress = vkGetBufferDeviceAddress(dev, &idxAddrInfo);
+
+    VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
+    triangles.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    triangles.vertexFormat  = VK_FORMAT_R32G32B32_SFLOAT;
+    triangles.vertexData.deviceAddress = vertAddress;
+    triangles.vertexStride  = vertexStride;
+    triangles.maxVertex     = vertexCount - 1;
+    triangles.indexType     = VK_INDEX_TYPE_UINT32;
+    triangles.indexData.deviceAddress = idxAddress;
+
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geometry.flags        = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    geometry.geometry.triangles = triangles;
+
+    const u32 primitiveCount = indexCount / 3;
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    buildInfo.mode          = VK_BUILD_ACCELERATION_STRUCTURE_MODE_UPDATE_KHR;
+    buildInfo.srcAccelerationStructure = m_as;
+    buildInfo.dstAccelerationStructure = m_as;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries   = &geometry;
+
+    // Query update scratch size.
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+    sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    vkGetAccelerationStructureBuildSizesKHR(
+        dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+        &buildInfo, &primitiveCount, &sizeInfo);
+
+    // Allocate scratch buffer for the update.
+    VkBufferCreateInfo scratchBufInfo{};
+    scratchBufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    scratchBufInfo.size  = sizeInfo.updateScratchSize;
+    scratchBufInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+
+    VmaAllocationCreateInfo scratchAllocCI{};
+    scratchAllocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+
+    VkBuffer scratchBuf = VK_NULL_HANDLE;
+    VmaAllocation scratchAlloc = nullptr;
+    ENIGMA_VK_CHECK(vmaCreateBuffer(allocator.handle(), &scratchBufInfo, &scratchAllocCI,
+                                    &scratchBuf, &scratchAlloc, nullptr));
+
+    VkBufferDeviceAddressInfo scratchAddrInfo{};
+    scratchAddrInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    scratchAddrInfo.buffer = scratchBuf;
+    buildInfo.scratchData.deviceAddress = vkGetBufferDeviceAddress(dev, &scratchAddrInfo);
+
+    VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
+    rangeInfo.primitiveCount  = primitiveCount;
+    rangeInfo.primitiveOffset = 0;
+    rangeInfo.firstVertex     = 0;
+    rangeInfo.transformOffset = 0;
+    const VkAccelerationStructureBuildRangeInfoKHR* pRangeInfo = &rangeInfo;
+
+    // Immediate single-use command buffer for BLAS refit.
+    VkCommandPoolCreateInfo poolCI{};
+    poolCI.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolCI.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolCI.queueFamilyIndex = device.graphicsQueueFamily();
+
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    ENIGMA_VK_CHECK(vkCreateCommandPool(dev, &poolCI, nullptr, &cmdPool));
+
+    VkCommandBufferAllocateInfo cmdAllocInfo{};
+    cmdAllocInfo.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmdAllocInfo.commandPool        = cmdPool;
+    cmdAllocInfo.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmdAllocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    ENIGMA_VK_CHECK(vkAllocateCommandBuffers(dev, &cmdAllocInfo, &cmd));
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    ENIGMA_VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+
+    vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRangeInfo);
+
+    // Barrier: AS build writes must complete before any RT shader reads.
+    VkMemoryBarrier2 barrier{};
+    barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask  = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    barrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    barrier.dstStageMask  = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+    barrier.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+
+    VkDependencyInfo depInfo{};
+    depInfo.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    depInfo.memoryBarrierCount      = 1;
+    depInfo.pMemoryBarriers         = &barrier;
+
+    vkCmdPipelineBarrier2(cmd, &depInfo);
+
+    ENIGMA_VK_CHECK(vkEndCommandBuffer(cmd));
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers    = &cmd;
+    ENIGMA_VK_CHECK(vkQueueSubmit(device.graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
+    ENIGMA_VK_CHECK(vkQueueWaitIdle(device.graphicsQueue()));
+
+    vkDestroyCommandPool(dev, cmdPool, nullptr);
+    vmaDestroyBuffer(allocator.handle(), scratchBuf, scratchAlloc);
+}
+
+void BLAS::rebuild(Device& device, Allocator& allocator,
+                   VkBuffer vertexBuffer, u32 vertexCount, VkDeviceSize vertexStride,
+                   VkBuffer indexBuffer, u32 indexCount) {
+    VkDevice dev = device.logical();
+
+    VkBufferDeviceAddressInfo vertAddrInfo{};
+    vertAddrInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    vertAddrInfo.buffer = vertexBuffer;
+    const VkDeviceAddress vertAddress = vkGetBufferDeviceAddress(dev, &vertAddrInfo);
+
+    VkBufferDeviceAddressInfo idxAddrInfo{};
+    idxAddrInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    idxAddrInfo.buffer = indexBuffer;
+    const VkDeviceAddress idxAddress = vkGetBufferDeviceAddress(dev, &idxAddrInfo);
+
+    VkAccelerationStructureGeometryTrianglesDataKHR triangles{};
+    triangles.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_TRIANGLES_DATA_KHR;
+    triangles.vertexFormat  = VK_FORMAT_R32G32B32_SFLOAT;
+    triangles.vertexData.deviceAddress = vertAddress;
+    triangles.vertexStride  = vertexStride;
+    triangles.maxVertex     = vertexCount - 1;
+    triangles.indexType     = VK_INDEX_TYPE_UINT32;
+    triangles.indexData.deviceAddress = idxAddress;
+
+    VkAccelerationStructureGeometryKHR geometry{};
+    geometry.sType        = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR;
+    geometry.geometryType = VK_GEOMETRY_TYPE_TRIANGLES_KHR;
+    geometry.flags        = VK_GEOMETRY_OPAQUE_BIT_KHR;
+    geometry.geometry.triangles = triangles;
+
+    const u32 primitiveCount = indexCount / 3;
+
+    VkAccelerationStructureBuildGeometryInfoKHR buildInfo{};
+    buildInfo.sType         = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR;
+    buildInfo.type          = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
+    buildInfo.flags         = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR
+                            | VK_BUILD_ACCELERATION_STRUCTURE_ALLOW_UPDATE_BIT_KHR;
+    buildInfo.mode          = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
+    buildInfo.dstAccelerationStructure = m_as;
+    buildInfo.geometryCount = 1;
+    buildInfo.pGeometries   = &geometry;
+
+    // Query scratch size for rebuild.
+    VkAccelerationStructureBuildSizesInfoKHR sizeInfo{};
+    sizeInfo.sType = VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR;
+    vkGetAccelerationStructureBuildSizesKHR(
+        dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
+        &buildInfo, &primitiveCount, &sizeInfo);
+
+    // Create temporary scratch buffer.
+    VkBufferCreateInfo scratchBufInfo{};
+    scratchBufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    scratchBufInfo.size  = sizeInfo.buildScratchSize;
+    scratchBufInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                         | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+
+    VmaAllocationCreateInfo scratchAllocCI{};
+    scratchAllocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+
+    VkBuffer scratchBuf = VK_NULL_HANDLE;
+    VmaAllocation scratchAlloc = nullptr;
+    ENIGMA_VK_CHECK(vmaCreateBuffer(allocator.handle(), &scratchBufInfo, &scratchAllocCI,
+                                    &scratchBuf, &scratchAlloc, nullptr));
+
+    VkBufferDeviceAddressInfo scratchAddrInfo{};
+    scratchAddrInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    scratchAddrInfo.buffer = scratchBuf;
+    buildInfo.scratchData.deviceAddress = vkGetBufferDeviceAddress(dev, &scratchAddrInfo);
+
+    VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
+    rangeInfo.primitiveCount  = primitiveCount;
+    rangeInfo.primitiveOffset = 0;
+    rangeInfo.firstVertex     = 0;
+    rangeInfo.transformOffset = 0;
+    const VkAccelerationStructureBuildRangeInfoKHR* pRangeInfo = &rangeInfo;
+
+    // Immediate single-use command buffer for BLAS rebuild.
+    VkCommandPoolCreateInfo poolCI{};
+    poolCI.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolCI.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolCI.queueFamilyIndex = device.graphicsQueueFamily();
+
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    ENIGMA_VK_CHECK(vkCreateCommandPool(dev, &poolCI, nullptr, &cmdPool));
+
+    VkCommandBufferAllocateInfo cmdAllocInfo{};
+    cmdAllocInfo.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmdAllocInfo.commandPool        = cmdPool;
+    cmdAllocInfo.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmdAllocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    ENIGMA_VK_CHECK(vkAllocateCommandBuffers(dev, &cmdAllocInfo, &cmd));
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    ENIGMA_VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+
+    vkCmdBuildAccelerationStructuresKHR(cmd, 1, &buildInfo, &pRangeInfo);
+
+    // Barrier: AS build writes must complete before any RT shader reads.
+    VkMemoryBarrier2 barrier{};
+    barrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+    barrier.srcStageMask  = VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    barrier.srcAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+    barrier.dstStageMask  = VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR;
+    barrier.dstAccessMask = VK_ACCESS_2_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+
+    VkDependencyInfo depInfo{};
+    depInfo.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    depInfo.memoryBarrierCount      = 1;
+    depInfo.pMemoryBarriers         = &barrier;
+
+    vkCmdPipelineBarrier2(cmd, &depInfo);
+
+    ENIGMA_VK_CHECK(vkEndCommandBuffer(cmd));
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers    = &cmd;
+    ENIGMA_VK_CHECK(vkQueueSubmit(device.graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
+    ENIGMA_VK_CHECK(vkQueueWaitIdle(device.graphicsQueue()));
+
+    vkDestroyCommandPool(dev, cmdPool, nullptr);
+    vmaDestroyBuffer(allocator.handle(), scratchBuf, scratchAlloc);
 }
 
 void BLAS::destroy(Device& device, Allocator& allocator) {
