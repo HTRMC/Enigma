@@ -1,6 +1,7 @@
 #include "renderer/Renderer.h"
 
 #include "core/Assert.h"
+#include <imgui.h>
 #include "core/Log.h"
 #include "gfx/Allocator.h"
 #include "gfx/DescriptorAllocator.h"
@@ -375,6 +376,21 @@ void Renderer::drawFrame() {
             m_tlasSlot > 0 ? 1u : 0u);
         m_imguiLayer->drawUpscalerSettings(m_upscalerSettings);
         m_imguiLayer->drawPhysicsStats(0.0f, 0u); // wired up later when physics is exposed
+
+        // Settings panel — sun light + scene knobs.
+        ImGui::SetNextWindowPos({310.f, 10.f}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({300.f, 260.f}, ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Settings")) {
+            if (ImGui::CollapsingHeader("Sun Light", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::SliderFloat3("Direction",  &m_light.direction.x, -1.f, 1.f);
+                ImGui::ColorEdit3 ("Color",       &m_light.color.x);
+                ImGui::SliderFloat("Intensity",   &m_light.intensity,    0.f, 20.f);
+            }
+            if (ImGui::CollapsingHeader("Environment")) {
+                ImGui::SliderFloat("Wetness", &m_wetnessFactor, 0.f, 1.f);
+            }
+        }
+        ImGui::End();
     }
 
     VkImage     targetImage = m_swapchain->image(imageIndex);

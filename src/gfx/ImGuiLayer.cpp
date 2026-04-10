@@ -156,6 +156,8 @@ void ImGuiLayer::render(VkCommandBuffer cmd,
 }
 
 void ImGuiLayer::drawGpuTimings(std::span<const GpuProfiler::ZoneResult> results) {
+    ImGui::SetNextWindowPos({10.f, 10.f},  ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({290.f, 140.f}, ImGuiCond_FirstUseEver);
     if (ImGui::Begin("GPU Timings")) {
         for (const auto& r : results) {
             ImGui::Text("%-24s  %.3f ms", r.name.c_str(), r.durationMs);
@@ -168,6 +170,8 @@ void ImGuiLayer::drawGpuTimings(std::span<const GpuProfiler::ZoneResult> results
 }
 
 void ImGuiLayer::drawSceneInfo(u32 primitiveCount, u32 tlasInstances) {
+    ImGui::SetNextWindowPos({10.f, 160.f}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({290.f, 70.f}, ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Scene")) {
         ImGui::Text("Primitives : %u", primitiveCount);
         ImGui::Text("TLAS inst  : %u", tlasInstances);
@@ -176,6 +180,8 @@ void ImGuiLayer::drawSceneInfo(u32 primitiveCount, u32 tlasInstances) {
 }
 
 void ImGuiLayer::drawUpscalerSettings(UpscalerSettings& settings) {
+    ImGui::SetNextWindowPos({10.f, 340.f}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({290.f, 130.f}, ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Upscaler")) {
         const char* qualityNames[] = {
             "Ultra Performance", "Performance", "Balanced",
@@ -201,6 +207,8 @@ void ImGuiLayer::drawUpscalerSettings(UpscalerSettings& settings) {
 }
 
 void ImGuiLayer::drawPhysicsStats(f32 stepTimeMs, u32 bodyCount) {
+    ImGui::SetNextWindowPos({10.f, 240.f}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({290.f, 90.f}, ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Physics")) {
         ImGui::Text("Step time  : %.3f ms", stepTimeMs);
         ImGui::Text("Body count : %u",      bodyCount);
