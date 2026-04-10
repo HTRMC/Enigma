@@ -592,7 +592,6 @@ void Renderer::drawFrame() {
                              jx, jy,
                              m_upscalerSettings.sharpness,
                              false);
-        swapchainLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
 
     // ImGui render -- after scene, before end command buffer.
