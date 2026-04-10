@@ -21,6 +21,8 @@
 #include "renderer/WetRoadPass.h"
 #include "renderer/Denoiser.h"
 #include "renderer/TrianglePass.h"
+#include "renderer/Upscaler.h"
+#include "renderer/UpscalerSettings.h"
 
 #include <volk.h>
 
@@ -69,6 +71,10 @@ public:
     // Set wet road factor (0.0 = dry, 1.0 = standing water).
     void setWetness(f32 w) { m_wetnessFactor = w; }
 
+    // Exposes settings to caller (Engine can wire this to a settings menu).
+    void setUpscalerSettings(const UpscalerSettings& s);
+    UpscalerSettings& upscalerSettings() { return m_upscalerSettings; }
+
     gfx::Device& device() { return *m_device; }
     gfx::Allocator& allocator() { return *m_allocator; }
     gfx::DescriptorAllocator& descriptorAllocator() { return *m_descriptorAllocator; }
@@ -103,6 +109,12 @@ private:
     std::unique_ptr<Denoiser>                m_giDenoiser;
     std::unique_ptr<Denoiser>                m_shadowDenoiser;
     std::unique_ptr<Denoiser>                m_reflectionDenoiser;
+
+    std::unique_ptr<IUpscaler>               m_upscaler;
+    UpscalerSettings                         m_upscalerSettings{};
+
+    // Halton jitter state for TAA/upscaling.
+    u32 m_jitterIndex = 0;
 
     u32 m_frameIndex = 0;
 

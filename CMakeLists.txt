@@ -73,6 +73,11 @@ target_sources(Enigma PRIVATE
     src/renderer/WetRoadPass.cpp
     src/renderer/Denoiser.cpp
     src/renderer/TrianglePass.cpp
+    src/renderer/UpscalerFactory.cpp
+    src/renderer/UpscalerSettings.cpp
+    src/renderer/DLSSUpscaler.cpp
+    src/renderer/XeSSUpscaler.cpp
+    src/renderer/FSRUpscaler.cpp
 )
 
 target_include_directories(Enigma PRIVATE

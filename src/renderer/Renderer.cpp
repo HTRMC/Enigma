@@ -23,6 +23,7 @@
 #include "renderer/WetRoadPass.h"
 #include "renderer/Denoiser.h"
 #include "renderer/TrianglePass.h"
+#include "renderer/UpscalerFactory.h"
 #include "scene/Camera.h"
 #include "scene/Scene.h"
 
@@ -34,6 +35,24 @@
 #include <cstring>
 
 namespace enigma {
+
+namespace {
+
+// Halton sequence value for a given index and base (typically 2 or 3).
+// Returns a f32 in [0, 1).
+f32 haltonJitter(u32 index, u32 base) {
+    f32 result = 0.0f;
+    f32 f = 1.0f;
+    u32 i = index;
+    while (i > 0) {
+        f /= static_cast<f32>(base);
+        result += f * static_cast<f32>(i % base);
+        i /= base;
+    }
+    return result;
+}
+
+} // namespace
 
 Renderer::Renderer(Window& window)
     : m_window(window)
@@ -188,11 +207,21 @@ Renderer::Renderer(Window& window)
     ENIGMA_LOG_INFO("[renderer] constructed (camera slots: {}, {})",
                     m_cameraBuffers[0].bindlessSlot,
                     m_cameraBuffers[1].bindlessSlot);
+
+    // Upscaler — auto-select based on vendor/tier, init at swapchain display extent.
+    m_upscaler = UpscalerFactory::create(m_device->properties(), m_device->gpuTier());
+    m_upscaler->init(m_device->logical(), m_device->physical(),
+                     m_swapchain->extent(), m_upscalerSettings.quality);
 }
 
 Renderer::~Renderer() {
     if (m_device) {
         vkDeviceWaitIdle(m_device->logical());
+    }
+
+    // Shut down the upscaler before device destruction.
+    if (m_upscaler) {
+        m_upscaler->shutdown();
     }
 
     // Clean up G-buffer sampler (pass objects destroy their own images/pipelines).
@@ -491,6 +520,28 @@ void Renderer::drawFrame() {
 
     m_renderGraph->execute(frame.commandBuffer, extent);
 
+    // Upscaler evaluate — after lighting pass, before present.
+    // Compute Halton(2,3) jitter for the current frame.
+    ++m_jitterIndex;
+    const f32 jx = haltonJitter(m_jitterIndex, 2) - 0.5f;
+    const f32 jy = haltonJitter(m_jitterIndex, 3) - 0.5f;
+
+    if (m_upscaler && m_scene != nullptr) {
+        m_upscaler->evaluate(frame.commandBuffer,
+                             m_swapchain->view(imageIndex),
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             depthView,
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             m_gbufferPass->motionVecView(),
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                             m_swapchain->view(imageIndex),
+                             VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                             extent, extent,
+                             jx, jy,
+                             m_upscalerSettings.sharpness,
+                             false);
+    }
+
     ENIGMA_VK_CHECK(vkEndCommandBuffer(frame.commandBuffer));
 
     // Submit.
@@ -639,6 +690,28 @@ void Renderer::buildAccelerationStructures() {
 
     ENIGMA_LOG_INFO("[renderer] acceleration structures built ({} BLASes, TLAS slot={})",
                     m_scene->primitives.size(), m_tlasSlot);
+}
+
+void Renderer::setUpscalerSettings(const UpscalerSettings& s) {
+    const auto oldBackend = m_upscalerSettings.effectiveBackend(
+        m_device->properties(), m_device->gpuTier());
+    m_upscalerSettings = s;
+    const auto newBackend = m_upscalerSettings.effectiveBackend(
+        m_device->properties(), m_device->gpuTier());
+
+    if (newBackend != oldBackend) {
+        // Backend changed: destroy old, create new.
+        vkDeviceWaitIdle(m_device->logical());
+        m_upscaler->shutdown();
+        m_upscaler = UpscalerFactory::create(
+            m_device->properties(), m_device->gpuTier(), newBackend);
+        m_upscaler->init(m_device->logical(), m_device->physical(),
+                         m_swapchain->extent(), m_upscalerSettings.quality);
+    } else if (m_upscalerSettings.quality != s.quality) {
+        // Quality only changed: reinit in place.
+        vkDeviceWaitIdle(m_device->logical());
+        m_upscaler->reinit(m_swapchain->extent(), m_upscalerSettings.quality);
+    }
 }
 
 void Renderer::resizeGBuffer(VkExtent2D extent) {
