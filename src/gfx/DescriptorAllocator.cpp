@@ -62,8 +62,11 @@ DescriptorAllocator::DescriptorAllocator(Device& device, Caps caps)
     // -------------------------------------------------------------------
     // Layout: 5 bindings. UPDATE_AFTER_BIND + PARTIALLY_BOUND on 0-3.
     // Binding 4 is the acceleration structure (fixed count 1).
-    // VARIABLE_DESCRIPTOR_COUNT on binding 3 only (last UAB binding rule —
-    // binding 4 is not UPDATE_AFTER_BIND so 3 is still the last UAB).
+    // The Vulkan spec (VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-
+    // pBindingFlags-03004) requires VARIABLE_DESCRIPTOR_COUNT_BIT on the
+    // binding with the HIGHEST binding number. Since binding 4 (AS) is the
+    // last binding, NO binding can have VARIABLE_DESCRIPTOR_COUNT — all
+    // bindings use fixed descriptor counts.
     // -------------------------------------------------------------------
     const std::array<VkDescriptorSetLayoutBinding, 5> bindings = {{
         {
@@ -111,7 +114,7 @@ DescriptorAllocator::DescriptorAllocator(Device& device, Caps caps)
         kCommonFlags,
         kCommonFlags,
         kCommonFlags,
-        kCommonFlags | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT,
+        kCommonFlags,                               // sampler: fixed count
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // AS: no UAB needed
     }};
 
@@ -150,20 +153,11 @@ DescriptorAllocator::DescriptorAllocator(Device& device, Caps caps)
     ENIGMA_VK_CHECK(vkCreateDescriptorPool(m_device->logical(), &poolInfo, nullptr, &m_pool));
 
     // -------------------------------------------------------------------
-    // Allocate the single global set. The VARIABLE_COUNT descriptor on
-    // binding 3 (samplers) needs a companion count struct telling the
-    // driver the actual array length to allocate for that binding.
+    // Allocate the single global set. All bindings have fixed counts so
+    // no VkDescriptorSetVariableDescriptorCountAllocateInfo is needed.
     // -------------------------------------------------------------------
-    const u32 samplerVariableCount = m_caps.samplers;
-
-    VkDescriptorSetVariableDescriptorCountAllocateInfo variableCountInfo{};
-    variableCountInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_VARIABLE_DESCRIPTOR_COUNT_ALLOCATE_INFO;
-    variableCountInfo.descriptorSetCount = 1;
-    variableCountInfo.pDescriptorCounts  = &samplerVariableCount;
-
     VkDescriptorSetAllocateInfo allocInfo{};
     allocInfo.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-    allocInfo.pNext              = &variableCountInfo;
     allocInfo.descriptorPool     = m_pool;
     allocInfo.descriptorSetCount = 1;
     allocInfo.pSetLayouts        = &m_layout;

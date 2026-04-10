@@ -134,6 +134,7 @@ VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePa
     args.push_back(L"-T");
     args.push_back(profile);
     args.push_back(L"-spirv");
+    args.push_back(L"-fspv-target-env=vulkan1.3"); // SPIR-V 1.6; required for RT (lib_6_3) stages
     args.push_back(L"-fvk-use-dx-layout");
     args.push_back(L"-Zpc");  // column-major matrices (match glm layout)
     args.push_back(L"-I");
