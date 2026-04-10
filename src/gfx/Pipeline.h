@@ -66,6 +66,11 @@ public:
         // colorAttachmentFormat. Up to 8 color attachments supported.
         VkFormat              colorAttachmentFormats[8] = {};
         u32                   colorAttachmentCount      = 0;
+        // Compute pipeline: when computeShader is non-null the constructor
+        // builds a VkComputePipeline instead of a graphics pipeline. All
+        // graphics-specific fields above are ignored in that case.
+        VkShaderModule        computeShader             = VK_NULL_HANDLE;
+        const char*           computeEntryPoint         = nullptr;
     };
 
     Pipeline(Device& device, const CreateInfo& info);

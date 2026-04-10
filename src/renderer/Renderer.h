@@ -16,6 +16,10 @@
 #include "renderer/LightingPass.h"
 #include "renderer/MeshPass.h"
 #include "renderer/RTReflectionPass.h"
+#include "renderer/RTGIPass.h"
+#include "renderer/RTShadowPass.h"
+#include "renderer/WetRoadPass.h"
+#include "renderer/Denoiser.h"
 #include "renderer/TrianglePass.h"
 
 #include <volk.h>
@@ -62,6 +66,9 @@ public:
     // Set the directional sun light. Takes effect on the next drawFrame().
     void setLight(const SunLight& light) { m_light = light; }
 
+    // Set wet road factor (0.0 = dry, 1.0 = standing water).
+    void setWetness(f32 w) { m_wetnessFactor = w; }
+
     gfx::Device& device() { return *m_device; }
     gfx::Allocator& allocator() { return *m_allocator; }
     gfx::DescriptorAllocator& descriptorAllocator() { return *m_descriptorAllocator; }
@@ -90,6 +97,12 @@ private:
     std::unique_ptr<GBufferPass>              m_gbufferPass;
     std::unique_ptr<LightingPass>             m_lightingPass;
     std::unique_ptr<RTReflectionPass>         m_rtReflectionPass;
+    std::unique_ptr<RTGIPass>                m_giPass;
+    std::unique_ptr<RTShadowPass>            m_shadowPass;
+    std::unique_ptr<WetRoadPass>             m_wetRoadPass;
+    std::unique_ptr<Denoiser>                m_giDenoiser;
+    std::unique_ptr<Denoiser>                m_shadowDenoiser;
+    std::unique_ptr<Denoiser>                m_reflectionDenoiser;
 
     u32 m_frameIndex = 0;
 
@@ -113,9 +126,17 @@ private:
     u32 m_gbufDepthSlot      = 0;
     u32 m_gbufferSamplerSlot = 0;
 
-    // RT reflection pass state.
+    // RT pass state.
     u32 m_tlasSlot           = 0;
     u32 m_reflectionSlot     = 0;
+    u32 m_giSlot             = 0;
+    u32 m_shadowSlot         = 0;
+    u32 m_wetRoadSlot        = 0;
+    u32 m_giDenoiseSlot      = 0;
+    u32 m_shadowDenoiseSlot  = 0;
+    u32 m_reflDenoiseSlot    = 0;
+
+    f32 m_wetnessFactor      = 0.0f;
 
     // Per-frame camera SSBOs (one per frame-in-flight, double-buffered).
     struct CameraBuffer {

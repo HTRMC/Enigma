@@ -80,6 +80,10 @@ public:
     // Used when G-buffer images are reallocated on swapchain resize.
     void updateSampledImage(u32 slot, VkImageView view, VkImageLayout layout);
 
+    // Re-write an existing storage-image slot without allocating a new one.
+    // Used when RT pass images are reallocated on swapchain resize.
+    void updateStorageImage(u32 slot, VkImageView view);
+
 private:
     Device*               m_device     = nullptr;
     Caps                  m_caps{};

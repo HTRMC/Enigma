@@ -68,6 +68,10 @@ target_sources(Enigma PRIVATE
     src/gfx/AccelerationStructure.cpp
     src/gfx/RTPipeline.cpp
     src/renderer/RTReflectionPass.cpp
+    src/renderer/RTGIPass.cpp
+    src/renderer/RTShadowPass.cpp
+    src/renderer/WetRoadPass.cpp
+    src/renderer/Denoiser.cpp
     src/renderer/TrianglePass.cpp
 )
 

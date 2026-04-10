@@ -254,6 +254,26 @@ void DescriptorAllocator::updateSampledImage(u32 slot, VkImageView view, VkImage
     vkUpdateDescriptorSets(m_device->logical(), 1, &write, 0, nullptr);
 }
 
+void DescriptorAllocator::updateStorageImage(u32 slot, VkImageView view) {
+    ENIGMA_ASSERT(slot < m_nextStorageImage && "slot was never registered");
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.sampler     = VK_NULL_HANDLE;
+    imageInfo.imageView   = view;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = m_globalSet;
+    write.dstBinding      = kBindingStorageImage;
+    write.dstArrayElement = slot;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write.pImageInfo      = &imageInfo;
+
+    vkUpdateDescriptorSets(m_device->logical(), 1, &write, 0, nullptr);
+}
+
 u32 DescriptorAllocator::registerStorageImage(VkImageView view) {
     u32 slot = 0;
     if (!m_freeStorageImages.empty()) {

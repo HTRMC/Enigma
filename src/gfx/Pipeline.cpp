@@ -9,11 +9,51 @@ namespace enigma::gfx {
 
 Pipeline::Pipeline(Device& device, const CreateInfo& info)
     : m_device(&device) {
+    ENIGMA_ASSERT(info.globalSetLayout != VK_NULL_HANDLE);
+
+    // -------------------------------------------------------------------
+    // Compute pipeline fast path.
+    // -------------------------------------------------------------------
+    if (info.computeShader != VK_NULL_HANDLE) {
+        ENIGMA_ASSERT(info.computeEntryPoint != nullptr);
+
+        VkPushConstantRange pushRange{};
+        pushRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        pushRange.offset     = 0;
+        pushRange.size       = info.pushConstantSize;
+
+        VkPipelineLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layoutInfo.setLayoutCount         = 1;
+        layoutInfo.pSetLayouts            = &info.globalSetLayout;
+        layoutInfo.pushConstantRangeCount = 1;
+        layoutInfo.pPushConstantRanges    = &pushRange;
+
+        ENIGMA_VK_CHECK(vkCreatePipelineLayout(m_device->logical(), &layoutInfo, nullptr, &m_pipelineLayout));
+
+        VkPipelineShaderStageCreateInfo stageInfo{};
+        stageInfo.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stageInfo.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
+        stageInfo.module = info.computeShader;
+        stageInfo.pName  = info.computeEntryPoint;
+
+        VkComputePipelineCreateInfo pipelineCI{};
+        pipelineCI.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+        pipelineCI.stage  = stageInfo;
+        pipelineCI.layout = m_pipelineLayout;
+
+        ENIGMA_VK_CHECK(vkCreateComputePipelines(m_device->logical(), VK_NULL_HANDLE,
+                                                  1, &pipelineCI, nullptr, &m_pipeline));
+        return;
+    }
+
+    // -------------------------------------------------------------------
+    // Graphics pipeline path.
+    // -------------------------------------------------------------------
     ENIGMA_ASSERT(info.vertShader != VK_NULL_HANDLE);
     ENIGMA_ASSERT(info.fragShader != VK_NULL_HANDLE);
     ENIGMA_ASSERT(info.vertEntryPoint != nullptr);
     ENIGMA_ASSERT(info.fragEntryPoint != nullptr);
-    ENIGMA_ASSERT(info.globalSetLayout != VK_NULL_HANDLE);
 
     // -------------------------------------------------------------------
     // Pipeline layout: set=0 is the global bindless set, push constant

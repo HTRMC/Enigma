@@ -18,6 +18,10 @@
 #include "renderer/LightingPass.h"
 #include "renderer/MeshPass.h"
 #include "renderer/RTReflectionPass.h"
+#include "renderer/RTGIPass.h"
+#include "renderer/RTShadowPass.h"
+#include "renderer/WetRoadPass.h"
+#include "renderer/Denoiser.h"
 #include "renderer/TrianglePass.h"
 #include "scene/Camera.h"
 #include "scene/Scene.h"
@@ -106,6 +110,52 @@ Renderer::Renderer(Window& window)
     // Register the reflection output as a bindless storage image.
     m_reflectionSlot = m_descriptorAllocator->registerStorageImage(m_rtReflectionPass->outputView());
     m_rtReflectionPass->outputSlot = m_reflectionSlot;
+
+    // RT GI pass.
+    m_giPass = std::make_unique<RTGIPass>(*m_device, *m_allocator);
+    m_giPass->allocate(m_swapchain->extent());
+    m_giPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
+    m_giPass->registerHotReload(*m_shaderHotReload);
+    m_giSlot = m_descriptorAllocator->registerStorageImage(m_giPass->outputView());
+    m_giPass->outputSlot = m_giSlot;
+
+    // RT Shadow pass.
+    m_shadowPass = std::make_unique<RTShadowPass>(*m_device, *m_allocator);
+    m_shadowPass->allocate(m_swapchain->extent());
+    m_shadowPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
+    m_shadowPass->registerHotReload(*m_shaderHotReload);
+    m_shadowSlot = m_descriptorAllocator->registerStorageImage(m_shadowPass->outputView());
+    m_shadowPass->outputSlot = m_shadowSlot;
+
+    // Wet Road pass.
+    m_wetRoadPass = std::make_unique<WetRoadPass>(*m_device, *m_allocator);
+    m_wetRoadPass->allocate(m_swapchain->extent());
+    m_wetRoadPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
+    m_wetRoadPass->registerHotReload(*m_shaderHotReload);
+    m_wetRoadSlot = m_descriptorAllocator->registerStorageImage(m_wetRoadPass->outputView());
+    m_wetRoadPass->outputSlot = m_wetRoadSlot;
+
+    // Denoisers (one per RT effect).
+    m_giDenoiser = std::make_unique<Denoiser>(*m_device, *m_allocator);
+    m_giDenoiser->allocate(m_swapchain->extent(), RTGIPass::kOutputFormat);
+    m_giDenoiser->buildPipelines(*m_shaderManager, m_descriptorAllocator->layout(), RTGIPass::kOutputFormat);
+    m_giDenoiser->registerHotReload(*m_shaderHotReload);
+    m_giDenoiseSlot = m_descriptorAllocator->registerStorageImage(m_giDenoiser->outputView());
+    m_giDenoiser->outputSlot = m_giDenoiseSlot;
+
+    m_shadowDenoiser = std::make_unique<Denoiser>(*m_device, *m_allocator);
+    m_shadowDenoiser->allocate(m_swapchain->extent(), RTShadowPass::kOutputFormat);
+    m_shadowDenoiser->buildPipelines(*m_shaderManager, m_descriptorAllocator->layout(), RTShadowPass::kOutputFormat);
+    m_shadowDenoiser->registerHotReload(*m_shaderHotReload);
+    m_shadowDenoiseSlot = m_descriptorAllocator->registerStorageImage(m_shadowDenoiser->outputView());
+    m_shadowDenoiser->outputSlot = m_shadowDenoiseSlot;
+
+    m_reflectionDenoiser = std::make_unique<Denoiser>(*m_device, *m_allocator);
+    m_reflectionDenoiser->allocate(m_swapchain->extent(), RTReflectionPass::kOutputFormat);
+    m_reflectionDenoiser->buildPipelines(*m_shaderManager, m_descriptorAllocator->layout(), RTReflectionPass::kOutputFormat);
+    m_reflectionDenoiser->registerHotReload(*m_shaderHotReload);
+    m_reflDenoiseSlot = m_descriptorAllocator->registerStorageImage(m_reflectionDenoiser->outputView());
+    m_reflectionDenoiser->outputSlot = m_reflDenoiseSlot;
 
     // Create per-frame camera SSBOs (host-visible, persistently mapped).
     // 13 float4s = 208 bytes per camera buffer.
@@ -333,6 +383,73 @@ void Renderer::drawFrame() {
             m_renderGraph->addRasterPass(std::move(rtReflectDesc));
         }
 
+        // RT GI pass — conditional on gpuTier >= Recommended.
+        if (m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
+            gfx::RenderGraph::RasterPassDesc rtGIDesc{};
+            rtGIDesc.name    = "RTGIPass";
+            rtGIDesc.sampledInputs = {gbufNormal, gbufDepth};
+            rtGIDesc.execute = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "RTGIPass");
+                m_giPass->record(cmd, m_descriptorAllocator->globalSet(), ext,
+                                  m_gbufNormalSlot, m_gbufDepthSlot,
+                                  cameraSlot, m_tlasSlot, m_giSlot);
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(rtGIDesc));
+        }
+
+        // RT Shadow pass — conditional on gpuTier >= Recommended.
+        if (m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
+            gfx::RenderGraph::RasterPassDesc rtShadowDesc{};
+            rtShadowDesc.name    = "RTShadowPass";
+            rtShadowDesc.sampledInputs = {gbufNormal, gbufDepth};
+            rtShadowDesc.execute = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "RTShadowPass");
+                m_shadowPass->record(cmd, m_descriptorAllocator->globalSet(), ext,
+                                      m_gbufNormalSlot, m_gbufDepthSlot,
+                                      cameraSlot, m_tlasSlot, m_shadowSlot,
+                                      vec4{m_light.direction, 0.02f}); // 0.02 rad cone angle
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(rtShadowDesc));
+        }
+
+        // Wet Road pass — conditional on gpuTier >= Recommended.
+        if (m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
+            gfx::RenderGraph::RasterPassDesc wetRoadDesc{};
+            wetRoadDesc.name    = "WetRoadPass";
+            wetRoadDesc.sampledInputs = {gbufNormal, gbufDepth};
+            wetRoadDesc.execute = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "WetRoadPass");
+                m_wetRoadPass->record(cmd, m_descriptorAllocator->globalSet(), ext,
+                                       m_gbufNormalSlot, m_gbufDepthSlot,
+                                       cameraSlot, m_tlasSlot, m_wetRoadSlot,
+                                       m_wetnessFactor);
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(wetRoadDesc));
+        }
+
+        // Denoise RT effects — conditional on gpuTier >= Recommended.
+        if (m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
+            gfx::RenderGraph::RasterPassDesc denoiseDesc{};
+            denoiseDesc.name = "DenoisePass";
+            denoiseDesc.execute = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "DenoisePass");
+                m_reflectionDenoiser->record(cmd, m_descriptorAllocator->globalSet(), ext,
+                                              m_reflectionSlot, m_gbufMotionVecSlot,
+                                              m_reflDenoiseSlot, m_reflDenoiseSlot);
+                m_giDenoiser->record(cmd, m_descriptorAllocator->globalSet(), ext,
+                                      m_giSlot, m_gbufMotionVecSlot,
+                                      m_giDenoiseSlot, m_giDenoiseSlot);
+                m_shadowDenoiser->record(cmd, m_descriptorAllocator->globalSet(), ext,
+                                          m_shadowSlot, m_gbufMotionVecSlot,
+                                          m_shadowDenoiseSlot, m_shadowDenoiseSlot);
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(denoiseDesc));
+        }
+
         gfx::RenderGraph::RasterPassDesc lightPassDesc{};
         lightPassDesc.name          = "LightingPass";
         lightPassDesc.colorTargets  = {colorHandle};
@@ -540,6 +657,28 @@ void Renderer::resizeGBuffer(VkExtent2D extent) {
         m_gbufMotionVecSlot,  m_gbufferPass->motionVecView(),  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     m_descriptorAllocator->updateSampledImage(
         m_gbufDepthSlot,      m_gbufferPass->depthView(),      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // Re-allocate RT pass images on resize.
+    m_rtReflectionPass->allocate(extent);
+    m_descriptorAllocator->updateStorageImage(m_reflectionSlot, m_rtReflectionPass->outputView());
+
+    m_giPass->allocate(extent);
+    m_descriptorAllocator->updateStorageImage(m_giSlot, m_giPass->outputView());
+
+    m_shadowPass->allocate(extent);
+    m_descriptorAllocator->updateStorageImage(m_shadowSlot, m_shadowPass->outputView());
+
+    m_wetRoadPass->allocate(extent);
+    m_descriptorAllocator->updateStorageImage(m_wetRoadSlot, m_wetRoadPass->outputView());
+
+    m_giDenoiser->allocate(extent, RTGIPass::kOutputFormat);
+    m_descriptorAllocator->updateStorageImage(m_giDenoiseSlot, m_giDenoiser->outputView());
+
+    m_shadowDenoiser->allocate(extent, RTShadowPass::kOutputFormat);
+    m_descriptorAllocator->updateStorageImage(m_shadowDenoiseSlot, m_shadowDenoiser->outputView());
+
+    m_reflectionDenoiser->allocate(extent, RTReflectionPass::kOutputFormat);
+    m_descriptorAllocator->updateStorageImage(m_reflDenoiseSlot, m_reflectionDenoiser->outputView());
 }
 
 } // namespace enigma

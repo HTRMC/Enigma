@@ -44,6 +44,8 @@ public:
         Miss,
         AnyHit,
         Intersection,
+        // Compute stage — compiled as cs_6_0.
+        Compute,
     };
 
     explicit ShaderManager(Device& device);

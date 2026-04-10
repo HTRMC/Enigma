@@ -70,6 +70,7 @@ const wchar_t* dxcProfile(ShaderManager::Stage stage) {
         case ShaderManager::Stage::Miss:          return L"lib_6_3";
         case ShaderManager::Stage::AnyHit:        return L"lib_6_3";
         case ShaderManager::Stage::Intersection:  return L"lib_6_3";
+        case ShaderManager::Stage::Compute:       return L"cs_6_0";
     }
     ENIGMA_ASSERT(false && "unknown shader stage for DXC profile");
     return L"vs_6_0";
