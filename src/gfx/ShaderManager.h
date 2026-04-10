@@ -36,6 +36,14 @@ public:
     enum class Stage {
         Vertex,
         Fragment,
+        // Ray tracing stages — compiled as shader libraries (-T lib_6_3).
+        // All five share the same DXC target profile; they differ only in
+        // the Vulkan shader stage flag used at pipeline creation time.
+        RayGeneration,
+        ClosestHit,
+        Miss,
+        AnyHit,
+        Intersection,
     };
 
     explicit ShaderManager(Device& device);

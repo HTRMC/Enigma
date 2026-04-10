@@ -59,8 +59,17 @@ std::wstring widenAscii(std::string_view narrow) {
 // shaders rely on.
 const wchar_t* dxcProfile(ShaderManager::Stage stage) {
     switch (stage) {
-        case ShaderManager::Stage::Vertex:   return L"vs_6_0";
-        case ShaderManager::Stage::Fragment: return L"ps_6_0";
+        case ShaderManager::Stage::Vertex:        return L"vs_6_0";
+        case ShaderManager::Stage::Fragment:      return L"ps_6_0";
+        // All RT stages share the HLSL shader library target. The Vulkan
+        // stage distinction (rgen/rchit/rmiss/rahit/rint) is declared via
+        // HLSL attributes ([shader("raygeneration")] etc.) inside the
+        // source file; DXC routes them to the correct SPIR-V ExecutionModel.
+        case ShaderManager::Stage::RayGeneration: return L"lib_6_3";
+        case ShaderManager::Stage::ClosestHit:    return L"lib_6_3";
+        case ShaderManager::Stage::Miss:          return L"lib_6_3";
+        case ShaderManager::Stage::AnyHit:        return L"lib_6_3";
+        case ShaderManager::Stage::Intersection:  return L"lib_6_3";
     }
     ENIGMA_ASSERT(false && "unknown shader stage for DXC profile");
     return L"vs_6_0";
