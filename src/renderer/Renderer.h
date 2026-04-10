@@ -152,6 +152,13 @@ private:
     u32 m_gbufDepthSlot      = 0;
     u32 m_gbufferSamplerSlot = 0;
 
+    // Per-effect quality toggles (Settings panel → RT conditions in drawFrame).
+    bool m_rtReflectionsEnabled = true;
+    bool m_rtGIEnabled          = true;
+    bool m_rtShadowsEnabled     = true;
+    bool m_wetRoadEnabled       = true;
+    bool m_denoiseEnabled       = true;
+
     // RT pass state.
     u32 m_tlasSlot           = 0;
     u32 m_reflectionSlot     = 0;

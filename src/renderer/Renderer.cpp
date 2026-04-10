@@ -389,6 +389,21 @@ void Renderer::drawFrame() {
             if (ImGui::CollapsingHeader("Environment")) {
                 ImGui::SliderFloat("Wetness", &m_wetnessFactor, 0.f, 1.f);
             }
+            if (ImGui::CollapsingHeader("Graphics Quality")) {
+                const bool rtAvailable = m_device->gpuTier() >= gfx::GpuTier::Recommended;
+                if (!rtAvailable) {
+                    ImGui::TextDisabled("RT effects require Recommended tier GPU");
+                    ImGui::BeginDisabled();
+                }
+                ImGui::Checkbox("RT Reflections", &m_rtReflectionsEnabled);
+                ImGui::Checkbox("RT Global Illumination", &m_rtGIEnabled);
+                ImGui::Checkbox("RT Shadows", &m_rtShadowsEnabled);
+                ImGui::Checkbox("Wet Road Effect", &m_wetRoadEnabled);
+                ImGui::Checkbox("Denoising", &m_denoiseEnabled);
+                if (!rtAvailable) {
+                    ImGui::EndDisabled();
+                }
+            }
         }
         ImGui::End();
     }
@@ -457,7 +472,7 @@ void Renderer::drawFrame() {
         // RT reflection pass — runs between G-buffer and lighting.
         // On RT hardware: dispatches vkCmdTraceRaysKHR.
         // On Min tier: no-op (SSR integration deferred to Phase 2).
-        if (m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
+        if (m_rtReflectionsEnabled && m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
             // RT reflection pass records its own barriers and is not a
             // raster pass, so we inject it as a custom execute callback
             // in a dummy raster pass with no color targets.
@@ -476,7 +491,7 @@ void Renderer::drawFrame() {
         }
 
         // RT GI pass — conditional on gpuTier >= Recommended.
-        if (m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
+        if (m_rtGIEnabled && m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
             gfx::RenderGraph::RasterPassDesc rtGIDesc{};
             rtGIDesc.name    = "RTGIPass";
             rtGIDesc.sampledInputs = {gbufNormal, gbufDepth};
@@ -491,7 +506,7 @@ void Renderer::drawFrame() {
         }
 
         // RT Shadow pass — conditional on gpuTier >= Recommended.
-        if (m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
+        if (m_rtShadowsEnabled && m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
             gfx::RenderGraph::RasterPassDesc rtShadowDesc{};
             rtShadowDesc.name    = "RTShadowPass";
             rtShadowDesc.sampledInputs = {gbufNormal, gbufDepth};
@@ -507,7 +522,7 @@ void Renderer::drawFrame() {
         }
 
         // Wet Road pass — conditional on gpuTier >= Recommended.
-        if (m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
+        if (m_wetRoadEnabled && m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
             gfx::RenderGraph::RasterPassDesc wetRoadDesc{};
             wetRoadDesc.name    = "WetRoadPass";
             wetRoadDesc.sampledInputs = {gbufNormal, gbufDepth};
@@ -523,7 +538,7 @@ void Renderer::drawFrame() {
         }
 
         // Denoise RT effects — conditional on gpuTier >= Recommended.
-        if (m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
+        if (m_denoiseEnabled && m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
             gfx::RenderGraph::RasterPassDesc denoiseDesc{};
             denoiseDesc.name = "DenoisePass";
             denoiseDesc.execute = [&](VkCommandBuffer cmd, VkExtent2D ext) {
