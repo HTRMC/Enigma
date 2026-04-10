@@ -91,10 +91,14 @@ BLAS BLAS::build(Device& device, Allocator& allocator,
     asCreateInfo.type   = VK_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL_KHR;
     ENIGMA_VK_CHECK(vkCreateAccelerationStructureKHR(dev, &asCreateInfo, nullptr, &result.m_as));
 
-    // Create scratch buffer.
+    // Create scratch buffer. Over-allocate by (kScratchAlign - 1) so the
+    // device address can always be aligned up to kScratchAlign (required by
+    // VkPhysicalDeviceAccelerationStructurePropertiesKHR::
+    //   minAccelerationStructureScratchOffsetAlignment).
+    constexpr VkDeviceSize kScratchAlign = 256; // conservative; spec min is 128
     VkBufferCreateInfo scratchBufInfo{};
     scratchBufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    scratchBufInfo.size  = sizeInfo.buildScratchSize;
+    scratchBufInfo.size  = sizeInfo.buildScratchSize + kScratchAlign - 1;
     scratchBufInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                          | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
@@ -109,7 +113,8 @@ BLAS BLAS::build(Device& device, Allocator& allocator,
     VkBufferDeviceAddressInfo scratchAddrInfo{};
     scratchAddrInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
     scratchAddrInfo.buffer = scratchBuf;
-    const VkDeviceAddress scratchAddress = vkGetBufferDeviceAddress(dev, &scratchAddrInfo);
+    const VkDeviceAddress rawScratchAddr  = vkGetBufferDeviceAddress(dev, &scratchAddrInfo);
+    const VkDeviceAddress scratchAddress  = (rawScratchAddr + (kScratchAlign - 1)) & ~(VkDeviceAddress)(kScratchAlign - 1);
 
     // Build on the device using immediate submit on the graphics queue.
     buildInfo.dstAccelerationStructure  = result.m_as;
@@ -219,10 +224,11 @@ void BLAS::refit(Device& device, Allocator& allocator,
         dev, VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,
         &buildInfo, &primitiveCount, &sizeInfo);
 
-    // Allocate scratch buffer for the update.
+    // Allocate scratch buffer for the update (same alignment padding as build).
+    constexpr VkDeviceSize kScratchAlign = 256;
     VkBufferCreateInfo scratchBufInfo{};
     scratchBufInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    scratchBufInfo.size  = sizeInfo.updateScratchSize;
+    scratchBufInfo.size  = sizeInfo.updateScratchSize + kScratchAlign - 1;
     scratchBufInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
                          | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 
@@ -237,7 +243,8 @@ void BLAS::refit(Device& device, Allocator& allocator,
     VkBufferDeviceAddressInfo scratchAddrInfo{};
     scratchAddrInfo.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
     scratchAddrInfo.buffer = scratchBuf;
-    buildInfo.scratchData.deviceAddress = vkGetBufferDeviceAddress(dev, &scratchAddrInfo);
+    const VkDeviceAddress rawRefitAddr    = vkGetBufferDeviceAddress(dev, &scratchAddrInfo);
+    buildInfo.scratchData.deviceAddress   = (rawRefitAddr + (kScratchAlign - 1)) & ~(VkDeviceAddress)(kScratchAlign - 1);
 
     VkAccelerationStructureBuildRangeInfoKHR rangeInfo{};
     rangeInfo.primitiveCount  = primitiveCount;

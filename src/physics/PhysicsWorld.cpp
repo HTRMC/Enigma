@@ -115,7 +115,10 @@ PhysicsWorld::~PhysicsWorld() {
 }
 
 void PhysicsWorld::step(f32 dt) {
-    m_accumulator += dt;
+    // Clamp to avoid a spiral of death when dt is large (e.g. first frame
+    // after a long load). 5 physics steps per render frame is the max.
+    constexpr f32 kMaxDt = kFixedDt * 5.0f;
+    m_accumulator += (dt < kMaxDt ? dt : kMaxDt);
     while (m_accumulator >= kFixedDt) {
         m_physicsSystem->Update(kFixedDt, 1, m_tempAllocator.get(), m_jobSystem.get());
         m_accumulator -= kFixedDt;

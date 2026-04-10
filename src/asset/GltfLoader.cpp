@@ -48,7 +48,8 @@ Scene::GpuBuffer createAndUploadSSBO(gfx::Device& device, gfx::Allocator& alloca
     bufInfo.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufInfo.size        = size;
     bufInfo.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
-                        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+                        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                        | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     VmaAllocationCreateInfo allocInfo{};
@@ -69,7 +70,8 @@ Scene::GpuBuffer createAndUploadIndexBuffer(gfx::Device& device, gfx::Allocator&
     bufInfo.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufInfo.size        = size;
     bufInfo.usage       = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
-                        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+                        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT
+                        | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
     bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     VmaAllocationCreateInfo allocInfo{};
