@@ -20,7 +20,8 @@ class Device;
 // in Allocator.cpp; the function table is populated manually from the
 // volk globals).
 //
-// BDA flag is NOT set: `bufferDeviceAddress` is dropped at this milestone.
+// BDA flag is set: VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT enables
+// device-address-capable allocations required by RT acceleration structures.
 class Allocator {
 public:
     Allocator(Instance& instance, Device& device);

@@ -62,8 +62,9 @@ Allocator::Allocator(Instance& instance, Device& device) {
     info.device           = device.logical();
     info.pVulkanFunctions = &fns;
     info.vulkanApiVersion = VK_API_VERSION_1_3;
-    // NOTE: VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT intentionally NOT
-    // set — BDA is dropped at this milestone per ADR.
+    // BDA flag: required for RT acceleration structures (BLAS/TLAS) which
+    // need VkDeviceAddress on their backing buffers.
+    info.flags            = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
 
     ENIGMA_VK_CHECK(vmaCreateAllocator(&info, &m_allocator));
     ENIGMA_ASSERT(m_allocator != nullptr);
