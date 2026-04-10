@@ -12,6 +12,18 @@ namespace enigma {
 void Scene::destroy(gfx::Device& device, gfx::Allocator& allocator) {
     VkDevice dev = device.logical();
 
+    // Destroy acceleration structures before GPU buffers they reference.
+    if (tlas.has_value()) {
+        tlas->destroy(device, allocator);
+        tlas.reset();
+    }
+    for (auto& prim : primitives) {
+        if (prim.blas.has_value()) {
+            prim.blas->destroy(device, allocator);
+            prim.blas.reset();
+        }
+    }
+
     for (auto& sampler : ownedSamplers) {
         vkDestroySampler(dev, sampler, nullptr);
     }

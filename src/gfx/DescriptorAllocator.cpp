@@ -17,6 +17,9 @@ constexpr u32 kBindingSampledImage  = 0;
 constexpr u32 kBindingStorageImage  = 1;
 constexpr u32 kBindingStorageBuffer = 2;
 constexpr u32 kBindingSampler       = 3;
+constexpr u32 kBindingAccelStruct   = 4;
+
+constexpr u32 kAccelStructCount = 1; // single TLAS slot
 
 // Query descriptor-indexing limits from the physical device and clamp
 // the caller's requested per-type caps down to what the driver actually
@@ -57,10 +60,12 @@ DescriptorAllocator::DescriptorAllocator(Device& device, Caps caps)
                     m_caps.storageBuffers, m_caps.samplers);
 
     // -------------------------------------------------------------------
-    // Layout: 4 bindings, UPDATE_AFTER_BIND + PARTIALLY_BOUND on all four.
-    // VARIABLE_DESCRIPTOR_COUNT on binding 3 only (last binding rule).
+    // Layout: 5 bindings. UPDATE_AFTER_BIND + PARTIALLY_BOUND on 0-3.
+    // Binding 4 is the acceleration structure (fixed count 1).
+    // VARIABLE_DESCRIPTOR_COUNT on binding 3 only (last UAB binding rule —
+    // binding 4 is not UPDATE_AFTER_BIND so 3 is still the last UAB).
     // -------------------------------------------------------------------
-    const std::array<VkDescriptorSetLayoutBinding, 4> bindings = {{
+    const std::array<VkDescriptorSetLayoutBinding, 5> bindings = {{
         {
             kBindingSampledImage,
             VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -89,17 +94,25 @@ DescriptorAllocator::DescriptorAllocator(Device& device, Caps caps)
             VK_SHADER_STAGE_ALL,
             nullptr,
         },
+        {
+            kBindingAccelStruct,
+            VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
+            kAccelStructCount,
+            VK_SHADER_STAGE_ALL,
+            nullptr,
+        },
     }};
 
     constexpr VkDescriptorBindingFlags kCommonFlags =
         VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
 
-    const std::array<VkDescriptorBindingFlags, 4> bindingFlags = {{
+    const std::array<VkDescriptorBindingFlags, 5> bindingFlags = {{
         kCommonFlags,
         kCommonFlags,
         kCommonFlags,
         kCommonFlags | VK_DESCRIPTOR_BINDING_VARIABLE_DESCRIPTOR_COUNT_BIT,
+        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // AS: no UAB needed
     }};
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo{};
@@ -117,14 +130,14 @@ DescriptorAllocator::DescriptorAllocator(Device& device, Caps caps)
     ENIGMA_VK_CHECK(vkCreateDescriptorSetLayout(m_device->logical(), &layoutInfo, nullptr, &m_layout));
 
     // -------------------------------------------------------------------
-    // Pool sized to hold exactly the four type arrays. We allocate one
-    // set (the global set); there are no per-draw sets in this engine.
+    // Pool sized to hold the five type arrays.
     // -------------------------------------------------------------------
-    const std::array<VkDescriptorPoolSize, 4> poolSizes = {{
-        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,  m_caps.sampledImages  },
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,  m_caps.storageImages  },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, m_caps.storageBuffers },
-        { VK_DESCRIPTOR_TYPE_SAMPLER,        m_caps.samplers       },
+    const std::array<VkDescriptorPoolSize, 5> poolSizes = {{
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,               m_caps.sampledImages  },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,               m_caps.storageImages  },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,              m_caps.storageBuffers },
+        { VK_DESCRIPTOR_TYPE_SAMPLER,                     m_caps.samplers       },
+        { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,  kAccelStructCount     },
     }};
 
     VkDescriptorPoolCreateInfo poolInfo{};
@@ -166,8 +179,14 @@ DescriptorAllocator::~DescriptorAllocator() {
 }
 
 u32 DescriptorAllocator::registerStorageBuffer(VkBuffer buffer, VkDeviceSize size) {
-    ENIGMA_ASSERT(m_nextStorageBuffer < m_caps.storageBuffers);
-    const u32 slot = m_nextStorageBuffer++;
+    u32 slot = 0;
+    if (!m_freeStorageBuffers.empty()) {
+        slot = m_freeStorageBuffers.back();
+        m_freeStorageBuffers.pop_back();
+    } else {
+        ENIGMA_ASSERT(m_nextStorageBuffer < m_caps.storageBuffers);
+        slot = m_nextStorageBuffer++;
+    }
 
     VkDescriptorBufferInfo bufferInfo{};
     bufferInfo.buffer = buffer;
@@ -187,14 +206,15 @@ u32 DescriptorAllocator::registerStorageBuffer(VkBuffer buffer, VkDeviceSize siz
     return slot;
 }
 
-// Milestone-2 implementations. Pattern mirrors registerStorageBuffer
-// above: descriptor image/buffer info + single vkUpdateDescriptorSets
-// write per call. UPDATE_AFTER_BIND + PARTIALLY_BOUND semantics make
-// these legal at any time, including after the set has been bound to
-// a command buffer.
 u32 DescriptorAllocator::registerSampledImage(VkImageView view, VkImageLayout layout) {
-    ENIGMA_ASSERT(m_nextSampledImage < m_caps.sampledImages);
-    const u32 slot = m_nextSampledImage++;
+    u32 slot = 0;
+    if (!m_freeSampledImages.empty()) {
+        slot = m_freeSampledImages.back();
+        m_freeSampledImages.pop_back();
+    } else {
+        ENIGMA_ASSERT(m_nextSampledImage < m_caps.sampledImages);
+        slot = m_nextSampledImage++;
+    }
 
     VkDescriptorImageInfo imageInfo{};
     imageInfo.sampler     = VK_NULL_HANDLE;
@@ -234,17 +254,43 @@ void DescriptorAllocator::updateSampledImage(u32 slot, VkImageView view, VkImage
     vkUpdateDescriptorSets(m_device->logical(), 1, &write, 0, nullptr);
 }
 
-// Remaining stub: storage image lands at a later milestone 2 step
-// (compute pass writing into a procedural storage image). Kept
-// asserting so any premature caller lights up immediately.
-u32 DescriptorAllocator::registerStorageImage(VkImageView) {
-    ENIGMA_ASSERT(false && "registerStorageImage: not implemented yet");
-    return UINT32_MAX;
+u32 DescriptorAllocator::registerStorageImage(VkImageView view) {
+    u32 slot = 0;
+    if (!m_freeStorageImages.empty()) {
+        slot = m_freeStorageImages.back();
+        m_freeStorageImages.pop_back();
+    } else {
+        ENIGMA_ASSERT(m_nextStorageImage < m_caps.storageImages);
+        slot = m_nextStorageImage++;
+    }
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.sampler     = VK_NULL_HANDLE;
+    imageInfo.imageView   = view;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = m_globalSet;
+    write.dstBinding      = kBindingStorageImage;
+    write.dstArrayElement = slot;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write.pImageInfo      = &imageInfo;
+
+    vkUpdateDescriptorSets(m_device->logical(), 1, &write, 0, nullptr);
+    return slot;
 }
 
 u32 DescriptorAllocator::registerSampler(VkSampler sampler) {
-    ENIGMA_ASSERT(m_nextSampler < m_caps.samplers);
-    const u32 slot = m_nextSampler++;
+    u32 slot = 0;
+    if (!m_freeSamplers.empty()) {
+        slot = m_freeSamplers.back();
+        m_freeSamplers.pop_back();
+    } else {
+        ENIGMA_ASSERT(m_nextSampler < m_caps.samplers);
+        slot = m_nextSampler++;
+    }
 
     VkDescriptorImageInfo imageInfo{};
     imageInfo.sampler     = sampler;
@@ -262,6 +308,41 @@ u32 DescriptorAllocator::registerSampler(VkSampler sampler) {
 
     vkUpdateDescriptorSets(m_device->logical(), 1, &write, 0, nullptr);
     return slot;
+}
+
+u32 DescriptorAllocator::registerAccelerationStructure(VkAccelerationStructureKHR as) {
+    VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
+    asWrite.sType                      = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
+    asWrite.accelerationStructureCount = 1;
+    asWrite.pAccelerationStructures    = &as;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.pNext           = &asWrite;
+    write.dstSet          = m_globalSet;
+    write.dstBinding      = kBindingAccelStruct;
+    write.dstArrayElement = 0;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
+
+    vkUpdateDescriptorSets(m_device->logical(), 1, &write, 0, nullptr);
+    return 0; // single slot, always index 0
+}
+
+void DescriptorAllocator::releaseSampledImage(u32 slot) {
+    m_freeSampledImages.push_back(slot);
+}
+
+void DescriptorAllocator::releaseStorageImage(u32 slot) {
+    m_freeStorageImages.push_back(slot);
+}
+
+void DescriptorAllocator::releaseStorageBuffer(u32 slot) {
+    m_freeStorageBuffers.push_back(slot);
+}
+
+void DescriptorAllocator::releaseSampler(u32 slot) {
+    m_freeSamplers.push_back(slot);
 }
 
 } // namespace enigma::gfx

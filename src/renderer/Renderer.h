@@ -15,6 +15,7 @@
 #include "renderer/GBufferPass.h"
 #include "renderer/LightingPass.h"
 #include "renderer/MeshPass.h"
+#include "renderer/RTReflectionPass.h"
 #include "renderer/TrianglePass.h"
 
 #include <volk.h>
@@ -54,7 +55,9 @@ public:
     void setCamera(Camera* camera) { m_camera = camera; }
 
     // Set the scene to render. Null reverts to TrianglePass fallback.
-    void setScene(Scene* scene) { m_scene = scene; }
+    // On RT hardware, builds acceleration structures for the scene.
+    void setScene(Scene* scene);
+
 
     // Set the directional sun light. Takes effect on the next drawFrame().
     void setLight(const SunLight& light) { m_light = light; }
@@ -67,6 +70,8 @@ private:
     void uploadCameraData();
     // Re-allocate G-buffer images and update bindless descriptors after resize.
     void resizeGBuffer(VkExtent2D extent);
+    // Build BLASes for all scene primitives and the TLAS.
+    void buildAccelerationStructures();
 
     Window& m_window;
 
@@ -84,6 +89,7 @@ private:
     std::unique_ptr<MeshPass>                  m_meshPass;
     std::unique_ptr<GBufferPass>              m_gbufferPass;
     std::unique_ptr<LightingPass>             m_lightingPass;
+    std::unique_ptr<RTReflectionPass>         m_rtReflectionPass;
 
     u32 m_frameIndex = 0;
 
@@ -106,6 +112,10 @@ private:
     u32 m_gbufMotionVecSlot  = 0;
     u32 m_gbufDepthSlot      = 0;
     u32 m_gbufferSamplerSlot = 0;
+
+    // RT reflection pass state.
+    u32 m_tlasSlot           = 0;
+    u32 m_reflectionSlot     = 0;
 
     // Per-frame camera SSBOs (one per frame-in-flight, double-buffered).
     struct CameraBuffer {

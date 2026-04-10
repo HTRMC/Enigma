@@ -191,6 +191,27 @@ Device::Device(Instance& instance) {
         }
     }
 
+    // Conditionally enable RT extensions when hardware supports them.
+    {
+        bool hasAccelStruct = false;
+        bool hasRTPipeline  = false;
+        bool hasDeferredOps = false;
+        for (const auto& ep : extProps) {
+            if (std::strcmp(ep.extensionName, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) == 0)
+                hasAccelStruct = true;
+            if (std::strcmp(ep.extensionName, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) == 0)
+                hasRTPipeline = true;
+            if (std::strcmp(ep.extensionName, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) == 0)
+                hasDeferredOps = true;
+        }
+        if (hasAccelStruct && hasRTPipeline && hasDeferredOps) {
+            enabledExts.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
+            enabledExts.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
+            enabledExts.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+            ENIGMA_LOG_INFO("[gfx] enabling RT extensions (acceleration_structure + ray_tracing_pipeline + deferred_host_operations)");
+        }
+    }
+
     // Discover optional async compute and dedicated transfer queue families.
     // Compute-only: VK_QUEUE_COMPUTE_BIT set, VK_QUEUE_GRAPHICS_BIT clear.
     // Transfer-only: VK_QUEUE_TRANSFER_BIT set, GRAPHICS and COMPUTE both clear.

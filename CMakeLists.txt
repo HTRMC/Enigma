@@ -65,6 +65,9 @@ target_sources(Enigma PRIVATE
     src/gfx/ShaderHotReload.cpp
     src/gfx/UploadContext.cpp
     src/gfx/Pipeline.cpp
+    src/gfx/AccelerationStructure.cpp
+    src/gfx/RTPipeline.cpp
+    src/renderer/RTReflectionPass.cpp
     src/renderer/TrianglePass.cpp
 )
 

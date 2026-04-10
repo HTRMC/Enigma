@@ -4,6 +4,8 @@
 
 #include <volk.h>
 
+#include <vector>
+
 namespace enigma::gfx {
 
 class Device;
@@ -61,11 +63,18 @@ public:
     // UPDATE_AFTER_BIND semantics so it is legal to call at any time,
     // even after the set has been bound to a command buffer.
     u32 registerStorageBuffer(VkBuffer buffer, VkDeviceSize size);
-
-    // --- stubs for milestone 2 (Principle 6: pin the API shape now) ---
     u32 registerSampledImage(VkImageView view, VkImageLayout layout);
     u32 registerStorageImage(VkImageView view);
     u32 registerSampler(VkSampler sampler);
+
+    // Binding 4: acceleration structure (fixed count: 1, for TLAS).
+    u32 registerAccelerationStructure(VkAccelerationStructureKHR as);
+
+    // Release a slot back to the free-list for reuse.
+    void releaseSampledImage(u32 slot);
+    void releaseStorageImage(u32 slot);
+    void releaseStorageBuffer(u32 slot);
+    void releaseSampler(u32 slot);
 
     // Re-write an existing sampled-image slot without allocating a new one.
     // Used when G-buffer images are reallocated on swapchain resize.
@@ -82,6 +91,11 @@ private:
     u32 m_nextStorageImage  = 0;
     u32 m_nextStorageBuffer = 0;
     u32 m_nextSampler       = 0;
+
+    std::vector<u32> m_freeSampledImages;
+    std::vector<u32> m_freeStorageImages;
+    std::vector<u32> m_freeStorageBuffers;
+    std::vector<u32> m_freeSamplers;
 };
 
 } // namespace enigma::gfx

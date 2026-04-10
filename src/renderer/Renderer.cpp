@@ -17,6 +17,7 @@
 #include "renderer/GBufferPass.h"
 #include "renderer/LightingPass.h"
 #include "renderer/MeshPass.h"
+#include "renderer/RTReflectionPass.h"
 #include "renderer/TrianglePass.h"
 #include "scene/Camera.h"
 #include "scene/Scene.h"
@@ -93,6 +94,18 @@ Renderer::Renderer(Window& window)
                                    m_descriptorAllocator->layout(),
                                    m_swapchain->format());
     m_lightingPass->registerHotReload(*m_shaderHotReload);
+
+    // RT reflection pass.
+    m_rtReflectionPass = std::make_unique<RTReflectionPass>(*m_device, *m_allocator);
+    m_rtReflectionPass->allocate(m_swapchain->extent());
+    m_rtReflectionPass->buildPipeline(*m_shaderManager,
+                                       m_descriptorAllocator->layout(),
+                                       RTReflectionPass::kOutputFormat);
+    m_rtReflectionPass->registerHotReload(*m_shaderHotReload);
+
+    // Register the reflection output as a bindless storage image.
+    m_reflectionSlot = m_descriptorAllocator->registerStorageImage(m_rtReflectionPass->outputView());
+    m_rtReflectionPass->outputSlot = m_reflectionSlot;
 
     // Create per-frame camera SSBOs (host-visible, persistently mapped).
     // 13 float4s = 208 bytes per camera buffer.
@@ -299,6 +312,27 @@ void Renderer::drawFrame() {
         };
         m_renderGraph->addRasterPass(std::move(gbufPassDesc));
 
+        // RT reflection pass — runs between G-buffer and lighting.
+        // On RT hardware: dispatches vkCmdTraceRaysKHR.
+        // On Min tier: no-op (SSR integration deferred to Phase 2).
+        if (m_device->gpuTier() >= gfx::GpuTier::Recommended && m_scene->tlas.has_value()) {
+            // RT reflection pass records its own barriers and is not a
+            // raster pass, so we inject it as a custom execute callback
+            // in a dummy raster pass with no color targets.
+            gfx::RenderGraph::RasterPassDesc rtReflectDesc{};
+            rtReflectDesc.name    = "RTReflectionPass";
+            rtReflectDesc.sampledInputs = {gbufNormal, gbufDepth};
+            rtReflectDesc.execute = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "RTReflectionPass");
+                m_rtReflectionPass->record(cmd, m_descriptorAllocator->globalSet(), ext,
+                                            m_gbufNormalSlot, m_gbufDepthSlot,
+                                            cameraSlot, m_gbufferSamplerSlot,
+                                            m_tlasSlot, m_reflectionSlot);
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(rtReflectDesc));
+        }
+
         gfx::RenderGraph::RasterPassDesc lightPassDesc{};
         lightPassDesc.name          = "LightingPass";
         lightPassDesc.colorTargets  = {colorHandle};
@@ -393,6 +427,101 @@ void Renderer::drawFrame() {
     }
 
     m_frameIndex = (m_frameIndex + 1) % gfx::MAX_FRAMES_IN_FLIGHT;
+}
+
+void Renderer::setScene(Scene* scene) {
+    m_scene = scene;
+    if (m_scene != nullptr && m_device->gpuTier() >= gfx::GpuTier::Recommended) {
+        buildAccelerationStructures();
+    }
+}
+
+void Renderer::buildAccelerationStructures() {
+    ENIGMA_ASSERT(m_scene != nullptr);
+
+    // Vertex stride: packed as 3 x float4 per vertex (see packVertices in GltfLoader).
+    constexpr VkDeviceSize kVertexStride = 3 * sizeof(vec4); // 48 bytes
+
+    for (auto& prim : m_scene->primitives) {
+        if (prim.blas.has_value()) continue;
+        if (prim.vertexBuffer == VK_NULL_HANDLE) continue;
+
+        prim.blas = gfx::BLAS::build(*m_device, *m_allocator,
+                                     prim.vertexBuffer, prim.vertexCount, kVertexStride,
+                                     prim.indexBuffer, prim.indexCount);
+    }
+
+    // Build TLAS from all scene nodes.
+    m_scene->tlas.emplace(*m_device, *m_allocator, 4096);
+
+    for (const auto& node : m_scene->nodes) {
+        for (u32 primIdx : node.primitiveIndices) {
+            auto& prim = m_scene->primitives[primIdx];
+            if (!prim.blas.has_value()) continue;
+
+            const u32 slot = m_scene->tlas->allocateInstanceSlot();
+
+            VkAccelerationStructureInstanceKHR inst{};
+            // Copy the 3x4 transform matrix (row-major, column-major GLM needs transpose).
+            const mat4& m = node.worldTransform;
+            inst.transform.matrix[0][0] = m[0][0]; inst.transform.matrix[0][1] = m[1][0];
+            inst.transform.matrix[0][2] = m[2][0]; inst.transform.matrix[0][3] = m[3][0];
+            inst.transform.matrix[1][0] = m[0][1]; inst.transform.matrix[1][1] = m[1][1];
+            inst.transform.matrix[1][2] = m[2][1]; inst.transform.matrix[1][3] = m[3][1];
+            inst.transform.matrix[2][0] = m[0][2]; inst.transform.matrix[2][1] = m[1][2];
+            inst.transform.matrix[2][2] = m[2][2]; inst.transform.matrix[2][3] = m[3][2];
+
+            inst.instanceCustomIndex                    = primIdx;
+            inst.mask                                   = 0xFF;
+            inst.instanceShaderBindingTableRecordOffset  = 0;
+            inst.flags                                  = VK_GEOMETRY_INSTANCE_TRIANGLE_FACING_CULL_DISABLE_BIT_KHR;
+            inst.accelerationStructureReference         = prim.blas->deviceAddress();
+
+            m_scene->tlas->setInstance(slot, inst);
+        }
+    }
+
+    // Build TLAS on the GPU via immediate command buffer.
+    VkCommandPoolCreateInfo poolCI{};
+    poolCI.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolCI.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolCI.queueFamilyIndex = m_device->graphicsQueueFamily();
+
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    ENIGMA_VK_CHECK(vkCreateCommandPool(m_device->logical(), &poolCI, nullptr, &cmdPool));
+
+    VkCommandBufferAllocateInfo cmdAllocInfo{};
+    cmdAllocInfo.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmdAllocInfo.commandPool        = cmdPool;
+    cmdAllocInfo.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmdAllocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    ENIGMA_VK_CHECK(vkAllocateCommandBuffers(m_device->logical(), &cmdAllocInfo, &cmd));
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    ENIGMA_VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+
+    m_scene->tlas->build(cmd, *m_device, *m_allocator);
+
+    ENIGMA_VK_CHECK(vkEndCommandBuffer(cmd));
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers    = &cmd;
+    ENIGMA_VK_CHECK(vkQueueSubmit(m_device->graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
+    ENIGMA_VK_CHECK(vkQueueWaitIdle(m_device->graphicsQueue()));
+
+    vkDestroyCommandPool(m_device->logical(), cmdPool, nullptr);
+
+    // Register TLAS in the bindless descriptor set.
+    m_tlasSlot = m_descriptorAllocator->registerAccelerationStructure(m_scene->tlas->handle());
+
+    ENIGMA_LOG_INFO("[renderer] acceleration structures built ({} BLASes, TLAS slot={})",
+                    m_scene->primitives.size(), m_tlasSlot);
 }
 
 void Renderer::resizeGBuffer(VkExtent2D extent) {

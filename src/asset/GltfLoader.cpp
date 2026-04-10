@@ -47,7 +47,8 @@ Scene::GpuBuffer createAndUploadSSBO(gfx::Device& device, gfx::Allocator& alloca
     VkBufferCreateInfo bufInfo{};
     bufInfo.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufInfo.size        = size;
-    bufInfo.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufInfo.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     VmaAllocationCreateInfo allocInfo{};
@@ -67,7 +68,8 @@ Scene::GpuBuffer createAndUploadIndexBuffer(gfx::Device& device, gfx::Allocator&
     VkBufferCreateInfo bufInfo{};
     bufInfo.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     bufInfo.size        = size;
-    bufInfo.usage       = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bufInfo.usage       = VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT
+                        | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
     VmaAllocationCreateInfo allocInfo{};
@@ -475,6 +477,8 @@ std::optional<Scene> loadGltf(const std::filesystem::path& path,
             meshPrim.materialIndex    = prim.materialIndex.has_value()
                                             ? static_cast<i32>(prim.materialIndex.value())
                                             : -1;
+            meshPrim.vertexBuffer     = gpuBuf.buffer;
+            meshPrim.vertexCount      = static_cast<u32>(vertCount);
             scene.primitives.push_back(meshPrim);
         }
     }

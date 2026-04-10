@@ -2,9 +2,11 @@
 
 #include "core/Math.h"
 #include "core/Types.h"
+#include "gfx/AccelerationStructure.h"
 
 #include <volk.h>
 
+#include <optional>
 #include <vector>
 
 struct VmaAllocation_T;
@@ -49,6 +51,11 @@ struct MeshPrimitive {
     u32       indexCount       = 0;
     VkBuffer  indexBuffer      = VK_NULL_HANDLE;
     i32       materialIndex    = -1; // -1 = default material
+    // RT acceleration structure — built by Renderer after scene load.
+    std::optional<gfx::BLAS> blas;
+    // Vertex buffer handle + count needed for BLAS building.
+    VkBuffer  vertexBuffer     = VK_NULL_HANDLE;
+    u32       vertexCount      = 0;
 };
 
 struct MeshNode {
@@ -81,6 +88,9 @@ struct Scene {
     std::vector<GpuBuffer>  ownedBuffers;
     std::vector<GpuImage>   ownedImages;
     std::vector<VkSampler>  ownedSamplers;
+
+    // Top-level acceleration structure for RT — built by Renderer.
+    std::optional<gfx::TLAS> tlas;
 
     void destroy(gfx::Device& device, gfx::Allocator& allocator);
 };
