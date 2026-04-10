@@ -7,7 +7,7 @@
 
 #include <Jolt/Core/Factory.h>
 #include <Jolt/Core/JobSystemThreadPool.h>
-#include <Jolt/Core/TempAllocator.h>
+#include <Jolt/Core/TempAllocator.h>  // TempAllocatorMalloc
 #include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Body/BodyCreationSettings.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
@@ -73,7 +73,7 @@ void ensureJoltInit() {
 PhysicsWorld::PhysicsWorld() {
     ensureJoltInit();
 
-    m_tempAllocator = std::make_unique<JPH::TempAllocatorImpl>(10 * 1024 * 1024); // 10 MB
+    m_tempAllocator = std::make_unique<JPH::TempAllocatorMalloc>();
     m_jobSystem     = std::make_unique<JPH::JobSystemThreadPool>(JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, 2);
 
     // Broad-phase layer interface: maps ObjectLayer → BroadPhaseLayer.

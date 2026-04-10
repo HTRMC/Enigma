@@ -217,7 +217,7 @@ void RTPipeline::buildSBT(Device& device, Allocator& allocator) {
 
     m_raygenRegion.deviceAddress = sbtAddress;
     m_raygenRegion.stride        = handleSizeAligned;
-    m_raygenRegion.size          = raygenRegionSize;
+    m_raygenRegion.size          = handleSizeAligned; // exactly 1 raygen shader: size must equal stride
 
     m_missRegion.deviceAddress = sbtAddress + raygenRegionSize;
     m_missRegion.stride        = handleSizeAligned;

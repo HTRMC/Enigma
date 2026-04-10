@@ -168,48 +168,59 @@ void RenderGraph::execute(VkCommandBuffer cmd, VkExtent2D extent) {
             }
         }
 
-        // Begin dynamic rendering.
-        std::vector<VkRenderingAttachmentInfo> colorAttachInfos;
-        colorAttachInfos.reserve(pass.colorTargets.size());
-        for (const RGImageHandle h : pass.colorTargets) {
-            const auto& img = m_images[h.index];
-            VkRenderingAttachmentInfo ai{};
-            ai.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-            ai.imageView   = img.view;
-            ai.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-            ai.loadOp      = pass.colorLoadOp;
-            ai.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
-            ai.clearValue.color = pass.clearColor;
-            colorAttachInfos.push_back(ai);
+        // Passes with no attachments are RT/compute passes — they must NOT be
+        // wrapped in a render pass instance (vkCmdTraceRaysKHR and vkCmdDispatch
+        // are illegal inside an active vkCmdBeginRendering block).
+        const bool hasAttachments = !pass.colorTargets.empty() || pass.depthTarget.valid();
+
+        if (hasAttachments) {
+            // Begin dynamic rendering.
+            std::vector<VkRenderingAttachmentInfo> colorAttachInfos;
+            colorAttachInfos.reserve(pass.colorTargets.size());
+            for (const RGImageHandle h : pass.colorTargets) {
+                const auto& img = m_images[h.index];
+                VkRenderingAttachmentInfo ai{};
+                ai.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+                ai.imageView   = img.view;
+                ai.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+                ai.loadOp      = pass.colorLoadOp;
+                ai.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
+                ai.clearValue.color = pass.clearColor;
+                colorAttachInfos.push_back(ai);
+            }
+
+            VkRenderingAttachmentInfo depthInfo{};
+            VkRenderingAttachmentInfo* pDepth = nullptr;
+            if (pass.depthTarget.valid()) {
+                const auto& img = m_images[pass.depthTarget.index];
+                depthInfo.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+                depthInfo.imageView   = img.view;
+                depthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+                depthInfo.loadOp      = pass.depthLoadOp;
+                depthInfo.storeOp     = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                depthInfo.clearValue.depthStencil = pass.clearDepth;
+                pDepth = &depthInfo;
+            }
+
+            VkRenderingInfo renderingInfo{};
+            renderingInfo.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
+            renderingInfo.renderArea.offset    = {0, 0};
+            renderingInfo.renderArea.extent    = extent;
+            renderingInfo.layerCount           = 1;
+            renderingInfo.colorAttachmentCount = static_cast<u32>(colorAttachInfos.size());
+            renderingInfo.pColorAttachments    = colorAttachInfos.empty() ? nullptr : colorAttachInfos.data();
+            renderingInfo.pDepthAttachment     = pDepth;
+
+            vkCmdBeginRendering(cmd, &renderingInfo);
         }
 
-        VkRenderingAttachmentInfo depthInfo{};
-        VkRenderingAttachmentInfo* pDepth = nullptr;
-        if (pass.depthTarget.valid()) {
-            const auto& img = m_images[pass.depthTarget.index];
-            depthInfo.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-            depthInfo.imageView   = img.view;
-            depthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-            depthInfo.loadOp      = pass.depthLoadOp;
-            depthInfo.storeOp     = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            depthInfo.clearValue.depthStencil = pass.clearDepth;
-            pDepth = &depthInfo;
-        }
-
-        VkRenderingInfo renderingInfo{};
-        renderingInfo.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
-        renderingInfo.renderArea.offset    = {0, 0};
-        renderingInfo.renderArea.extent    = extent;
-        renderingInfo.layerCount           = 1;
-        renderingInfo.colorAttachmentCount = static_cast<u32>(colorAttachInfos.size());
-        renderingInfo.pColorAttachments    = colorAttachInfos.empty() ? nullptr : colorAttachInfos.data();
-        renderingInfo.pDepthAttachment     = pDepth;
-
-        vkCmdBeginRendering(cmd, &renderingInfo);
         if (pass.execute) {
             pass.execute(cmd, extent);
         }
-        vkCmdEndRendering(cmd);
+
+        if (hasAttachments) {
+            vkCmdEndRendering(cmd);
+        }
     }
 
     // Post-all-passes: transition imported images to their declared finalLayout.

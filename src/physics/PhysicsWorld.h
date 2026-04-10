@@ -8,7 +8,7 @@
 // Forward declarations — avoid pulling all Jolt headers into every translation unit.
 namespace JPH {
     class PhysicsSystem;
-    class TempAllocatorImpl;
+    class TempAllocatorMalloc;
     class JobSystemThreadPool;
     class BroadPhaseLayerInterfaceTable;
     class ObjectVsBroadPhaseLayerFilterTable;
@@ -71,7 +71,7 @@ public:
 
 private:
     // Jolt requires these to stay alive for the lifetime of PhysicsSystem.
-    std::unique_ptr<JPH::TempAllocatorImpl>                m_tempAllocator;
+    std::unique_ptr<JPH::TempAllocatorMalloc>              m_tempAllocator;
     std::unique_ptr<JPH::JobSystemThreadPool>              m_jobSystem;
     std::unique_ptr<JPH::BroadPhaseLayerInterfaceTable>    m_bpLayerInterface;
     std::unique_ptr<JPH::ObjectVsBroadPhaseLayerFilterTable> m_objBpFilter;
