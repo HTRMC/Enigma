@@ -4,8 +4,10 @@
 #include "core/Log.h"
 #include "gfx/Instance.h"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
+#include <string>
 #include <vector>
 
 namespace enigma::gfx {
@@ -96,7 +98,7 @@ void RequiredFeatures::requestAllRequired() {
     v12.shaderStorageBufferArrayNonUniformIndexing    = VK_TRUE;
     v12.shaderStorageImageArrayNonUniformIndexing     = VK_TRUE;
     v12.timelineSemaphore                             = VK_TRUE;
-    // bufferDeviceAddress intentionally NOT enabled (ADR).
+    v12.bufferDeviceAddress                           = VK_TRUE;
 
     v11 = {};
     v11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
@@ -137,6 +139,7 @@ Device::Device(Instance& instance) {
     have.v12.shaderStorageBufferArrayNonUniformIndexing    = VK_FALSE;
     have.v12.shaderStorageImageArrayNonUniformIndexing     = VK_FALSE;
     have.v12.timelineSemaphore                             = VK_FALSE;
+    have.v12.bufferDeviceAddress                           = VK_FALSE;
     vkGetPhysicalDeviceFeatures2(m_physical, &have.features2);
 
     const auto check = [](VkBool32 v, const char* name) {
@@ -157,6 +160,7 @@ Device::Device(Instance& instance) {
     ok &= check(have.v12.descriptorBindingStorageImageUpdateAfterBind,  "Vulkan12.descriptorBindingStorageImageUpdateAfterBind");
     ok &= check(have.v12.descriptorBindingStorageBufferUpdateAfterBind, "Vulkan12.descriptorBindingStorageBufferUpdateAfterBind");
     ok &= check(have.v12.timelineSemaphore,                        "Vulkan12.timelineSemaphore");
+    ok &= check(have.v12.bufferDeviceAddress,                     "Vulkan12.bufferDeviceAddress");
     ok &= check(have.features2.features.samplerAnisotropy,        "features.samplerAnisotropy");
     if (!ok) {
         ENIGMA_ASSERT(false);
@@ -187,19 +191,67 @@ Device::Device(Instance& instance) {
         }
     }
 
-    // One graphics queue.
+    // Discover optional async compute and dedicated transfer queue families.
+    // Compute-only: VK_QUEUE_COMPUTE_BIT set, VK_QUEUE_GRAPHICS_BIT clear.
+    // Transfer-only: VK_QUEUE_TRANSFER_BIT set, GRAPHICS and COMPUTE both clear.
+    {
+        u32 famCount = 0;
+        vkGetPhysicalDeviceQueueFamilyProperties(m_physical, &famCount, nullptr);
+        std::vector<VkQueueFamilyProperties> fams(famCount);
+        vkGetPhysicalDeviceQueueFamilyProperties(m_physical, &famCount, fams.data());
+
+        for (u32 i = 0; i < famCount; ++i) {
+            const VkQueueFlags f = fams[i].queueFlags;
+            if (!m_computeQueueFamily.has_value() &&
+                (f & VK_QUEUE_COMPUTE_BIT) &&
+                !(f & VK_QUEUE_GRAPHICS_BIT) &&
+                i != m_graphicsQueueFamily) {
+                m_computeQueueFamily = i;
+            }
+            if (!m_transferQueueFamily.has_value() &&
+                (f & VK_QUEUE_TRANSFER_BIT) &&
+                !(f & VK_QUEUE_GRAPHICS_BIT) &&
+                !(f & VK_QUEUE_COMPUTE_BIT) &&
+                i != m_graphicsQueueFamily) {
+                m_transferQueueFamily = i;
+            }
+        }
+    }
+
     const float queuePriority = 1.0f;
-    VkDeviceQueueCreateInfo queueInfo{};
-    queueInfo.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queueInfo.queueFamilyIndex = m_graphicsQueueFamily;
-    queueInfo.queueCount       = 1;
-    queueInfo.pQueuePriorities = &queuePriority;
+    std::vector<VkDeviceQueueCreateInfo> queueInfos;
+    queueInfos.reserve(3);
+
+    {
+        VkDeviceQueueCreateInfo qi{};
+        qi.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qi.queueFamilyIndex = m_graphicsQueueFamily;
+        qi.queueCount       = 1;
+        qi.pQueuePriorities = &queuePriority;
+        queueInfos.push_back(qi);
+    }
+    if (m_computeQueueFamily.has_value()) {
+        VkDeviceQueueCreateInfo qi{};
+        qi.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qi.queueFamilyIndex = *m_computeQueueFamily;
+        qi.queueCount       = 1;
+        qi.pQueuePriorities = &queuePriority;
+        queueInfos.push_back(qi);
+    }
+    if (m_transferQueueFamily.has_value()) {
+        VkDeviceQueueCreateInfo qi{};
+        qi.sType            = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        qi.queueFamilyIndex = *m_transferQueueFamily;
+        qi.queueCount       = 1;
+        qi.pQueuePriorities = &queuePriority;
+        queueInfos.push_back(qi);
+    }
 
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     deviceInfo.pNext                   = &want.features2;
-    deviceInfo.queueCreateInfoCount    = 1;
-    deviceInfo.pQueueCreateInfos       = &queueInfo;
+    deviceInfo.queueCreateInfoCount    = static_cast<u32>(queueInfos.size());
+    deviceInfo.pQueueCreateInfos       = queueInfos.data();
     deviceInfo.enabledExtensionCount   = static_cast<u32>(enabledExts.size());
     deviceInfo.ppEnabledExtensionNames = enabledExts.data();
 
@@ -211,7 +263,27 @@ Device::Device(Instance& instance) {
 
     vkGetDeviceQueue(m_device, m_graphicsQueueFamily, 0, &m_graphicsQueue);
 
-    ENIGMA_LOG_INFO("[gfx] VkDevice created (extensions = {})", enabledExts.size());
+    if (m_computeQueueFamily.has_value()) {
+        VkQueue q = VK_NULL_HANDLE;
+        vkGetDeviceQueue(m_device, *m_computeQueueFamily, 0, &q);
+        m_computeQueue = q;
+        ENIGMA_LOG_INFO("[gfx] async compute queue: family {}", *m_computeQueueFamily);
+    } else {
+        ENIGMA_LOG_INFO("[gfx] no dedicated compute family — sharing graphics queue");
+    }
+
+    if (m_transferQueueFamily.has_value()) {
+        VkQueue q = VK_NULL_HANDLE;
+        vkGetDeviceQueue(m_device, *m_transferQueueFamily, 0, &q);
+        m_transferQueue = q;
+        ENIGMA_LOG_INFO("[gfx] dedicated transfer queue: family {}", *m_transferQueueFamily);
+    } else {
+        ENIGMA_LOG_INFO("[gfx] no dedicated transfer family — sharing graphics queue");
+    }
+
+    m_gpuTier = detectTier();
+    ENIGMA_LOG_INFO("[gfx] VkDevice created (extensions = {}, queues = {}, tier = {})",
+                    enabledExts.size(), queueInfos.size(), static_cast<int>(m_gpuTier));
 }
 
 Device::~Device() {
@@ -250,6 +322,48 @@ void Device::pickPhysicalDevice(VkInstance instance) {
 
     m_physical = best;
     vkGetPhysicalDeviceProperties(m_physical, &m_properties);
+}
+
+GpuTier Device::detectTier() const {
+    // Check for hardware RT support (VK_KHR_ray_tracing_pipeline).
+    u32 extCount = 0;
+    vkEnumerateDeviceExtensionProperties(m_physical, nullptr, &extCount, nullptr);
+    std::vector<VkExtensionProperties> exts(extCount);
+    vkEnumerateDeviceExtensionProperties(m_physical, nullptr, &extCount, exts.data());
+
+    bool hasRT = false;
+    for (const auto& e : exts) {
+        if (std::strcmp(e.extensionName, VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME) == 0) {
+            hasRT = true;
+            break;
+        }
+    }
+
+    if (!hasRT) {
+        return GpuTier::Min;
+    }
+
+    // Measure device-local VRAM by summing DEVICE_LOCAL heaps.
+    VkPhysicalDeviceMemoryProperties memProps{};
+    vkGetPhysicalDeviceMemoryProperties(m_physical, &memProps);
+
+    VkDeviceSize vramBytes = 0;
+    for (u32 i = 0; i < memProps.memoryHeapCount; ++i) {
+        if (memProps.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            vramBytes += memProps.memoryHeaps[i].size;
+        }
+    }
+
+    constexpr VkDeviceSize k8GB  = 8ULL  * 1024 * 1024 * 1024;
+    constexpr VkDeviceSize k16GB = 16ULL * 1024 * 1024 * 1024;
+
+    if (vramBytes >= k16GB) {
+        return GpuTier::ExtremeRT;
+    }
+    if (vramBytes >= k8GB) {
+        return GpuTier::Extreme;
+    }
+    return GpuTier::Recommended;
 }
 
 } // namespace enigma::gfx
