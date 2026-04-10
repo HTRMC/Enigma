@@ -80,9 +80,10 @@ u32 scoreDevice(VkPhysicalDevice phys) {
 
 void RequiredFeatures::requestAllRequired() {
     v13 = {};
-    v13.sType             = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-    v13.dynamicRendering  = VK_TRUE;
-    v13.synchronization2  = VK_TRUE;
+    v13.sType                          = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    v13.dynamicRendering               = VK_TRUE;
+    v13.synchronization2               = VK_TRUE;
+    v13.shaderDemoteToHelperInvocation = VK_TRUE;
 
     v12 = {};
     v12.sType                                         = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
@@ -191,11 +192,18 @@ Device::Device(Instance& instance) {
         }
     }
 
+    // RT feature structs declared at constructor scope: they must remain alive
+    // until vkCreateDevice (pNext chain references them by pointer).
+    VkPhysicalDeviceAccelerationStructureFeaturesKHR accelStructFeatures{};
+    VkPhysicalDeviceRayTracingPipelineFeaturesKHR    rtPipelineFeatures{};
+    VkPhysicalDeviceRayQueryFeaturesKHR              rayQueryFeatures{};
+
     // Conditionally enable RT extensions when hardware supports them.
     {
         bool hasAccelStruct = false;
         bool hasRTPipeline  = false;
         bool hasDeferredOps = false;
+        bool hasRayQuery    = false;
         for (const auto& ep : extProps) {
             if (std::strcmp(ep.extensionName, VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME) == 0)
                 hasAccelStruct = true;
@@ -203,11 +211,30 @@ Device::Device(Instance& instance) {
                 hasRTPipeline = true;
             if (std::strcmp(ep.extensionName, VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME) == 0)
                 hasDeferredOps = true;
+            if (std::strcmp(ep.extensionName, VK_KHR_RAY_QUERY_EXTENSION_NAME) == 0)
+                hasRayQuery = true;
         }
         if (hasAccelStruct && hasRTPipeline && hasDeferredOps) {
             enabledExts.push_back(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
             enabledExts.push_back(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
             enabledExts.push_back(VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME);
+
+            accelStructFeatures.sType                 = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR;
+            accelStructFeatures.accelerationStructure = VK_TRUE;
+            rtPipelineFeatures.sType                  = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR;
+            rtPipelineFeatures.rayTracingPipeline     = VK_TRUE;
+
+            // Chain RT features after v13 in want's pNext.
+            want.v13.pNext            = &accelStructFeatures;
+            accelStructFeatures.pNext = &rtPipelineFeatures;
+
+            if (hasRayQuery) {
+                enabledExts.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
+                rayQueryFeatures.sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
+                rayQueryFeatures.rayQuery = VK_TRUE;
+                rtPipelineFeatures.pNext  = &rayQueryFeatures;
+            }
+
             ENIGMA_LOG_INFO("[gfx] enabling RT extensions (acceleration_structure + ray_tracing_pipeline + deferred_host_operations)");
         }
     }

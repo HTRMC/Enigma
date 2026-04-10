@@ -73,8 +73,10 @@ void RTShadowPass::buildPipeline(gfx::ShaderManager& shaderManager,
         ci.raygenEntry       = "RayGenMain";
         ci.missModule        = rmiss;
         ci.missEntry         = "MissMain";
-        ci.closestHitModule  = rmiss;   // dummy: shadow rays use RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
-        ci.closestHitEntry   = "MissMain";
+        // No closest-hit shader: shadow rays use RAY_FLAG_SKIP_CLOSEST_HIT_SHADER
+        // so the hit group entry can have closestHitShader = VK_SHADER_UNUSED_KHR.
+        ci.closestHitModule  = VK_NULL_HANDLE;
+        ci.closestHitEntry   = nullptr;
         ci.globalSetLayout   = globalSetLayout;
         ci.pushConstantSize  = sizeof(RTShadowPushBlock);
         ci.maxRecursionDepth = 1;

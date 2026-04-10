@@ -19,10 +19,9 @@ namespace enigma::gfx {
 RTPipeline::RTPipeline(Device& device, Allocator& allocator, const CreateInfo& info)
     : m_device(&device)
     , m_allocator(&allocator) {
-    ENIGMA_ASSERT(info.raygenModule      != VK_NULL_HANDLE);
-    ENIGMA_ASSERT(info.missModule        != VK_NULL_HANDLE);
-    ENIGMA_ASSERT(info.closestHitModule  != VK_NULL_HANDLE);
-    ENIGMA_ASSERT(info.globalSetLayout   != VK_NULL_HANDLE);
+    ENIGMA_ASSERT(info.raygenModule    != VK_NULL_HANDLE);
+    ENIGMA_ASSERT(info.missModule      != VK_NULL_HANDLE);
+    ENIGMA_ASSERT(info.globalSetLayout != VK_NULL_HANDLE);
 
     VkDevice dev = device.logical();
 
@@ -43,49 +42,76 @@ RTPipeline::RTPipeline(Device& device, Allocator& allocator, const CreateInfo& i
 
     ENIGMA_VK_CHECK(vkCreatePipelineLayout(dev, &layoutCI, nullptr, &m_layout));
 
-    // Shader stages: raygen(0), miss(1), closest-hit(2).
-    std::array<VkPipelineShaderStageCreateInfo, 3> stages{};
-    stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[0].stage  = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
-    stages[0].module = info.raygenModule;
-    stages[0].pName  = info.raygenEntry;
+    // Shader stages: raygen(0), miss(1), closest-hit(2, optional).
+    const bool hasClosestHit = (info.closestHitModule != VK_NULL_HANDLE);
 
-    stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[1].stage  = VK_SHADER_STAGE_MISS_BIT_KHR;
-    stages[1].module = info.missModule;
-    stages[1].pName  = info.missEntry;
+    std::vector<VkPipelineShaderStageCreateInfo> stages;
+    stages.reserve(hasClosestHit ? 3u : 2u);
 
-    stages[2].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-    stages[2].stage  = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
-    stages[2].module = info.closestHitModule;
-    stages[2].pName  = info.closestHitEntry;
+    {
+        VkPipelineShaderStageCreateInfo s{};
+        s.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        s.stage  = VK_SHADER_STAGE_RAYGEN_BIT_KHR;
+        s.module = info.raygenModule;
+        s.pName  = info.raygenEntry;
+        stages.push_back(s);
+    }
+    {
+        VkPipelineShaderStageCreateInfo s{};
+        s.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        s.stage  = VK_SHADER_STAGE_MISS_BIT_KHR;
+        s.module = info.missModule;
+        s.pName  = info.missEntry;
+        stages.push_back(s);
+    }
+    if (hasClosestHit) {
+        VkPipelineShaderStageCreateInfo s{};
+        s.sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        s.stage  = VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR;
+        s.module = info.closestHitModule;
+        s.pName  = info.closestHitEntry;
+        stages.push_back(s);
+    }
 
-    // Shader groups: general(raygen), general(miss), triangles-hit-group(closest-hit).
-    std::array<VkRayTracingShaderGroupCreateInfoKHR, 3> groups{};
+    // Shader groups: general(raygen), general(miss), triangles-hit-group(closest-hit, optional).
+    std::vector<VkRayTracingShaderGroupCreateInfoKHR> groups;
+    groups.reserve(3);
 
     // Raygen group.
-    groups[0].sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-    groups[0].type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
-    groups[0].generalShader      = 0;
-    groups[0].closestHitShader   = VK_SHADER_UNUSED_KHR;
-    groups[0].anyHitShader       = VK_SHADER_UNUSED_KHR;
-    groups[0].intersectionShader = VK_SHADER_UNUSED_KHR;
-
+    {
+        VkRayTracingShaderGroupCreateInfoKHR g{};
+        g.sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        g.type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+        g.generalShader      = 0;
+        g.closestHitShader   = VK_SHADER_UNUSED_KHR;
+        g.anyHitShader       = VK_SHADER_UNUSED_KHR;
+        g.intersectionShader = VK_SHADER_UNUSED_KHR;
+        groups.push_back(g);
+    }
     // Miss group.
-    groups[1].sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-    groups[1].type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
-    groups[1].generalShader      = 1;
-    groups[1].closestHitShader   = VK_SHADER_UNUSED_KHR;
-    groups[1].anyHitShader       = VK_SHADER_UNUSED_KHR;
-    groups[1].intersectionShader = VK_SHADER_UNUSED_KHR;
-
-    // Closest-hit group.
-    groups[2].sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
-    groups[2].type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
-    groups[2].generalShader      = VK_SHADER_UNUSED_KHR;
-    groups[2].closestHitShader   = 2;
-    groups[2].anyHitShader       = VK_SHADER_UNUSED_KHR;
-    groups[2].intersectionShader = VK_SHADER_UNUSED_KHR;
+    {
+        VkRayTracingShaderGroupCreateInfoKHR g{};
+        g.sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        g.type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR;
+        g.generalShader      = 1;
+        g.closestHitShader   = VK_SHADER_UNUSED_KHR;
+        g.anyHitShader       = VK_SHADER_UNUSED_KHR;
+        g.intersectionShader = VK_SHADER_UNUSED_KHR;
+        groups.push_back(g);
+    }
+    // Hit group — always present so the SBT has a valid hit record; closest-hit
+    // shader is unused when no module was provided (shadow rays use
+    // RAY_FLAG_SKIP_CLOSEST_HIT_SHADER at the call site).
+    {
+        VkRayTracingShaderGroupCreateInfoKHR g{};
+        g.sType              = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR;
+        g.type               = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR;
+        g.generalShader      = VK_SHADER_UNUSED_KHR;
+        g.closestHitShader   = hasClosestHit ? 2u : VK_SHADER_UNUSED_KHR;
+        g.anyHitShader       = VK_SHADER_UNUSED_KHR;
+        g.intersectionShader = VK_SHADER_UNUSED_KHR;
+        groups.push_back(g);
+    }
 
     m_groupCount = static_cast<u32>(groups.size());
 
@@ -93,7 +119,7 @@ RTPipeline::RTPipeline(Device& device, Allocator& allocator, const CreateInfo& i
     pipelineCI.sType                        = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR;
     pipelineCI.stageCount                   = static_cast<u32>(stages.size());
     pipelineCI.pStages                      = stages.data();
-    pipelineCI.groupCount                   = m_groupCount;
+    pipelineCI.groupCount                   = static_cast<u32>(groups.size());
     pipelineCI.pGroups                      = groups.data();
     pipelineCI.maxPipelineRayRecursionDepth = info.maxRecursionDepth;
     pipelineCI.layout                       = m_layout;
