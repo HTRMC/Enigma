@@ -14,10 +14,19 @@ Engine::Engine()
     , m_renderer(m_window)
     , m_input(m_window)
     , m_clock() {
+    m_physicsWorld = std::make_unique<PhysicsWorld>();
+
+    // Spawn vehicle at a default position.
+    m_vehicle = std::make_unique<VehicleController>(
+        *m_physicsWorld, VehicleConfig::makeDefault(), vec3(0.0f, 0.5f, 0.0f));
+
     ENIGMA_LOG_INFO("[engine] constructed ({}x{})", kDefaultWindowWidth, kDefaultWindowHeight);
 }
 
 Engine::~Engine() {
+    // Destroy vehicle before physics world.
+    m_vehicle.reset();
+    m_physicsWorld.reset();
     ENIGMA_LOG_INFO("[engine] shutdown");
 }
 

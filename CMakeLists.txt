@@ -78,6 +78,12 @@ target_sources(Enigma PRIVATE
     src/renderer/DLSSUpscaler.cpp
     src/renderer/XeSSUpscaler.cpp
     src/renderer/FSRUpscaler.cpp
+    src/physics/PhysicsWorld.cpp
+    src/physics/PhysicsShapes.cpp
+    src/physics/PhysicsDebugRenderer.cpp
+    src/physics/VehicleConfig.cpp
+    src/physics/VehicleController.cpp
+    src/physics/PhysicsInterpolation.cpp
 )
 
 target_include_directories(Enigma PRIVATE
@@ -91,6 +97,7 @@ target_link_libraries(Enigma PRIVATE
     glm::glm
     Vulkan::dxc_lib
     fastgltf
+    Jolt
 )
 
 # -----------------------------------------------------------------------------
@@ -106,6 +113,7 @@ target_include_directories(Enigma SYSTEM PRIVATE
     ${glm_SOURCE_DIR}
     ${fastgltf_SOURCE_DIR}/include
     ${stb_SOURCE_DIR}
+    ${joltphysics_SOURCE_DIR}
 )
 
 # volk loads Vulkan at runtime; we only need the Vulkan headers transitively
@@ -116,6 +124,8 @@ target_compile_definitions(Enigma PRIVATE
     $<$<PLATFORM_ID:Windows>:NOMINMAX>
     GLFW_INCLUDE_NONE
     ENIGMA_SHADER_SOURCE_DIR="${CMAKE_SOURCE_DIR}/shaders"
+    $<$<CONFIG:Debug>:JPH_ENABLE_ASSERTS>
+    $<$<CONFIG:Release>:JPH_NO_DEBUG>
 )
 
 # Warnings-as-errors scoped to the Enigma target only. Third-party headers

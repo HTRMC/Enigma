@@ -47,4 +47,22 @@ void Input::setCursorCaptured(bool captured) {
     }
 }
 
+bool Input::isGamepadPresent(int gamepadId) const {
+    return glfwJoystickPresent(gamepadId) == GLFW_TRUE;
+}
+
+f32 Input::getGamepadAxis(int gamepadId, int axis) const {
+    int count = 0;
+    const float* axes = glfwGetJoystickAxes(gamepadId, &count);
+    if (!axes || axis >= count) return 0.0f;
+    return axes[axis];
+}
+
+bool Input::isGamepadButtonDown(int gamepadId, int button) const {
+    int count = 0;
+    const unsigned char* buttons = glfwGetJoystickButtons(gamepadId, &count);
+    if (!buttons || button >= count) return false;
+    return buttons[button] == GLFW_PRESS;
+}
+
 } // namespace enigma

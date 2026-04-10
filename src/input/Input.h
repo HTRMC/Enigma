@@ -31,6 +31,16 @@ public:
     void setCursorCaptured(bool captured);
     bool isCursorCaptured() const { return m_cursorCaptured; }
 
+    // Gamepad support (wraps GLFW joystick API).
+    static constexpr int GAMEPAD_AXIS_LEFT_X       = 0;
+    static constexpr int GAMEPAD_AXIS_LEFT_Y       = 1;
+    static constexpr int GAMEPAD_AXIS_LEFT_TRIGGER  = 4;
+    static constexpr int GAMEPAD_AXIS_RIGHT_TRIGGER = 5;
+
+    bool isGamepadPresent(int gamepadId = 0) const;
+    f32  getGamepadAxis(int gamepadId, int axis) const;
+    bool isGamepadButtonDown(int gamepadId, int button) const;
+
 private:
     GLFWwindow* m_handle = nullptr;
     vec2        m_lastCursorPos{0.0f, 0.0f};

@@ -61,6 +61,7 @@ struct MeshPrimitive {
 struct MeshNode {
     mat4               worldTransform{1.0f};
     std::vector<u32>   primitiveIndices;
+    u32                physicsBodyId = 0xFFFFFFFFu; // no physics body
 };
 
 // Owns all GPU resources for a loaded scene. Must be destroyed before

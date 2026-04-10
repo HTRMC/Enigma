@@ -92,3 +92,24 @@ FetchContent_GetProperties(stb)
 if(NOT stb_POPULATED)
     FetchContent_Populate(stb)
 endif()
+
+# -----------------------------------------------------------------------------
+# Jolt Physics — MIT license, C++17, no-exception, no-RTTI build.
+# Tag: v5.2.0
+# -----------------------------------------------------------------------------
+# Jolt enables /Wall /WX by default which causes Windows SDK C4865
+# warnings to fail the build under /std:c++latest. Disable those options.
+# USE_STATIC_MSVC_RUNTIME_LIBRARY OFF ensures Jolt links against /MDd
+# matching Enigma's dynamic CRT.
+set(OVERRIDE_CXX_FLAGS OFF CACHE BOOL "" FORCE)
+set(ENABLE_ALL_WARNINGS OFF CACHE BOOL "" FORCE)
+set(INTERPROCEDURAL_OPTIMIZATION OFF CACHE BOOL "" FORCE)
+set(USE_STATIC_MSVC_RUNTIME_LIBRARY OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(
+    JoltPhysics
+    GIT_REPOSITORY https://github.com/jrouwe/JoltPhysics.git
+    GIT_TAG        a63aa3b8e24cf95f3fab2613f9a3015b164ef62c
+    GIT_SHALLOW    FALSE
+    SOURCE_SUBDIR  Build
+)
+FetchContent_MakeAvailable(JoltPhysics)
