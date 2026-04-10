@@ -58,6 +58,7 @@ target_sources(Enigma PRIVATE
     src/gfx/FrameContext.cpp
     src/gfx/DescriptorAllocator.cpp
     src/gfx/GpuProfiler.cpp
+    src/gfx/RenderGraph.cpp
     src/gfx/ShaderManager.cpp
     src/gfx/ShaderHotReload.cpp
     src/gfx/UploadContext.cpp

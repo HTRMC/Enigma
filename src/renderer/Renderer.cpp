@@ -8,6 +8,7 @@
 #include "gfx/FrameContext.h"
 #include "gfx/Instance.h"
 #include "gfx/GpuProfiler.h"
+#include "gfx/RenderGraph.h"
 #include "gfx/ShaderHotReload.h"
 #include "gfx/ShaderManager.h"
 #include "gfx/Swapchain.h"
@@ -36,6 +37,7 @@ Renderer::Renderer(Window& window)
     , m_frames(std::make_unique<gfx::FrameContextSet>(*m_device))
     , m_descriptorAllocator(std::make_unique<gfx::DescriptorAllocator>(*m_device))
     , m_gpuProfiler(std::make_unique<gfx::GpuProfiler>(*m_device))
+    , m_renderGraph(std::make_unique<gfx::RenderGraph>())
     , m_shaderManager(std::make_unique<gfx::ShaderManager>(*m_device))
     , m_shaderHotReload(std::make_unique<gfx::ShaderHotReload>())
     , m_trianglePass(std::make_unique<TrianglePass>(*m_device, *m_allocator, *m_descriptorAllocator))
@@ -191,113 +193,50 @@ void Renderer::drawFrame() {
     VkImageView depthView   = m_swapchain->depthView();
     const VkExtent2D extent = m_swapchain->extent();
 
-    // UNDEFINED -> COLOR/DEPTH_ATTACHMENT_OPTIMAL
-    {
-        const VkImageMemoryBarrier2 barriers[2] = {
-            {
-                VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-                nullptr,
-                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                0,
-                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-                VK_IMAGE_LAYOUT_UNDEFINED,
-                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                VK_QUEUE_FAMILY_IGNORED,
-                VK_QUEUE_FAMILY_IGNORED,
-                targetImage,
-                {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
-            },
-            {
-                VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
-                nullptr,
-                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
-                0,
-                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
-                    VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                VK_IMAGE_LAYOUT_UNDEFINED,
-                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                VK_QUEUE_FAMILY_IGNORED,
-                VK_QUEUE_FAMILY_IGNORED,
-                depthImage,
-                {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1},
-            },
-        };
+    // Build the render graph for this frame. All barriers and attachment
+    // setup are handled by the graph; drawFrame() holds no hand-coded barriers.
+    m_renderGraph->reset();
 
-        VkDependencyInfo dep{};
-        dep.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        dep.imageMemoryBarrierCount = 2;
-        dep.pImageMemoryBarriers    = barriers;
-        vkCmdPipelineBarrier2(frame.commandBuffer, &dep);
-    }
+    const auto colorHandle = m_renderGraph->importImage(
+        "swapchain_color",
+        targetImage, targetView, m_swapchain->format(),
+        VK_IMAGE_LAYOUT_UNDEFINED,       // starts undefined each frame
+        VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, // must end ready for present
+        VK_IMAGE_ASPECT_COLOR_BIT);
 
-    // Dynamic rendering begin.
-    VkRenderingAttachmentInfo colorAttach{};
-    colorAttach.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    colorAttach.imageView   = targetView;
-    colorAttach.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    colorAttach.loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    colorAttach.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
-    colorAttach.clearValue.color = {{0.02f, 0.02f, 0.05f, 1.0f}};
+    const auto depthHandle = m_renderGraph->importImage(
+        "swapchain_depth",
+        depthImage, depthView, m_swapchain->depthFormat(),
+        VK_IMAGE_LAYOUT_UNDEFINED,  // re-cleared every frame
+        VK_IMAGE_LAYOUT_UNDEFINED,  // don't care about final layout
+        VK_IMAGE_ASPECT_DEPTH_BIT);
 
-    VkRenderingAttachmentInfo depthAttach{};
-    depthAttach.sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-    depthAttach.imageView   = depthView;
-    depthAttach.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-    depthAttach.loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR;
-    depthAttach.storeOp     = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    depthAttach.clearValue.depthStencil = {0.0f, 0}; // reverse-Z: far=0
-
-    VkRenderingInfo renderingInfo{};
-    renderingInfo.sType                = VK_STRUCTURE_TYPE_RENDERING_INFO;
-    renderingInfo.renderArea.offset    = {0, 0};
-    renderingInfo.renderArea.extent    = extent;
-    renderingInfo.layerCount           = 1;
-    renderingInfo.colorAttachmentCount = 1;
-    renderingInfo.pColorAttachments    = &colorAttach;
-    renderingInfo.pDepthAttachment     = &depthAttach;
-    vkCmdBeginRendering(frame.commandBuffer, &renderingInfo);
-
-    // Draw scene or fallback triangle.
     const u32 cameraSlot = m_cameraBuffers[m_frameIndex].bindlessSlot;
-    m_gpuProfiler->beginZone(frame.commandBuffer, "MeshPass");
-    if (m_scene != nullptr) {
-        m_meshPass->record(frame.commandBuffer,
-                           m_descriptorAllocator->globalSet(),
-                           extent, *m_scene, cameraSlot,
-                           vec4{m_light.direction, m_light.intensity},
-                           vec4{m_light.color, 0.0f});
-    } else {
-        m_trianglePass->record(frame.commandBuffer,
+
+    gfx::RenderGraph::RasterPassDesc meshPassDesc{};
+    meshPassDesc.name         = "MeshPass";
+    meshPassDesc.colorTargets = {colorHandle};
+    meshPassDesc.depthTarget  = depthHandle;
+    meshPassDesc.clearColor   = {{0.02f, 0.02f, 0.05f, 1.0f}};
+    meshPassDesc.clearDepth   = {0.0f, 0}; // reverse-Z: far = 0
+    meshPassDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+        m_gpuProfiler->beginZone(cmd, "MeshPass");
+        if (m_scene != nullptr) {
+            m_meshPass->record(cmd,
                                m_descriptorAllocator->globalSet(),
-                               extent);
-    }
-    m_gpuProfiler->endZone(frame.commandBuffer);
+                               ext, *m_scene, cameraSlot,
+                               vec4{m_light.direction, m_light.intensity},
+                               vec4{m_light.color, 0.0f});
+        } else {
+            m_trianglePass->record(cmd,
+                                   m_descriptorAllocator->globalSet(),
+                                   ext);
+        }
+        m_gpuProfiler->endZone(cmd);
+    };
+    m_renderGraph->addRasterPass(std::move(meshPassDesc));
 
-    vkCmdEndRendering(frame.commandBuffer);
-
-    // COLOR_ATTACHMENT_OPTIMAL -> PRESENT_SRC_KHR
-    {
-        VkImageMemoryBarrier2 barrier{};
-        barrier.sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        barrier.srcStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-        barrier.srcAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-        barrier.dstStageMask     = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
-        barrier.dstAccessMask    = 0;
-        barrier.oldLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        barrier.newLayout        = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        barrier.image            = targetImage;
-        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-        VkDependencyInfo dep{};
-        dep.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-        dep.imageMemoryBarrierCount = 1;
-        dep.pImageMemoryBarriers    = &barrier;
-        vkCmdPipelineBarrier2(frame.commandBuffer, &dep);
-    }
+    m_renderGraph->execute(frame.commandBuffer, extent);
 
     ENIGMA_VK_CHECK(vkEndCommandBuffer(frame.commandBuffer));
 
