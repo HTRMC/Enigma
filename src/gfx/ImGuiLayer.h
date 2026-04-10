@@ -56,7 +56,11 @@ public:
                 VkImageLayout   incomingLayout);
 
     // Convenience panel builders -- call between newFrame() and render().
-    void drawGpuTimings(std::span<const GpuProfiler::ZoneResult> results);
+    // cpuFrameTimeMs  : wall-clock frame delta (ms) for FPS display.
+    // vramUsedMb/vramBudgetMb : device-local heap usage from vmaGetHeapBudgets.
+    void drawGpuTimings(std::span<const GpuProfiler::ZoneResult> results,
+                        f32 cpuFrameTimeMs,
+                        f32 vramUsedMb, f32 vramBudgetMb);
     void drawSceneInfo(u32 primitiveCount, u32 tlasInstances);
     void drawUpscalerSettings(UpscalerSettings& settings);
     void drawPhysicsStats(f32 stepTimeMs, u32 bodyCount);

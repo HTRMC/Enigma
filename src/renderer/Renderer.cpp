@@ -1,8 +1,8 @@
 #include "renderer/Renderer.h"
 
 #include "core/Assert.h"
-#include <imgui.h>
 #include "core/Log.h"
+#include <imgui.h>
 #include "gfx/Allocator.h"
 #include "gfx/DescriptorAllocator.h"
 #include "gfx/Device.h"
@@ -30,7 +30,14 @@
 
 #define VMA_STATIC_VULKAN_FUNCTIONS  0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
+#if defined(_MSC_VER)
+    #pragma warning(push)
+    #pragma warning(disable: 4100 4127 4189 4324 4505)
+#endif
 #include <vk_mem_alloc.h>
+#if defined(_MSC_VER)
+    #pragma warning(pop)
+#endif
 
 #include <algorithm>
 #include <cstring>
@@ -291,6 +298,15 @@ void Renderer::drawFrame() {
         }
     }
 
+    // CPU frame time.
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (m_lastFrameTime.time_since_epoch().count() != 0) {
+            m_cpuFrameTimeMs = std::chrono::duration<f32, std::milli>(now - m_lastFrameTime).count();
+        }
+        m_lastFrameTime = now;
+    }
+
     m_shaderHotReload->poll();
 
     VkDevice dev = m_device->logical();
@@ -370,7 +386,23 @@ void Renderer::drawFrame() {
     // ImGui new frame -- must be called before any ImGui:: window calls this frame.
     if (m_imguiLayer) {
         m_imguiLayer->newFrame();
-        m_imguiLayer->drawGpuTimings(m_lastGpuTimings);
+
+        // Query device-local VRAM budget for the perf panel.
+        f32 vramUsedMb = 0.f, vramBudgetMb = 0.f;
+        {
+            VkPhysicalDeviceMemoryProperties memProps{};
+            vkGetPhysicalDeviceMemoryProperties(m_device->physical(), &memProps);
+            std::vector<VmaBudget> budgets(memProps.memoryHeapCount);
+            vmaGetHeapBudgets(m_allocator->handle(), budgets.data());
+            for (u32 i = 0; i < memProps.memoryHeapCount; ++i) {
+                if (memProps.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+                    vramUsedMb   += static_cast<f32>(budgets[i].usage)  / (1024.f * 1024.f);
+                    vramBudgetMb += static_cast<f32>(budgets[i].budget) / (1024.f * 1024.f);
+                }
+            }
+        }
+
+        m_imguiLayer->drawGpuTimings(m_lastGpuTimings, m_cpuFrameTimeMs, vramUsedMb, vramBudgetMb);
         m_imguiLayer->drawSceneInfo(
             m_scene ? static_cast<u32>(m_scene->primitives.size()) : 0u,
             m_tlasSlot > 0 ? 1u : 0u);

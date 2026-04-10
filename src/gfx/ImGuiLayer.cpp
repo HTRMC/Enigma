@@ -155,12 +155,35 @@ void ImGuiLayer::render(VkCommandBuffer cmd,
     }
 }
 
-void ImGuiLayer::drawGpuTimings(std::span<const GpuProfiler::ZoneResult> results) {
+void ImGuiLayer::drawGpuTimings(std::span<const GpuProfiler::ZoneResult> results,
+                                f32 cpuFrameTimeMs,
+                                f32 vramUsedMb, f32 vramBudgetMb) {
     ImGui::SetNextWindowPos({10.f, 10.f},  ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize({290.f, 140.f}, ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("GPU Timings")) {
+    ImGui::SetNextWindowSize({300.f, 230.f}, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Performance")) {
+        // CPU frame time + FPS
+        const f32 fps = cpuFrameTimeMs > 0.f ? 1000.f / cpuFrameTimeMs : 0.f;
+        ImGui::Text("CPU  %.2f ms   %.0f FPS", cpuFrameTimeMs, fps);
+
+        // Total GPU time (sum of all profiled zones)
+        f32 totalGpu = 0.f;
+        for (const auto& r : results) totalGpu += r.durationMs;
+        ImGui::Text("GPU  %.3f ms", totalGpu);
+
+        // VRAM progress bar
+        if (vramBudgetMb > 0.f) {
+            char overlay[64];
+            snprintf(overlay, sizeof(overlay), "%.0f / %.0f MB", vramUsedMb, vramBudgetMb);
+            ImGui::ProgressBar(vramUsedMb / vramBudgetMb, {-1.f, 0.f}, overlay);
+            ImGui::SameLine(0.f, ImGui::GetStyle().ItemInnerSpacing.x);
+            ImGui::Text("VRAM");
+        }
+
+        ImGui::Separator();
+
+        // Per-pass GPU breakdown
         for (const auto& r : results) {
-            ImGui::Text("%-24s  %.3f ms", r.name.c_str(), r.durationMs);
+            ImGui::Text("  %-22s %.3f ms", r.name.c_str(), r.durationMs);
         }
         if (results.empty()) {
             ImGui::TextDisabled("(no data yet)");

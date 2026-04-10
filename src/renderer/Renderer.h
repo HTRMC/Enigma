@@ -28,6 +28,7 @@
 
 #include <volk.h>
 
+#include <chrono>
 #include <memory>
 #include <vector>
 
@@ -131,6 +132,10 @@ private:
 
     std::vector<gfx::GpuProfiler::ZoneResult>  m_lastGpuTimings;
     bool                                        m_showImGui = true;
+
+    // CPU frame timing.
+    std::chrono::steady_clock::time_point m_lastFrameTime{};
+    f32                                   m_cpuFrameTimeMs = 0.f;
 
     // Camera state.
     Camera* m_camera = nullptr;
