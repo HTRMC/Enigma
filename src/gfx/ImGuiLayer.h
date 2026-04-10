@@ -30,6 +30,7 @@ class Device;
 class ImGuiLayer {
 public:
     ImGuiLayer(Device& device,
+               VkInstance    instance,
                GLFWwindow*   window,
                VkFormat      swapchainFormat,
                u32           imageCount);

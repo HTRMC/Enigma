@@ -216,6 +216,7 @@ Renderer::Renderer(Window& window)
     // ImGui overlay — must be created after swapchain (needs format + imageCount).
     m_imguiLayer = std::make_unique<gfx::ImGuiLayer>(
         *m_device,
+        m_instance->handle(),
         m_window.handle(),
         m_swapchain->format(),
         m_swapchain->imageCount());

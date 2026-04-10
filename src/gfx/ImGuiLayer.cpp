@@ -12,6 +12,7 @@
 namespace enigma::gfx {
 
 ImGuiLayer::ImGuiLayer(Device&     device,
+                       VkInstance  instance,
                        GLFWwindow* window,
                        VkFormat    swapchainFormat,
                        u32         imageCount)
@@ -45,7 +46,7 @@ ImGuiLayer::ImGuiLayer(Device&     device,
     pipelineRenderingCI.pColorAttachmentFormats = &swapchainFormat;
 
     ImGui_ImplVulkan_InitInfo initInfo{};
-    initInfo.Instance            = VK_NULL_HANDLE; // not needed when UseDynamicRendering=true
+    initInfo.Instance            = instance; // needed to load vkCmdBeginRenderingKHR via vkGetInstanceProcAddr
     initInfo.PhysicalDevice      = device.physical();
     initInfo.Device              = device.logical();
     initInfo.QueueFamily         = device.graphicsQueueFamily();
