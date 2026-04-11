@@ -84,13 +84,12 @@ ShaderManager::ShaderManager(Device& device)
     // does NOT require `CoInitialize` — see Microsoft DXC docs. Both
     // objects are thread-affine to the render thread in this engine,
     // so no additional synchronization is needed.
-    const HRESULT utilsHr = DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&m_dxcUtils));
-    ENIGMA_ASSERT(SUCCEEDED(utilsHr) && "DxcCreateInstance(CLSID_DxcUtils) failed");
-    const HRESULT compilerHr = DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&m_dxcCompiler));
-    ENIGMA_ASSERT(SUCCEEDED(compilerHr) && "DxcCreateInstance(CLSID_DxcCompiler) failed");
-
-    const HRESULT includeHr = m_dxcUtils->CreateDefaultIncludeHandler(&m_includeHandler);
-    ENIGMA_ASSERT(SUCCEEDED(includeHr) && "CreateDefaultIncludeHandler failed");
+    ENIGMA_VERIFY(SUCCEEDED(DxcCreateInstance(CLSID_DxcUtils, IID_PPV_ARGS(&m_dxcUtils)))
+                  && "DxcCreateInstance(CLSID_DxcUtils) failed");
+    ENIGMA_VERIFY(SUCCEEDED(DxcCreateInstance(CLSID_DxcCompiler, IID_PPV_ARGS(&m_dxcCompiler)))
+                  && "DxcCreateInstance(CLSID_DxcCompiler) failed");
+    ENIGMA_VERIFY(SUCCEEDED(m_dxcUtils->CreateDefaultIncludeHandler(&m_includeHandler))
+                  && "CreateDefaultIncludeHandler failed");
 }
 
 ShaderManager::~ShaderManager() {
