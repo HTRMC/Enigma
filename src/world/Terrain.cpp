@@ -196,10 +196,9 @@ void Terrain::update(vec3 cameraPosition) {
         const f32 snappedZ = snapFloor(cameraPosition.z, chunkSize);
 
         // 3x3 grid centered on the snapped camera position.
-        // Outer rings are sunk below inner rings so the higher-detail
-        // closer terrain occludes the LOD seam.
-        const f32 sink = (lod == 0) ? 0.0f
-                                    : -chunkSize * 0.5f * static_cast<f32>(lod);
+        // No sinking: the procedural height function is C0-continuous across
+        // LOD boundaries so no vertical offset is needed to hide seams.
+        const f32 sink = 0.0f;
 
         for (i32 dz = -1; dz <= 1; ++dz) {
             for (i32 dx = -1; dx <= 1; ++dx) {
