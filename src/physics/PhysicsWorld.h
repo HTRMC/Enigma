@@ -63,6 +63,7 @@ public:
     void applyAngularImpulse(u32 bodyId, vec3 angularImpulse);
     void setLinearVelocity(u32 bodyId, vec3 velocity);
     vec3 getLinearVelocity(u32 bodyId) const;
+    vec3 getAngularVelocity(u32 bodyId) const;
 
     // Interpolation support.
     f32 accumulator() const { return m_accumulator; }

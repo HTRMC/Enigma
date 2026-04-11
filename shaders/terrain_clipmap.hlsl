@@ -40,10 +40,10 @@ CameraData loadCamera(uint slot) {
     return cam;
 }
 
-// Simple procedural height — placeholder for a real heightmap sample.
+// Nearly-flat height — keeps visual terrain matching the flat Jolt physics plane.
+// Subtle undulation (±0.15 m) gives ground-plane shading without a physics mismatch.
 float terrainHeight(float wx, float wz) {
-    return sin(wx * 0.05) * cos(wz * 0.05) * 2.0
-         + sin(wx * 0.13 + 1.1) * sin(wz * 0.09) * 0.8;
+    return sin(wx * 0.02) * sin(wz * 0.02) * 0.15;
 }
 
 struct VSOut {
@@ -116,10 +116,20 @@ struct GBufferOut {
 
 GBufferOut PSMain(VSOut vs) {
     // Asphalt-like material parameters.
-    const float3 baseColor = float3(0.10, 0.10, 0.10);
+    float3 baseColor = float3(0.10, 0.10, 0.10);
     const float  metallic  = 0.0;
     const float  roughness = 0.85;
     const float  occlusion = 1.0;
+
+    // Grid lines every 4 m for depth perception.
+    // frac(worldPos/gridSpacing) → 0 at line, 1 at midpoint.
+    const float gridSpacing = 4.0;
+    float2 gridUV = frac(float2(vs.worldPos.x, vs.worldPos.z) / gridSpacing);
+    float2 gridDeriv = fwidth(float2(vs.worldPos.x, vs.worldPos.z) / gridSpacing);
+    float2 gridLine = smoothstep(float2(0.0, 0.0), gridDeriv * 1.5, gridUV)
+                    * smoothstep(float2(0.0, 0.0), gridDeriv * 1.5, 1.0 - gridUV);
+    float grid = 1.0 - min(gridLine.x, gridLine.y); // 1 = on line, 0 = off
+    baseColor = lerp(baseColor, float3(0.22, 0.22, 0.22), grid * 0.6);
 
     float3 N = normalize(vs.normal);
 

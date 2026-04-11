@@ -239,4 +239,10 @@ vec3 PhysicsWorld::getLinearVelocity(u32 bodyId) const {
     return {v.GetX(), v.GetY(), v.GetZ()};
 }
 
+vec3 PhysicsWorld::getAngularVelocity(u32 bodyId) const {
+    auto& bi = m_physicsSystem->GetBodyInterface();
+    JPH::Vec3 v = bi.GetAngularVelocity(JPH::BodyID(bodyId));
+    return {v.GetX(), v.GetY(), v.GetZ()};
+}
+
 } // namespace enigma

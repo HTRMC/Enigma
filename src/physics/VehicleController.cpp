@@ -64,13 +64,17 @@ void VehicleController::update(f32 dt) {
     const vec3 forwardImpulse = forward * netForce * dt;
     m_world->applyImpulse(m_bodyId, forwardImpulse);
 
-    // Steering: apply a yaw (Y-axis) angular impulse scaled by speed so
-    // the car turns faster at low speed and more gradually at high speed.
+    // Steering: apply a yaw (Y-axis) angular impulse scaled by speed.
+    // Negate steering so A=left (negative NDC X) turns the car left in world space.
+    const vec3 angVel = m_world->getAngularVelocity(m_bodyId);
     if (std::abs(m_input.steering) > 0.01f) {
-        // Angular impulse = I * Δω; approximate inertia I via mass * r²
         const f32 effectiveSpeed = std::clamp(std::abs(speed), 1.0f, 25.0f);
-        const f32 yawImpulse = m_input.steering * effectiveSpeed * 1800.0f * dt;
+        const f32 yawImpulse = -m_input.steering * effectiveSpeed * 1800.0f * dt;
         m_world->applyAngularImpulse(m_bodyId, vec3(0.0f, yawImpulse, 0.0f));
+    } else {
+        // No steering input — dampen yaw so wheels return to centre.
+        const f32 yawDamp = -angVel.y * m_config.mass * 0.4f * dt;
+        m_world->applyAngularImpulse(m_bodyId, vec3(0.0f, yawDamp, 0.0f));
     }
 
     // Lateral friction: dampen sideways velocity to keep car on track.
