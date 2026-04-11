@@ -39,9 +39,14 @@ void VehicleController::update(f32 dt) {
     const vec3 forward = glm::normalize(vec3(xform[2])); // local Z axis
     const f32  speed   = glm::dot(vel, forward);
 
-    // Throttle force: F = throttle * maxTorque / wheelRadius.
-    const f32 wheelRadius = m_config.wheels.empty() ? 0.33f : m_config.wheels[0].tire.radius;
-    const f32 driveForce  = m_input.throttle * m_config.maxEngineTorque / wheelRadius;
+    // Throttle force: F = (engineTorque × gearRatio × finalDrive) / wheelRadius.
+    // Raw engine torque without gear multiplication is insufficient to overcome
+    // Jolt's default static friction on a 1500 kg body (~2940 N), so we must
+    // apply the full drivetrain multiplication here.
+    const f32 wheelRadius   = m_config.wheels.empty() ? 0.33f : m_config.wheels[0].tire.radius;
+    const f32 gearRatio     = m_config.gears.empty()  ? 1.0f  : m_config.gears[0].ratio;
+    const f32 totalTorque   = m_config.maxEngineTorque * gearRatio * m_config.finalDriveRatio;
+    const f32 driveForce    = m_input.throttle * totalTorque / wheelRadius;
 
     // Brake force: opposes current velocity.
     const f32 brakeForce = m_input.brake * 20000.0f; // N (strong brakes)
