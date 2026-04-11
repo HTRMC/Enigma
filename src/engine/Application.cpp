@@ -93,29 +93,44 @@ int Application::run(int argc, char** argv) {
                         modelPath.string());
     }
 
-    // Build a Jolt heightfield that exactly matches the visual terrain shader.
-    // 512×512 samples over a 512×512 m area centred at the origin.
+    // Streaming heightfield — rebuilt when the car exits the covered area.
     // terrainHeight() must stay in sync with terrain_clipmap.hlsl terrainHeight().
     auto terrainHeight = [](float wx, float wz) -> float {
         return std::sin(wx * 0.05f) * std::cos(wz * 0.05f) * 2.0f
              + std::sin(wx * 0.13f + 1.1f) * std::sin(wz * 0.09f) * 0.8f;
     };
-    {
-        constexpr u32 kN      = 512;
-        constexpr f32 kHFSize = 512.0f;
-        constexpr f32 kOriX   = -kHFSize * 0.5f;
-        constexpr f32 kOriZ   = -kHFSize * 0.5f;
-        const f32     spacing = kHFSize / static_cast<f32>(kN - 1);
-        std::vector<f32> hfHeights(kN * kN);
-        for (u32 row = 0; row < kN; ++row) {
-            for (u32 col = 0; col < kN; ++col) {
-                hfHeights[row * kN + col] = terrainHeight(kOriX + col * spacing,
-                                                          kOriZ + row * spacing);
+    // 512 samples × 1.002 m spacing → 512 m total coverage per side.
+    // Rebuild when car is >150 m from the current HF centre (106 m edge buffer).
+    // New centre is snapped to a 64 m grid to prevent thrashing.
+    constexpr u32 kHFN       = 512;
+    constexpr f32 kHFSize    = 512.0f;
+    constexpr f32 kHFHalf    = kHFSize * 0.5f;
+    constexpr f32 kHFRebuild = 150.0f;
+    constexpr f32 kHFSnap    = 64.0f;
+
+    u32  hfBodyId = ~0u;
+    vec2 hfCenter = {0.0f, 0.0f};
+
+    auto rebuildHeightField = [&](vec2 centre) {
+        if (hfBodyId != ~0u) {
+            engine.physics().removeBody(hfBodyId);
+        }
+        const f32 spacing = kHFSize / static_cast<f32>(kHFN - 1);
+        const f32 oriX    = centre.x - kHFHalf;
+        const f32 oriZ    = centre.y - kHFHalf;
+        std::vector<f32> heights(kHFN * kHFN);
+        for (u32 row = 0; row < kHFN; ++row) {
+            for (u32 col = 0; col < kHFN; ++col) {
+                heights[row * kHFN + col] = terrainHeight(oriX + col * spacing,
+                                                          oriZ + row * spacing);
             }
         }
-        engine.physics().addHeightField(vec3(kOriX, 0.0f, kOriZ), kHFSize, kN, hfHeights);
-        ENIGMA_LOG_INFO("[app] built terrain heightfield ({}×{}, {:.1f}m)", kN, kN, kHFSize);
-    }
+        hfBodyId = engine.physics().addHeightField(vec3(oriX, 0.0f, oriZ), kHFSize, kHFN, heights);
+        hfCenter = centre;
+        ENIGMA_LOG_INFO("[app] heightfield rebuilt at ({:.0f}, {:.0f})", centre.x, centre.y);
+    };
+
+    rebuildHeightField({0.0f, 0.0f});
 
     // GPU-driven clipmap terrain — built and wired into the G-buffer pass.
     Terrain terrain(renderer.device(),
@@ -163,6 +178,19 @@ int Application::run(int argc, char** argv) {
 
         // Physics step — consumes impulses set above.
         engine.physics().step(dt);
+
+        // Stream heightfield: rebuild when car moves >kHFRebuild m from current centre.
+        {
+            const vec4 carPosH = engine.vehicle()->bodyTransform()[3];
+            const vec2 carXZ   = {carPosH.x, carPosH.z};
+            if (glm::length(carXZ - hfCenter) > kHFRebuild) {
+                const vec2 snapped = {
+                    std::floor(carXZ.x / kHFSnap) * kHFSnap,
+                    std::floor(carXZ.y / kHFSnap) * kHFSnap,
+                };
+                rebuildHeightField(snapped);
+            }
+        }
 
         // Physics interpolation snapshot.
         engine.interpolation().snapshot(engine.vehicle()->bodyId(), engine.physics());
