@@ -15,6 +15,7 @@
 #include <Jolt/Physics/Collision/BroadPhase/ObjectVsBroadPhaseLayerFilterTable.h>
 #include <Jolt/Physics/Collision/ObjectLayerPairFilterTable.h>
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/HeightFieldShape.h>
 #include <Jolt/Physics/Collision/Shape/PlaneShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSettings.h>
@@ -123,6 +124,26 @@ void PhysicsWorld::step(f32 dt) {
         m_physicsSystem->Update(kFixedDt, 1, m_tempAllocator.get(), m_jobSystem.get());
         m_accumulator -= kFixedDt;
     }
+}
+
+u32 PhysicsWorld::addHeightField(vec3 origin, f32 worldSize, u32 sampleCount, const std::vector<f32>& heights) {
+    auto& bi = m_physicsSystem->GetBodyInterface();
+    // spacing between samples in X and Z
+    const f32 spacing = worldSize / static_cast<f32>(sampleCount - 1);
+    JPH::HeightFieldShapeSettings shapeSettings(
+        heights.data(),
+        JPH::Vec3(origin.x, origin.y, origin.z),
+        JPH::Vec3(spacing, 1.0f, spacing),
+        sampleCount);
+    JPH::BodyCreationSettings bodySettings(
+        shapeSettings.Create().Get(),
+        JPH::RVec3::sZero(),
+        JPH::Quat::sIdentity(),
+        JPH::EMotionType::Static,
+        PhysicsLayer::Static);
+    JPH::Body* body = bi.CreateBody(bodySettings);
+    bi.AddBody(body->GetID(), JPH::EActivation::DontActivate);
+    return body->GetID().GetIndexAndSequenceNumber();
 }
 
 u32 PhysicsWorld::addStaticBox(vec3 position, vec3 halfExtents) {

@@ -93,9 +93,29 @@ int Application::run(int argc, char** argv) {
                         modelPath.string());
     }
 
-    // Static ground plane so the car has something to land on when the
-    // terrain is disabled. Jolt plane: normal + distance from origin.
-    engine.physics().addStaticPlane(vec3{0.0f, 1.0f, 0.0f}, 0.0f);
+    // Build a Jolt heightfield that exactly matches the visual terrain shader.
+    // 512×512 samples over a 512×512 m area centred at the origin.
+    // terrainHeight() must stay in sync with terrain_clipmap.hlsl terrainHeight().
+    auto terrainHeight = [](float wx, float wz) -> float {
+        return std::sin(wx * 0.05f) * std::cos(wz * 0.05f) * 2.0f
+             + std::sin(wx * 0.13f + 1.1f) * std::sin(wz * 0.09f) * 0.8f;
+    };
+    {
+        constexpr u32 kN      = 512;
+        constexpr f32 kHFSize = 512.0f;
+        constexpr f32 kOriX   = -kHFSize * 0.5f;
+        constexpr f32 kOriZ   = -kHFSize * 0.5f;
+        const f32     spacing = kHFSize / static_cast<f32>(kN - 1);
+        std::vector<f32> hfHeights(kN * kN);
+        for (u32 row = 0; row < kN; ++row) {
+            for (u32 col = 0; col < kN; ++col) {
+                hfHeights[row * kN + col] = terrainHeight(kOriX + col * spacing,
+                                                          kOriZ + row * spacing);
+            }
+        }
+        engine.physics().addHeightField(vec3(kOriX, 0.0f, kOriZ), kHFSize, kN, hfHeights);
+        ENIGMA_LOG_INFO("[app] built terrain heightfield ({}×{}, {:.1f}m)", kN, kN, kHFSize);
+    }
 
     // GPU-driven clipmap terrain — built and wired into the G-buffer pass.
     Terrain terrain(renderer.device(),

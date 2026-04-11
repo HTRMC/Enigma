@@ -40,10 +40,10 @@ CameraData loadCamera(uint slot) {
     return cam;
 }
 
-// Nearly-flat height — keeps visual terrain matching the flat Jolt physics plane.
-// Subtle undulation (±0.15 m) gives ground-plane shading without a physics mismatch.
+// Procedural height — must match the C++ terrainHeight() in Application.cpp exactly.
 float terrainHeight(float wx, float wz) {
-    return sin(wx * 0.02) * sin(wz * 0.02) * 0.15;
+    return sin(wx * 0.05) * cos(wz * 0.05) * 2.0
+         + sin(wx * 0.13 + 1.1) * sin(wz * 0.09) * 0.8;
 }
 
 struct VSOut {

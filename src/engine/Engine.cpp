@@ -18,7 +18,7 @@ Engine::Engine()
 
     // Spawn vehicle at a default position.
     m_vehicle = std::make_unique<VehicleController>(
-        *m_physicsWorld, VehicleConfig::makeDefault(), vec3(0.0f, 0.5f, 0.0f));
+        *m_physicsWorld, VehicleConfig::makeDefault(), vec3(0.0f, 2.0f, 0.0f));
 
     ENIGMA_LOG_INFO("[engine] constructed ({}x{})", kDefaultWindowWidth, kDefaultWindowHeight);
 }

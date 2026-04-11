@@ -4,6 +4,7 @@
 #include "core/Math.h"
 
 #include <memory>
+#include <vector>
 
 // Forward declarations — avoid pulling all Jolt headers into every translation unit.
 namespace JPH {
@@ -48,6 +49,7 @@ public:
     // Body creation API — returns BodyID index (use to set/get transforms, apply forces).
     u32 addStaticBox(vec3 position, vec3 halfExtents);
     u32 addStaticPlane(vec3 normal, f32 offset);
+    u32 addHeightField(vec3 origin, f32 worldSize, u32 sampleCount, const std::vector<f32>& heights);
     u32 addDynamicBox(vec3 position, vec3 halfExtents, f32 mass = 1.0f);
     u32 addDynamicSphere(vec3 position, f32 radius, f32 mass = 1.0f);
 
