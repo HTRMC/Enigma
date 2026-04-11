@@ -115,15 +115,23 @@ PhysicsWorld::~PhysicsWorld() {
     ENIGMA_LOG_INFO("[physics] world destroyed");
 }
 
-void PhysicsWorld::step(f32 dt) {
-    // Clamp to avoid a spiral of death when dt is large (e.g. first frame
-    // after a long load). 5 physics steps per render frame is the max.
+void PhysicsWorld::addDt(f32 dt) {
     constexpr f32 kMaxDt = kFixedDt * 5.0f;
     m_accumulator += (dt < kMaxDt ? dt : kMaxDt);
-    while (m_accumulator >= kFixedDt) {
-        m_physicsSystem->Update(kFixedDt, 1, m_tempAllocator.get(), m_jobSystem.get());
-        m_accumulator -= kFixedDt;
-    }
+}
+
+bool PhysicsWorld::canStep() const {
+    return m_accumulator >= kFixedDt;
+}
+
+void PhysicsWorld::stepFixed() {
+    m_physicsSystem->Update(kFixedDt, 1, m_tempAllocator.get(), m_jobSystem.get());
+    m_accumulator -= kFixedDt;
+}
+
+void PhysicsWorld::step(f32 dt) {
+    addDt(dt);
+    while (canStep()) stepFixed();
 }
 
 u32 PhysicsWorld::addHeightField(vec3 origin, f32 worldSize, u32 sampleCount, const std::vector<f32>& heights) {

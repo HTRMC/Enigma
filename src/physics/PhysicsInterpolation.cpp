@@ -23,6 +23,17 @@ void PhysicsInterpolation::snapshot(u32 bodyId, const PhysicsWorld& world) {
     m_entries.push_back(e);
 }
 
+void PhysicsInterpolation::updateCurr(u32 bodyId, const PhysicsWorld& world) {
+    for (auto& entry : m_entries) {
+        if (entry.bodyId == bodyId) {
+            entry.curr.position = world.getPosition(bodyId);
+            entry.curr.rotation = world.getRotation(bodyId);
+            return;
+        }
+    }
+    snapshot(bodyId, world); // first time — full initialisation
+}
+
 mat4 PhysicsInterpolation::interpolatedTransform(u32 bodyId, f32 alpha) const {
     for (const auto& entry : m_entries) {
         if (entry.bodyId == bodyId) {

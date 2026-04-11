@@ -18,8 +18,11 @@ public:
         quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
     };
 
-    // Snapshot the current physics state for interpolation.
+    // Shift curr→prev and read new curr from physics (call BEFORE each substep).
     void snapshot(u32 bodyId, const PhysicsWorld& world);
+
+    // Update only curr from physics (call AFTER the last substep).
+    void updateCurr(u32 bodyId, const PhysicsWorld& world);
 
     // Get interpolated transform given alpha in [0,1].
     mat4 interpolatedTransform(u32 bodyId, f32 alpha) const;

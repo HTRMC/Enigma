@@ -46,6 +46,11 @@ public:
     // Fixed timestep physics step (120 Hz = dt 1/120).
     void step(f32 dt);
 
+    // Fine-grained substep control for per-substep interpolation snapshots.
+    void  addDt(f32 dt);      // accumulate time (clamped to 5× fixed dt)
+    bool  canStep() const;    // true when accumulator ≥ kFixedDt
+    void  stepFixed();        // run exactly one kFixedDt step
+
     // Body creation API — returns BodyID index (use to set/get transforms, apply forces).
     u32 addStaticBox(vec3 position, vec3 halfExtents);
     u32 addStaticPlane(vec3 normal, f32 offset);

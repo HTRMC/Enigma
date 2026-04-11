@@ -176,8 +176,15 @@ int Application::run(int argc, char** argv) {
             engine.vehicle()->update(dt);
         }
 
-        // Physics step — consumes impulses set above.
-        engine.physics().step(dt);
+        // Per-substep physics loop: snapshot BEFORE each step so prev/curr are
+        // always the last two consecutive 8.33 ms physics states. This gives
+        // smooth, jitter-free interpolation regardless of render frame time.
+        engine.physics().addDt(dt);
+        while (engine.physics().canStep()) {
+            engine.interpolation().snapshot(engine.vehicle()->bodyId(), engine.physics());
+            engine.physics().stepFixed();
+        }
+        engine.interpolation().updateCurr(engine.vehicle()->bodyId(), engine.physics());
 
         // Stream heightfield: rebuild when car moves >kHFRebuild m from current centre.
         {
@@ -191,9 +198,6 @@ int Application::run(int argc, char** argv) {
                 rebuildHeightField(snapped);
             }
         }
-
-        // Physics interpolation snapshot.
-        engine.interpolation().snapshot(engine.vehicle()->bodyId(), engine.physics());
 
         // Interpolated car transform for both rendering and the follow camera.
         const f32  alpha = engine.physics().accumulator() / PhysicsWorld::kFixedDt;

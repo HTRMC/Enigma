@@ -17,17 +17,16 @@ void FollowCamera::update(const mat4& targetTransform, f32 dt) {
     const vec3 carPos = vec3(targetTransform[3]);
 
     // Car local +Z rotated into world space — the forward direction.
-    vec3 carForward = vec3(targetTransform[2]);
-    const f32 fwdLen = glm::length(carForward);
-    if (fwdLen > 1e-6f) {
-        carForward /= fwdLen;
-    } else {
-        carForward = vec3(0.0f, 0.0f, 1.0f);
-    }
+    // Smooth independently so body wobble on terrain doesn't swing the camera arm.
+    vec3 rawFwd = vec3(targetTransform[2]);
+    if (glm::length(rawFwd) > 1e-6f) rawFwd = glm::normalize(rawFwd);
+    else                              rawFwd = vec3(0.0f, 0.0f, 1.0f);
+    const f32 fwdAlpha = 1.0f - std::exp(-6.0f * dt); // slower than position smoothing
+    m_smoothFwd = glm::normalize(glm::mix(m_smoothFwd, rawFwd, fwdAlpha));
 
-    // Ideal camera position: behind and above the car, offset along -forward.
+    // Ideal camera position: behind and above the car, offset along -smoothed forward.
     const vec3 ideal = carPos
-                     - carForward * m_armLength
+                     - m_smoothFwd * m_armLength
                      + vec3(0.0f, m_heightOffset, 0.0f);
 
     // Exponential smoothing (frame-rate independent).

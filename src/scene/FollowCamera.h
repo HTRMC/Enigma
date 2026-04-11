@@ -26,6 +26,7 @@ private:
     f32     m_armLength;
     f32     m_heightOffset;
     vec3    m_smoothPos{0.0f, 3.0f, 8.0f}; // starts behind spawn position
+    vec3    m_smoothFwd{0.0f, 0.0f, 1.0f}; // smoothed arm direction (avoids wobble)
 };
 
 } // namespace enigma
