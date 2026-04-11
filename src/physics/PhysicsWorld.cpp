@@ -222,6 +222,12 @@ void PhysicsWorld::applyImpulse(u32 bodyId, vec3 impulse) {
     bi.AddImpulse(JPH::BodyID(bodyId), JPH::Vec3(impulse.x, impulse.y, impulse.z));
 }
 
+void PhysicsWorld::applyAngularImpulse(u32 bodyId, vec3 angularImpulse) {
+    auto& bi = m_physicsSystem->GetBodyInterface();
+    bi.AddAngularImpulse(JPH::BodyID(bodyId),
+                         JPH::Vec3(angularImpulse.x, angularImpulse.y, angularImpulse.z));
+}
+
 void PhysicsWorld::setLinearVelocity(u32 bodyId, vec3 velocity) {
     auto& bi = m_physicsSystem->GetBodyInterface();
     bi.SetLinearVelocity(JPH::BodyID(bodyId), JPH::Vec3(velocity.x, velocity.y, velocity.z));

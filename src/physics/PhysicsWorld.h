@@ -60,6 +60,7 @@ public:
 
     // Apply forces / impulses.
     void applyImpulse(u32 bodyId, vec3 impulse);
+    void applyAngularImpulse(u32 bodyId, vec3 angularImpulse);
     void setLinearVelocity(u32 bodyId, vec3 velocity);
     vec3 getLinearVelocity(u32 bodyId) const;
 

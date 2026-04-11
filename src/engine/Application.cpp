@@ -23,6 +23,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace enigma {
 
@@ -66,17 +67,27 @@ int Application::run(int argc, char** argv) {
                      renderer.device(),
                      renderer.allocator(),
                      renderer.descriptorAllocator());
+    // Rest transforms: record each node's initial GLB-space transform, with a
+    // corrective Y-rotation applied so that the model's nose (+X in GLB space
+    // for most car exports) aligns with the physics body's forward (+Z in Jolt).
+    // Each frame: node.worldTransform = vehiclePhysicsTransform * restTransform[i]
+    std::vector<mat4> nodeRestTransforms;
+
     if (scene.has_value()) {
         renderer.setScene(&scene.value());
         ENIGMA_LOG_INFO("[app] loaded scene from: {}", modelPath.string());
 
-        // Bind the first node to the physics vehicle body so the scene
-        // transform is driven by the vehicle each frame.
-        if (!scene->nodes.empty() && engine.vehicle() != nullptr) {
-            scene->nodes[0].physicsBodyId = engine.vehicle()->bodyId();
-            ENIGMA_LOG_INFO("[app] bound scene node 0 to vehicle body {}",
-                            engine.vehicle()->bodyId());
+        // BMW M4 GT3 GLB: front of car is along +X in model space.
+        // Physics body drives in +Z.  Rotate -90° around Y to align them.
+        const mat4 correction = glm::rotate(mat4(1.0f),
+                                            glm::radians(-90.0f),
+                                            vec3(0.0f, 1.0f, 0.0f));
+        nodeRestTransforms.resize(scene->nodes.size());
+        for (u32 i = 0; i < static_cast<u32>(scene->nodes.size()); ++i) {
+            nodeRestTransforms[i] = correction * scene->nodes[i].worldTransform;
         }
+        ENIGMA_LOG_INFO("[app] recorded {} node rest transforms (correction: -90 Y)",
+                        nodeRestTransforms.size());
     } else {
         ENIGMA_LOG_WARN("[app] failed to load scene: {}, falling back to triangle",
                         modelPath.string());
@@ -141,13 +152,12 @@ int Application::run(int argc, char** argv) {
         const mat4 carTransform = engine.interpolation().interpolatedTransform(
             engine.vehicle()->bodyId(), alpha);
 
-        // Update scene nodes bound to physics bodies.
-        if (scene.has_value()) {
-            for (auto& node : scene->nodes) {
-                if (node.physicsBodyId != 0xFFFFFFFFu) {
-                    node.worldTransform = engine.interpolation().interpolatedTransform(
-                        node.physicsBodyId, alpha);
-                }
+        // Drive ALL car mesh nodes from the physics body transform.
+        // Uses pre-recorded rest transforms so each node's model-space offset
+        // is preserved while the whole car tracks the Jolt body.
+        if (scene.has_value() && !nodeRestTransforms.empty()) {
+            for (u32 i = 0; i < static_cast<u32>(scene->nodes.size()); ++i) {
+                scene->nodes[i].worldTransform = carTransform * nodeRestTransforms[i];
             }
         }
 
