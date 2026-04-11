@@ -10,8 +10,9 @@
 #include "platform/Window.h"
 #include "renderer/Renderer.h"
 #include "scene/Camera.h"
-#include "scene/CameraController.h"
+#include "scene/FollowCamera.h"
 #include "scene/Scene.h"
+#include "world/Terrain.h"
 
 #include <volk.h>
 
@@ -40,18 +41,25 @@ int Application::run(int argc, char** argv) {
     auto& clock    = engine.clock();
     auto& input    = engine.input();
 
-    // Camera: positioned to see the origin, looking forward.
-    Camera camera({0.0f, 1.0f, 3.0f}, 60.0f, 0.1f);
-    CameraController controller(camera, input);
+    // Camera — position is overwritten each frame by the FollowCamera.
+    Camera camera({0.0f, 3.0f, 8.0f}, 60.0f, 0.1f);
     renderer.setCamera(&camera);
 
-    // glTF scene loading: command-line path or bundled default.
+    FollowCamera followCam(camera, /*armLength=*/8.0f, /*heightOffset=*/2.5f);
+
+    // glTF scene loading: command-line path, BMW M4 GT3, or bundled default.
     std::optional<Scene> scene;
     std::filesystem::path modelPath;
     if (argc > 1 && argv[1] != nullptr) {
         modelPath = argv[1];
     } else {
-        modelPath = Paths::executablePath().parent_path() / "assets" / "DamagedHelmet.glb";
+        const std::filesystem::path bmwPath =
+            Paths::executablePath().parent_path() / "assets" / "bmw_m4_gt3_nic.glb";
+        if (std::filesystem::exists(bmwPath)) {
+            modelPath = bmwPath;
+        } else {
+            modelPath = Paths::executablePath().parent_path() / "assets" / "DamagedHelmet.glb";
+        }
     }
 
     scene = loadGltf(modelPath,
@@ -61,21 +69,44 @@ int Application::run(int argc, char** argv) {
     if (scene.has_value()) {
         renderer.setScene(&scene.value());
         ENIGMA_LOG_INFO("[app] loaded scene from: {}", modelPath.string());
+
+        // Bind the first node to the physics vehicle body so the scene
+        // transform is driven by the vehicle each frame.
+        if (!scene->nodes.empty() && engine.vehicle() != nullptr) {
+            scene->nodes[0].physicsBodyId = engine.vehicle()->bodyId();
+            ENIGMA_LOG_INFO("[app] bound scene node 0 to vehicle body {}",
+                            engine.vehicle()->bodyId());
+        }
     } else {
         ENIGMA_LOG_WARN("[app] failed to load scene: {}, falling back to triangle",
                         modelPath.string());
     }
 
+    // Static ground plane so the car has something to land on when the
+    // terrain is disabled. Jolt plane: normal + distance from origin.
+    engine.physics().addStaticPlane(vec3{0.0f, 1.0f, 0.0f}, 0.0f);
+
+    // GPU-driven clipmap terrain — built and wired into the G-buffer pass.
+    Terrain terrain(renderer.device(),
+                    renderer.allocator(),
+                    renderer.descriptorAllocator());
+    terrain.buildPipeline(renderer.shaderManager(),
+                          renderer.descriptorAllocator().layout(),
+                          /*colorFormat=*/       GBufferPass::kAlbedoFormat,
+                          /*depthFormat=*/       GBufferPass::kDepthFormat,
+                          /*normalFormat=*/      GBufferPass::kNormalFormat,
+                          /*metalRoughFormat=*/  GBufferPass::kMetalRoughFormat,
+                          /*motionVecFormat=*/   GBufferPass::kMotionVecFormat);
+    terrain.registerHotReload(renderer.shaderHotReload());
+    renderer.setTerrain(&terrain);
+
     while (!window.shouldClose()) {
         window.pollEvents();
         const f32 dt = static_cast<f32>(clock.tick());
         input.update();
-        controller.update(dt);
 
-        // Physics step.
-        engine.physics().step(dt);
-
-        // Vehicle input from keyboard (WASD) and gamepad.
+        // Vehicle input must be applied BEFORE physics.step() so Jolt
+        // consumes the impulses in the same fixed-timestep sub-steps.
         {
             VehicleInput vi;
             if (input.isKeyDown(GLFW_KEY_W)) vi.throttle = 1.0f;
@@ -99,12 +130,19 @@ int Application::run(int argc, char** argv) {
             engine.vehicle()->update(dt);
         }
 
+        // Physics step — consumes impulses set above.
+        engine.physics().step(dt);
+
         // Physics interpolation snapshot.
         engine.interpolation().snapshot(engine.vehicle()->bodyId(), engine.physics());
 
+        // Interpolated car transform for both rendering and the follow camera.
+        const f32  alpha = engine.physics().accumulator() / PhysicsWorld::kFixedDt;
+        const mat4 carTransform = engine.interpolation().interpolatedTransform(
+            engine.vehicle()->bodyId(), alpha);
+
         // Update scene nodes bound to physics bodies.
         if (scene.has_value()) {
-            const f32 alpha = engine.physics().accumulator() / PhysicsWorld::kFixedDt;
             for (auto& node : scene->nodes) {
                 if (node.physicsBodyId != 0xFFFFFFFFu) {
                     node.worldTransform = engine.interpolation().interpolatedTransform(
@@ -113,10 +151,17 @@ int Application::run(int argc, char** argv) {
             }
         }
 
+        // Spring-arm follow camera tracks the interpolated car transform.
+        followCam.update(carTransform, dt);
+
+        // Rebuild terrain chunk positions for this frame.
+        terrain.update(camera.position);
+
         renderer.drawFrame();
     }
 
     // Clean up scene before renderer teardown.
+    renderer.setTerrain(nullptr);
     if (scene.has_value()) {
         renderer.setScene(nullptr);
         // Wait for GPU to finish before destroying scene resources.

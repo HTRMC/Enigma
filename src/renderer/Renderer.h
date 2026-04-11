@@ -25,6 +25,7 @@
 #include "renderer/Upscaler.h"
 #include "renderer/UpscalerSettings.h"
 #include "physics/DeformationSystem.h"
+#include "world/Terrain.h"
 
 #include <volk.h>
 
@@ -68,6 +69,12 @@ public:
     // On RT hardware, builds acceleration structures for the scene.
     void setScene(Scene* scene);
 
+    // Attach a GPU-driven clipmap terrain. The terrain is drawn inside
+    // the same render pass as GBufferPass so it writes straight into
+    // the deferred G-buffer and participates in lighting / RT effects.
+    // Pass nullptr to detach.
+    void setTerrain(Terrain* terrain) { m_terrain = terrain; }
+
 
     // Set the directional sun light. Takes effect on the next drawFrame().
     void setLight(const SunLight& light) { m_light = light; }
@@ -85,6 +92,8 @@ public:
     gfx::Device& device() { return *m_device; }
     gfx::Allocator& allocator() { return *m_allocator; }
     gfx::DescriptorAllocator& descriptorAllocator() { return *m_descriptorAllocator; }
+    gfx::ShaderManager& shaderManager() { return *m_shaderManager; }
+    gfx::ShaderHotReload& shaderHotReload() { return *m_shaderHotReload; }
 
     // Expose the last frame's GPU timing results for ImGui display.
     // Call after drawFrame() to get the previous frame's timings.
@@ -141,8 +150,9 @@ private:
     VkPhysicalDeviceMemoryProperties m_memoryProperties{};
 
     // Camera state.
-    Camera* m_camera = nullptr;
-    Scene*  m_scene  = nullptr;
+    Camera*  m_camera  = nullptr;
+    Scene*   m_scene   = nullptr;
+    Terrain* m_terrain = nullptr;
 
     SunLight m_light{};
 

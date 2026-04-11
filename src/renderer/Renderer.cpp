@@ -494,6 +494,13 @@ void Renderer::drawFrame() {
             m_gpuProfiler->beginZone(cmd, "GBufferPass");
             m_gbufferPass->record(cmd, m_descriptorAllocator->globalSet(),
                                    ext, *m_scene, cameraSlot);
+            // Terrain shares the same render pass so it writes directly
+            // into the G-buffer MRT attachments and participates in all
+            // downstream lighting and RT effects.
+            if (m_terrain != nullptr) {
+                m_terrain->record(cmd, ext,
+                                   m_descriptorAllocator->globalSet(), cameraSlot);
+            }
             m_gpuProfiler->endZone(cmd);
         };
         m_renderGraph->addRasterPass(std::move(gbufPassDesc));

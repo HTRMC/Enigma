@@ -46,7 +46,9 @@ target_sources(Enigma PRIVATE
     src/engine/Engine.cpp
     src/scene/Camera.cpp
     src/scene/CameraController.cpp
+    src/scene/FollowCamera.cpp
     src/scene/Scene.cpp
+    src/world/Terrain.cpp
     src/asset/GltfLoader.cpp
     src/renderer/Renderer.cpp
     src/renderer/MeshPass.cpp
