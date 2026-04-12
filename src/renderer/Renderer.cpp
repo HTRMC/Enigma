@@ -139,6 +139,22 @@ Renderer::Renderer(Window& window)
                                    VK_FORMAT_R16G16B16A16_SFLOAT);
     m_lightingPass->registerHotReload(*m_shaderHotReload);
 
+    // Sky background pass — renders SkyView LUT into sky pixels after lighting.
+    m_skyPass = std::make_unique<SkyBackgroundPass>(*m_device);
+    m_skyPass->buildPipeline(*m_shaderManager,
+                              m_descriptorAllocator->layout(),
+                              VK_FORMAT_R16G16B16A16_SFLOAT);
+    m_skyPass->registerHotReload(*m_shaderHotReload);
+
+    // Post-process pass — AP apply + bloom + tonemap → swapchain.
+    // Uses the swapchain format since it writes the final display-ready image.
+    m_postProcessPass = std::make_unique<PostProcessPass>(*m_device);
+    m_postProcessPass->buildPipeline(*m_shaderManager,
+                                      m_descriptorAllocator->layout(),
+                                      m_atmospherePass->aerialPerspectiveReadSetLayout(),
+                                      m_swapchain->format());
+    m_postProcessPass->registerHotReload(*m_shaderHotReload);
+
     // RT reflection pass.
     m_rtReflectionPass = std::make_unique<RTReflectionPass>(*m_device, *m_allocator);
     m_rtReflectionPass->allocate(m_swapchain->extent());
@@ -256,6 +272,66 @@ Renderer::Renderer(Window& window)
     m_physicsDebugRenderer.init(dbgInfo);
 
     createHdrColor(m_swapchain->extent());
+
+    // Atmosphere LUT pass — must be initialized after sampler is registered.
+    m_atmospherePass = std::make_unique<AtmospherePass>();
+    {
+        AtmospherePass::InitInfo atmInfo{};
+        atmInfo.device              = m_device.get();
+        atmInfo.allocator           = m_allocator.get();
+        atmInfo.descriptorAllocator = m_descriptorAllocator.get();
+        atmInfo.shaderManager       = m_shaderManager.get();
+        atmInfo.globalSetLayout     = m_descriptorAllocator->layout();
+        m_atmospherePass->init(atmInfo);
+    }
+
+    // Bake Transmittance + MultiScatter LUTs on startup (one-shot command buffer).
+    {
+        VkDevice dev = m_device->logical();
+
+        VkCommandPool pool = VK_NULL_HANDLE;
+        VkCommandPoolCreateInfo poolCI{};
+        poolCI.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolCI.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        poolCI.queueFamilyIndex = m_device->graphicsQueueFamily();
+        ENIGMA_VK_CHECK(vkCreateCommandPool(dev, &poolCI, nullptr, &pool));
+
+        VkCommandBuffer bakeCmd = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo cbInfo{};
+        cbInfo.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbInfo.commandPool        = pool;
+        cbInfo.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbInfo.commandBufferCount = 1;
+        ENIGMA_VK_CHECK(vkAllocateCommandBuffers(dev, &cbInfo, &bakeCmd));
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        ENIGMA_VK_CHECK(vkBeginCommandBuffer(bakeCmd, &beginInfo));
+
+        m_atmospherePass->bakeStaticLUTs(bakeCmd, m_atmosphereSettings,
+                                          m_sunWorldDir, m_gbufferSamplerSlot);
+
+        ENIGMA_VK_CHECK(vkEndCommandBuffer(bakeCmd));
+
+        VkFence fence = VK_NULL_HANDLE;
+        VkFenceCreateInfo fenceCI{};
+        fenceCI.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        ENIGMA_VK_CHECK(vkCreateFence(dev, &fenceCI, nullptr, &fence));
+
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers    = &bakeCmd;
+        ENIGMA_VK_CHECK(vkQueueSubmit(m_device->graphicsQueue(), 1, &submitInfo, fence));
+        ENIGMA_VK_CHECK(vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX));
+
+        vkDestroyFence(dev, fence, nullptr);
+        vkDestroyCommandPool(dev, pool, nullptr); // frees bakeCmd implicitly
+
+        m_sunDirty = false;
+        ENIGMA_LOG_INFO("[renderer] initial atmosphere LUT bake complete");
+    }
 }
 
 Renderer::~Renderer() {
@@ -274,6 +350,11 @@ Renderer::~Renderer() {
     // Clean up G-buffer sampler (pass objects destroy their own images/pipelines).
     if (m_gbufferSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device->logical(), m_gbufferSampler, nullptr);
+    }
+
+    // Atmosphere pass owns LUT images + pipelines.
+    if (m_atmospherePass) {
+        m_atmospherePass->shutdown();
     }
 
     // HDR intermediate — destroyed before VMA teardown.
@@ -320,7 +401,9 @@ void Renderer::uploadCameraData() {
     std::memcpy(cb.mapped, &data, sizeof(data));
 
     // Save current viewProj so next frame can use it as prevViewProj.
-    m_prevViewProj = data.viewProj;
+    m_prevViewProj    = data.viewProj;
+    m_invViewProj     = data.invViewProj;
+    m_cameraWorldPos  = vec3(data.worldPos);
 }
 
 void Renderer::drawFrame() {
@@ -353,6 +436,56 @@ void Renderer::drawFrame() {
             m_sunWorldDir = newDir;
             m_sunDirty    = true;
         }
+    }
+
+    // When the sun direction changes, rebake the static LUTs (Transmittance +
+    // MultiScatter). These are slow to compute and only change when the sun
+    // moves, so we idle the device and rebuild before opening this frame's
+    // command buffer. SkyView + AP are rebuilt every frame in updatePerFrame.
+    if (m_sunDirty && m_atmospherePass) {
+        vkDeviceWaitIdle(m_device->logical());
+
+        VkCommandPool bakePool = VK_NULL_HANDLE;
+        VkCommandPoolCreateInfo bakePoolCI{};
+        bakePoolCI.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        bakePoolCI.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        bakePoolCI.queueFamilyIndex = m_device->graphicsQueueFamily();
+        ENIGMA_VK_CHECK(vkCreateCommandPool(m_device->logical(), &bakePoolCI, nullptr, &bakePool));
+
+        VkCommandBuffer bakeCmd = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo bakeCbInfo{};
+        bakeCbInfo.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        bakeCbInfo.commandPool        = bakePool;
+        bakeCbInfo.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        bakeCbInfo.commandBufferCount = 1;
+        ENIGMA_VK_CHECK(vkAllocateCommandBuffers(m_device->logical(), &bakeCbInfo, &bakeCmd));
+
+        VkCommandBufferBeginInfo bakeBeginInfo{};
+        bakeBeginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        bakeBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        ENIGMA_VK_CHECK(vkBeginCommandBuffer(bakeCmd, &bakeBeginInfo));
+
+        m_atmospherePass->bakeStaticLUTs(bakeCmd, m_atmosphereSettings,
+                                          m_sunWorldDir, m_gbufferSamplerSlot);
+
+        ENIGMA_VK_CHECK(vkEndCommandBuffer(bakeCmd));
+
+        VkFence bakeFence = VK_NULL_HANDLE;
+        VkFenceCreateInfo bakeFenceCI{};
+        bakeFenceCI.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        ENIGMA_VK_CHECK(vkCreateFence(m_device->logical(), &bakeFenceCI, nullptr, &bakeFence));
+
+        VkSubmitInfo bakeSubmit{};
+        bakeSubmit.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        bakeSubmit.commandBufferCount = 1;
+        bakeSubmit.pCommandBuffers    = &bakeCmd;
+        ENIGMA_VK_CHECK(vkQueueSubmit(m_device->graphicsQueue(), 1, &bakeSubmit, bakeFence));
+        ENIGMA_VK_CHECK(vkWaitForFences(m_device->logical(), 1, &bakeFence, VK_TRUE, UINT64_MAX));
+
+        vkDestroyFence(m_device->logical(), bakeFence, nullptr);
+        vkDestroyCommandPool(m_device->logical(), bakePool, nullptr); // frees bakeCmd
+
+        m_sunDirty = false;
     }
 
     VkDevice dev = m_device->logical();
@@ -425,6 +558,21 @@ void Renderer::drawFrame() {
     ENIGMA_VK_CHECK(vkBeginCommandBuffer(frame.commandBuffer, &beginInfo));
 
     m_gpuProfiler->reset(frame.commandBuffer);
+
+    // Per-frame atmosphere LUT update: SkyView + Aerial Perspective volume.
+    // Recorded directly into the main command buffer before the render graph
+    // executes so RT passes, sky background, lighting, and post-process all
+    // read fresh LUTs this frame. Camera position converted from world-units
+    // to km (engine uses metres: 1 world unit = 1 m → / 1000).
+    if (m_atmospherePass) {
+        m_atmospherePass->updatePerFrame(
+            frame.commandBuffer,
+            m_atmosphereSettings,
+            m_sunWorldDir,
+            m_cameraWorldPos * 0.001f, // metres → km
+            m_invViewProj,
+            m_gbufferSamplerSlot);
+    }
 
     // ImGui new frame -- must be called before any ImGui:: window calls this frame.
     if (m_imguiLayer) {
@@ -586,7 +734,11 @@ void Renderer::drawFrame() {
                 m_rtReflectionPass->record(cmd, m_descriptorAllocator->globalSet(), ext,
                                             m_gbufNormalSlot, m_gbufDepthSlot,
                                             cameraSlot, m_gbufferSamplerSlot,
-                                            m_tlasSlot, m_reflectionSlot);
+                                            m_tlasSlot, m_reflectionSlot,
+                                            m_atmospherePass->skyViewLutSlot(),
+                                            m_atmospherePass->transmittanceLutSlot(),
+                                            vec4{m_sunWorldDir, m_atmosphereSettings.sunIntensity},
+                                            vec4{m_cameraWorldPos * 0.001f, 0.0f});
                 m_gpuProfiler->endZone(cmd);
             };
             m_renderGraph->addRasterPass(std::move(rtReflectDesc));
@@ -676,6 +828,33 @@ void Renderer::drawFrame() {
         };
         m_renderGraph->addRasterPass(std::move(lightPassDesc));
 
+        // Sky background — overwrites sky pixels (depth==0) with the SkyView LUT.
+        // Must run after LightingPass (LOAD_OP_LOAD preserves geometry pixels)
+        // and before PhysicsDebug (which re-attaches gbufDepth as depth target).
+        // gbufDepth stays in SHADER_READ_ONLY_OPTIMAL from the LightingPass,
+        // so we list it in sampledInputs to let the graph verify the layout.
+        {
+            gfx::RenderGraph::RasterPassDesc skyDesc{};
+            skyDesc.name         = "SkyBackgroundPass";
+            skyDesc.colorTargets = {hdrColorHandle};
+            skyDesc.colorLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
+            skyDesc.sampledInputs = {gbufDepth};
+            skyDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "SkyBackgroundPass");
+                m_skyPass->record(cmd,
+                    m_descriptorAllocator->globalSet(), ext,
+                    cameraSlot,
+                    m_gbufDepthSlot,
+                    m_atmospherePass->skyViewLutSlot(),
+                    m_atmospherePass->transmittanceLutSlot(),
+                    m_gbufferSamplerSlot,
+                    vec4{m_sunWorldDir, m_atmosphereSettings.sunIntensity},
+                    vec4{m_cameraWorldPos * 0.001f, 0.0f}); // metres → km
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(skyDesc));
+        }
+
         // Physics debug wireframe overlay — inserted after lighting so it
         // composites on top of the final lit image. Only active when enabled
         // and there are lines to draw (upload() sets the count).
@@ -700,6 +879,33 @@ void Renderer::drawFrame() {
                 m_gpuProfiler->endZone(cmd);
             };
             m_renderGraph->addRasterPass(std::move(debugDesc));
+        }
+
+        // PostProcessPass — final output to swapchain.
+        // Reads hdrColorHandle (via sampledInputs → SHADER_READ_ONLY) and writes to
+        // colorHandle (swapchain). This is the only pass that writes to colorHandle
+        // in the deferred path; the upscaler is skipped when this pass is active.
+        {
+            gfx::RenderGraph::RasterPassDesc ppDesc{};
+            ppDesc.name          = "PostProcessPass";
+            ppDesc.colorTargets  = {colorHandle};
+            ppDesc.sampledInputs = {hdrColorHandle, gbufDepth};
+            ppDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            ppDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "PostProcessPass");
+                m_postProcessPass->record(cmd,
+                    m_descriptorAllocator->globalSet(),
+                    m_atmospherePass->aerialPerspectiveReadSet(),
+                    ext,
+                    m_hdrColorSampledSlot,
+                    m_gbufDepthSlot,
+                    cameraSlot,
+                    m_gbufferSamplerSlot,
+                    m_atmosphereSettings,
+                    vec4{m_cameraWorldPos * 0.001f, 0.0f}); // metres → km
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(ppDesc));
         }
 
     } else {
@@ -737,7 +943,11 @@ void Renderer::drawFrame() {
     // upscaler (when real) writes to it with outputLayout COLOR_ATTACHMENT_OPTIMAL.
     VkImageLayout swapchainLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 
-    if (m_upscaler && m_scene != nullptr) {
+    // PostProcessPass writes the final tonemapped image directly to the swapchain,
+    // so the upscaler is skipped when it is active. The upscaler can be
+    // re-integrated in a future pass once the HDR → TAA → tonemap ordering is
+    // designed with a proper intermediate render target.
+    if (m_upscaler && m_scene != nullptr && !m_postProcessPass) {
         m_upscaler->evaluate(frame.commandBuffer,
                              m_hdrColorView,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,

@@ -16,18 +16,20 @@
 
 namespace enigma {
 
-// RT push constants — must match reflection.rgen.hlsl PushBlock.
+// RT push constants — must match reflection.rgen.hlsl PushBlock exactly.
 struct RTReflectionPushBlock {
-    u32 normalSlot;
-    u32 depthSlot;
-    u32 cameraSlot;
-    u32 samplerSlot;
-    u32 tlasSlot;
-    u32 outputSlot;
-    u32 _pad0;
-    u32 _pad1;
-};
-static_assert(sizeof(RTReflectionPushBlock) == 32);
+    u32  normalSlot;            //  4
+    u32  depthSlot;             //  4
+    u32  cameraSlot;            //  4
+    u32  samplerSlot;           //  4
+    u32  tlasSlot;              //  4
+    u32  outputSlot;            //  4
+    u32  skyViewLutSlot;        //  4
+    u32  transmittanceLutSlot;  //  4  = 32 bytes
+    vec4 sunWorldDirIntensity;  // 16
+    vec4 cameraWorldPosKm;      // 16
+};                              // Total: 64 bytes
+static_assert(sizeof(RTReflectionPushBlock) == 64);
 
 // SSR push constants — must match ssr.hlsl PushBlock.
 struct SSRPushBlock {
@@ -76,7 +78,7 @@ void RTReflectionPass::buildPipeline(gfx::ShaderManager& shaderManager,
         ci.closestHitModule  = rchit;
         ci.closestHitEntry   = "ClosestHitMain";
         ci.globalSetLayout   = globalSetLayout;
-        ci.pushConstantSize  = sizeof(RTReflectionPushBlock);
+        ci.pushConstantSize  = sizeof(RTReflectionPushBlock); // 64 bytes
         ci.maxRecursionDepth = 1;
 
         m_rtPipeline = new gfx::RTPipeline(*m_device, *m_allocator, ci);
@@ -157,7 +159,11 @@ void RTReflectionPass::record(VkCommandBuffer cmd,
                                u32 cameraSlot,
                                u32 samplerSlot,
                                u32 tlasSlot,
-                               u32 outputSlotVal) {
+                               u32 outputSlotVal,
+                               u32 skyViewLutSlot,
+                               u32 transmittanceLutSlot,
+                               vec4 sunWorldDirIntensity,
+                               vec4 cameraWorldPosKm) {
     // Transition reflection image to GENERAL for storage writes.
     VkImageMemoryBarrier2 toGeneral{};
     toGeneral.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -185,12 +191,16 @@ void RTReflectionPass::record(VkCommandBuffer cmd,
                                 m_rtPipeline->layout(), 0, 1, &globalSet, 0, nullptr);
 
         RTReflectionPushBlock pc{};
-        pc.normalSlot  = normalSlot;
-        pc.depthSlot   = depthSlot;
-        pc.cameraSlot  = cameraSlot;
-        pc.samplerSlot = samplerSlot;
-        pc.tlasSlot    = tlasSlot;
-        pc.outputSlot  = outputSlotVal;
+        pc.normalSlot           = normalSlot;
+        pc.depthSlot            = depthSlot;
+        pc.cameraSlot           = cameraSlot;
+        pc.samplerSlot          = samplerSlot;
+        pc.tlasSlot             = tlasSlot;
+        pc.outputSlot           = outputSlotVal;
+        pc.skyViewLutSlot       = skyViewLutSlot;
+        pc.transmittanceLutSlot = transmittanceLutSlot;
+        pc.sunWorldDirIntensity = sunWorldDirIntensity;
+        pc.cameraWorldPosKm     = cameraWorldPosKm;
 
         vkCmdPushConstants(cmd, m_rtPipeline->layout(),
                            VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
@@ -215,6 +225,10 @@ void RTReflectionPass::record(VkCommandBuffer cmd,
         (void)cameraSlot;
         (void)samplerSlot;
         (void)outputSlotVal;
+        (void)skyViewLutSlot;
+        (void)transmittanceLutSlot;
+        (void)sunWorldDirIntensity;
+        (void)cameraWorldPosKm;
     }
 
     // Transition to SHADER_READ_ONLY for the lighting pass to sample.

@@ -22,7 +22,10 @@
 #include "renderer/WetRoadPass.h"
 #include "renderer/Denoiser.h"
 #include "renderer/TrianglePass.h"
+#include "renderer/AtmospherePass.h"
 #include "renderer/AtmosphereSettings.h"
+#include "renderer/SkyBackgroundPass.h"
+#include "renderer/PostProcessPass.h"
 #include "renderer/Upscaler.h"
 #include "renderer/UpscalerSettings.h"
 #include "physics/DeformationSystem.h"
@@ -132,6 +135,9 @@ private:
     std::unique_ptr<MeshPass>                  m_meshPass;
     std::unique_ptr<GBufferPass>              m_gbufferPass;
     std::unique_ptr<LightingPass>             m_lightingPass;
+    std::unique_ptr<AtmospherePass>           m_atmospherePass;
+    std::unique_ptr<SkyBackgroundPass>        m_skyPass;
+    std::unique_ptr<PostProcessPass>          m_postProcessPass;
     std::unique_ptr<RTReflectionPass>         m_rtReflectionPass;
     std::unique_ptr<RTGIPass>                m_giPass;
     std::unique_ptr<RTShadowPass>            m_shadowPass;
@@ -178,6 +184,13 @@ private:
 
     // Previous frame's viewProj — uploaded to the camera SSBO for motion vectors.
     mat4 m_prevViewProj{1.0f};
+
+    // Current frame's inverse view-projection — cached for AtmospherePass AP volume.
+    mat4 m_invViewProj{1.0f};
+
+    // Camera world-space position (world units, NOT km) — cached in uploadCameraData
+    // and converted to km when passed to AtmospherePass::updatePerFrame.
+    vec3 m_cameraWorldPos{0.f, 0.f, 0.f};
 
     // Nearest-neighbour sampler for G-buffer reads in the lighting pass.
     VkSampler m_gbufferSampler = VK_NULL_HANDLE;

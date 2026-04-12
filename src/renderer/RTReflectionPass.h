@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Math.h"
 #include "core/Types.h"
 
 #include <volk.h>
@@ -55,7 +56,11 @@ public:
                 u32 cameraSlot,
                 u32 samplerSlot,
                 u32 tlasSlot,
-                u32 outputSlot);
+                u32 outputSlot,
+                u32 skyViewLutSlot,
+                u32 transmittanceLutSlot,
+                vec4 sunWorldDirIntensity,  // xyz = sun dir, w = intensity
+                vec4 cameraWorldPosKm);     // xyz = km from planet centre
 
     void registerHotReload(gfx::ShaderHotReload& reloader);
 

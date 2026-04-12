@@ -23,14 +23,16 @@ SamplerState g_samplers[] : register(s0, space0);
 RaytracingAccelerationStructure g_tlas[] : register(t0, space2);
 
 struct PushBlock {
-    uint normalSlot;
-    uint depthSlot;
-    uint cameraSlot;
-    uint samplerSlot;
-    uint tlasSlot;
-    uint outputSlot;
-    uint _pad0;
-    uint _pad1;
+    uint   normalSlot;
+    uint   depthSlot;
+    uint   cameraSlot;
+    uint   samplerSlot;
+    uint   tlasSlot;
+    uint   outputSlot;
+    uint   skyViewLutSlot;        // SkyView LUT slot for miss shader sky sampling
+    uint   transmittanceLutSlot;  // Transmittance LUT slot for sun disk
+    float4 sunWorldDirIntensity;  // xyz = sun direction, w = intensity
+    float4 cameraWorldPosKm;      // xyz = camera position in km from planet centre
 };
 
 [[vk::push_constant]] PushBlock pc;

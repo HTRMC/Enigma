@@ -74,6 +74,9 @@ target_sources(Enigma PRIVATE
     src/renderer/RTShadowPass.cpp
     src/renderer/WetRoadPass.cpp
     src/renderer/Denoiser.cpp
+    src/renderer/AtmospherePass.cpp
+    src/renderer/SkyBackgroundPass.cpp
+    src/renderer/PostProcessPass.cpp
     src/renderer/TrianglePass.cpp
     src/renderer/UpscalerFactory.cpp
     src/renderer/UpscalerSettings.cpp

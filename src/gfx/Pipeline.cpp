@@ -64,10 +64,16 @@ Pipeline::Pipeline(Device& device, const CreateInfo& info)
     pushRange.offset     = 0;
     pushRange.size       = info.pushConstantSize;
 
+    const VkDescriptorSetLayout setLayouts[2] = {
+        info.globalSetLayout,
+        info.additionalSetLayout, // may be VK_NULL_HANDLE
+    };
+    const u32 setLayoutCount = (info.additionalSetLayout != VK_NULL_HANDLE) ? 2u : 1u;
+
     VkPipelineLayoutCreateInfo layoutInfo{};
     layoutInfo.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layoutInfo.setLayoutCount         = 1;
-    layoutInfo.pSetLayouts            = &info.globalSetLayout;
+    layoutInfo.setLayoutCount         = setLayoutCount;
+    layoutInfo.pSetLayouts            = setLayouts;
     layoutInfo.pushConstantRangeCount = 1;
     layoutInfo.pPushConstantRanges    = &pushRange;
 

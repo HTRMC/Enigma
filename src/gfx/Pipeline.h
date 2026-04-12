@@ -54,6 +54,10 @@ public:
         VkShaderModule        fragShader            = VK_NULL_HANDLE;
         const char*           fragEntryPoint        = "PSMain";
         VkDescriptorSetLayout globalSetLayout       = VK_NULL_HANDLE;
+        // Optional second descriptor set layout (set=1). When non-null the
+        // pipeline layout is built with two sets. Used by passes that need
+        // an extra dedicated descriptor set (e.g. PostProcessPass AP volume).
+        VkDescriptorSetLayout additionalSetLayout   = VK_NULL_HANDLE;
         // Single color attachment (legacy / simple pass). Ignored when
         // colorAttachmentCount > 0.
         VkFormat              colorAttachmentFormat = VK_FORMAT_UNDEFINED;
