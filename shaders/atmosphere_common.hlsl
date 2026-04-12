@@ -27,6 +27,12 @@ static const float  MIE_G       = 0.8f;
 // Ozone absorption (km⁻¹) — tent function centered at 25 km
 static const float3 OZONE_SIGMA_A = float3(0.650e-3f, 1.881e-3f, 0.085e-3f);
 
+// Aerial Perspective froxel depth range (km).
+// AP_NEAR / AP_FAR must match AtmospherePass::apSliceFar (C++ side) and
+// any shader that samples the volume with a log-distributed depth mapping.
+static const float AP_NEAR = 0.01f;
+static const float AP_FAR  = 50.0f;
+
 // ---------------------------------------------------------------------------
 // Density profiles
 // ---------------------------------------------------------------------------

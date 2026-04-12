@@ -33,9 +33,8 @@ struct PushBlock {
 
 // Slice index → world-space depth (km from camera), log-distributed
 float sliceToDepth(float sliceNorm) {
-    // sliceNorm ∈ [0,1], slice 0 = near (0.01km), slice 1 = apSliceFar
-    const float near = 0.01f;
-    return near * pow(pc.apSliceFar / near, sliceNorm);
+    // sliceNorm ∈ [0,1], slice 0 = AP_NEAR km, slice 1 = apSliceFar km
+    return AP_NEAR * pow(pc.apSliceFar / AP_NEAR, sliceNorm);
 }
 
 [numthreads(4, 4, 4)]

@@ -51,10 +51,12 @@ CameraData loadCamera(uint slot) {
 //   v = 0.5 + 0.5 * sign(cosZenith) * sqrt(|cosZenith|)
 float2 dirToSkyViewUV(float3 viewDir, float3 camPosKm) {
     // Planet-surface-relative local frame at camera position.
-    float3 up      = normalize(camPosKm);
-    float3 right   = normalize(cross(up, float3(0.0f, 0.0f, 1.0f)));
-    if (length(right) < 0.01f)
-        right = normalize(cross(up, float3(1.0f, 0.0f, 0.0f)));
+    float3 up       = normalize(camPosKm);
+    // Check cross-product length BEFORE normalising to handle near-pole cameras.
+    float3 rightRaw = cross(up, float3(0.0f, 0.0f, 1.0f));
+    if (length(rightRaw) < 0.01f)
+        rightRaw = cross(up, float3(1.0f, 0.0f, 0.0f));
+    float3 right   = normalize(rightRaw);
     float3 forward = cross(right, up);
 
     // Project view direction into local frame.
@@ -66,8 +68,10 @@ float2 dirToSkyViewUV(float3 viewDir, float3 camPosKm) {
     float az = atan2(localZ, localX);     // ∈ [-π, π]
     float u  = frac(az / (2.0f * PI) + 1.0f); // wrap to [0, 1]
 
+    // sign(0) is undefined on some drivers → use explicit ternary for the horizon row.
     float cosZenith = localY;
-    float v = 0.5f + 0.5f * sign(cosZenith) * sqrt(abs(cosZenith));
+    float signZ = (cosZenith >= 0.0f) ? 1.0f : -1.0f;
+    float v = 0.5f + 0.5f * signZ * sqrt(abs(cosZenith));
 
     return float2(u, v);
 }

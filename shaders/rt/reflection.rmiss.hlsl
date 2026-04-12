@@ -32,10 +32,12 @@ struct ReflectionPayload {
 // Convert a world-space direction to SkyView LUT UV.
 // Matches the inverse of atmosphere_skyview.hlsl's skyViewUVToDir().
 float2 dirToSkyViewUV(float3 viewDir, float3 camPosKm) {
-    float3 up      = normalize(camPosKm);
-    float3 right   = normalize(cross(up, float3(0.0f, 0.0f, 1.0f)));
-    if (length(right) < 0.01f)
-        right = normalize(cross(up, float3(1.0f, 0.0f, 0.0f)));
+    float3 up       = normalize(camPosKm);
+    // Check cross-product length BEFORE normalising to handle near-pole cameras.
+    float3 rightRaw = cross(up, float3(0.0f, 0.0f, 1.0f));
+    if (length(rightRaw) < 0.01f)
+        rightRaw = cross(up, float3(1.0f, 0.0f, 0.0f));
+    float3 right   = normalize(rightRaw);
     float3 forward = cross(right, up);
 
     float localX = dot(viewDir, right);
@@ -44,7 +46,9 @@ float2 dirToSkyViewUV(float3 viewDir, float3 camPosKm) {
 
     float az = atan2(localZ, localX);
     float u  = frac(az / (2.0f * PI) + 1.0f);
-    float v  = 0.5f + 0.5f * sign(localY) * sqrt(abs(localY));
+    // sign(0) is undefined on some drivers → use explicit ternary for the horizon row.
+    float signY = (localY >= 0.0f) ? 1.0f : -1.0f;
+    float v  = 0.5f + 0.5f * signY * sqrt(abs(localY));
     return float2(u, v);
 }
 

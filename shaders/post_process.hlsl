@@ -46,9 +46,7 @@ struct PushBlock {
 };
 [[vk::push_constant]] PushBlock pc;
 
-// AP froxel depth constants — must match atmosphere_aerial_perspective.hlsl.
-static const float kApNear = 0.01f;  // km
-static const float kApFar  = 50.0f;  // km (== AtmospherePass apSliceFar)
+// AP froxel depth constants come from atmosphere_common.hlsl (AP_NEAR, AP_FAR).
 
 CameraData loadCamera(uint slot) {
     StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(slot)];
@@ -139,10 +137,10 @@ float4 PSMain(VSOut vs) : SV_Target {
             float3 worldKm  = worldPos * 0.001f; // metres → km
 
             float depthKm = length(worldKm - pc.cameraWorldPosKm.xyz);
-            depthKm = max(depthKm, kApNear);
+            depthKm = max(depthKm, AP_NEAR);
 
             // Log-distributed slice index matching atmosphere_aerial_perspective.hlsl
-            float w = saturate(log(depthKm / kApNear) / log(kApFar / kApNear));
+            float w = saturate(log(depthKm / AP_NEAR) / log(AP_FAR / AP_NEAR));
             float4 ap = g_apVolume.SampleLevel(samp, float3(uv, w), 0);
 
             // ap.rgb = in-scatter, ap.a = average transmittance
@@ -151,7 +149,8 @@ float4 PSMain(VSOut vs) : SV_Target {
     }
 
     // ---- 2. Exposure ----
-    color *= pow(2.0f, pc.exposureEV);
+    const float expMul = pow(2.0f, pc.exposureEV);
+    color *= expMul;
 
     // ---- 3. Bloom ----
     if (pc.bloomEnabled != 0u) {
@@ -174,15 +173,16 @@ float4 PSMain(VSOut vs) : SV_Target {
         };
         const float kBloomScale = 4.0f; // texel radius multiplier
 
+        // Threshold on luminance, not per-channel, so saturated highlights
+        // bloom with correct color instead of desaturating to grey halos.
         float3 bloomSum = float3(0.0f, 0.0f, 0.0f);
         [unroll]
         for (int i = 0; i < 13; ++i) {
             float3 c = hdrTex.SampleLevel(samp,
-                uv + kOffsets[i] * texelSize * kBloomScale, 0).rgb;
-            // Pre-exposure before threshold comparison so bloomThreshold is
-            // in EV-adjusted nits, not raw HDR.
-            c *= pow(2.0f, pc.exposureEV);
-            bloomSum += max(float3(0.0f, 0.0f, 0.0f), c - pc.bloomThreshold);
+                uv + kOffsets[i] * texelSize * kBloomScale, 0).rgb * expMul;
+            float luma = dot(c, float3(0.2126f, 0.7152f, 0.0722f));
+            float knee = max(0.0f, luma - pc.bloomThreshold);
+            bloomSum += c * knee;
         }
         color += bloomSum * (pc.bloomIntensity / 13.0f);
     }
