@@ -64,6 +64,7 @@ public:
     void drawSceneInfo(u32 primitiveCount, u32 tlasInstances);
     void drawUpscalerSettings(UpscalerSettings& settings);
     void drawPhysicsStats(f32 stepTimeMs, u32 bodyCount);
+    void drawPhysicsDebugPanel(bool& enabled, bool& depthTest);
 
 private:
     VkDevice         m_device = VK_NULL_HANDLE;

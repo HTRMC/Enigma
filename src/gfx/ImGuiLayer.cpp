@@ -239,4 +239,17 @@ void ImGuiLayer::drawPhysicsStats(f32 stepTimeMs, u32 bodyCount) {
     ImGui::End();
 }
 
+void ImGuiLayer::drawPhysicsDebugPanel(bool& enabled, bool& depthTest) {
+    ImGui::SetNextWindowPos({10.f, 340.f}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({260.f, 70.f}, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Physics Debug")) {
+        ImGui::Checkbox("Wireframes [F3]", &enabled);
+        if (enabled) {
+            ImGui::SameLine();
+            ImGui::Checkbox("Depth Test", &depthTest);
+        }
+    }
+    ImGui::End();
+}
+
 } // namespace enigma::gfx

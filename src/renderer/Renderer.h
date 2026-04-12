@@ -25,6 +25,7 @@
 #include "renderer/Upscaler.h"
 #include "renderer/UpscalerSettings.h"
 #include "physics/DeformationSystem.h"
+#include "physics/PhysicsDebugRenderer.h"
 #include "world/Terrain.h"
 
 #include <volk.h>
@@ -98,6 +99,8 @@ public:
     // Expose the last frame's GPU timing results for ImGui display.
     // Call after drawFrame() to get the previous frame's timings.
     const std::vector<gfx::GpuProfiler::ZoneResult>& gpuTimings() const { return m_lastGpuTimings; }
+
+    PhysicsDebugRenderer& physicsDebugRenderer() { return m_physicsDebugRenderer; }
 
 private:
     void uploadCameraData();
@@ -189,8 +192,10 @@ private:
 
     f32 m_wetnessFactor      = 0.0f;
 
-    DeformationSystem m_deformationSystem;
-    bool              m_deformationPending = false;
+    DeformationSystem    m_deformationSystem;
+    bool                 m_deformationPending = false;
+
+    PhysicsDebugRenderer m_physicsDebugRenderer;
 
     // Per-frame camera SSBOs (one per frame-in-flight, double-buffered).
     struct CameraBuffer {

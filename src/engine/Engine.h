@@ -35,11 +35,14 @@ public:
 
 private:
     Window   m_window;
+    // PhysicsWorld must be constructed before Renderer: its constructor calls
+    // ensureJoltInit() which sets JPH::Factory::sInstance. Renderer's
+    // m_physicsDebugRenderer inherits JPH::DebugRendererSimple whose ctor
+    // calls Initialize(), which dereferences the factory.
+    std::unique_ptr<PhysicsWorld>      m_physicsWorld;
     Renderer m_renderer;
     Input    m_input;
     Clock    m_clock;
-
-    std::unique_ptr<PhysicsWorld>      m_physicsWorld;
     std::unique_ptr<VehicleController> m_vehicle;
     PhysicsInterpolation               m_interpolation;
 };

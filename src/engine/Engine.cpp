@@ -11,10 +11,10 @@ constexpr u32 kDefaultWindowHeight = 720;
 
 Engine::Engine()
     : m_window(kDefaultWindowWidth, kDefaultWindowHeight, "Enigma")
+    , m_physicsWorld(std::make_unique<PhysicsWorld>())
     , m_renderer(m_window)
     , m_input(m_window)
     , m_clock() {
-    m_physicsWorld = std::make_unique<PhysicsWorld>();
 
     // Spawn vehicle at a default position.
     m_vehicle = std::make_unique<VehicleController>(

@@ -230,6 +230,17 @@ Renderer::Renderer(Window& window)
         m_window.handle(),
         m_swapchain->format(),
         m_swapchain->imageCount());
+
+    // Physics debug wireframe renderer.
+    PhysicsDebugInitInfo dbgInfo{};
+    dbgInfo.device              = m_device.get();
+    dbgInfo.allocator           = m_allocator.get();
+    dbgInfo.descriptorAllocator = m_descriptorAllocator.get();
+    dbgInfo.shaderManager       = m_shaderManager.get();
+    dbgInfo.globalSetLayout     = m_descriptorAllocator->layout();
+    dbgInfo.colorFormat         = m_swapchain->format();
+    dbgInfo.depthFormat         = GBufferPass::kDepthFormat;
+    m_physicsDebugRenderer.init(dbgInfo);
 }
 
 Renderer::~Renderer() {
@@ -249,6 +260,9 @@ Renderer::~Renderer() {
     if (m_gbufferSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device->logical(), m_gbufferSampler, nullptr);
     }
+
+    // Physics debug renderer owns a VMA buffer — must be destroyed before VMA teardown.
+    m_physicsDebugRenderer.destroy();
 
     // Clean up camera buffers.
     for (auto& cb : m_cameraBuffers) {
@@ -405,6 +419,8 @@ void Renderer::drawFrame() {
             m_tlasSlot > 0 ? 1u : 0u);
         m_imguiLayer->drawUpscalerSettings(m_upscalerSettings);
         m_imguiLayer->drawPhysicsStats(0.0f, 0u); // wired up later when physics is exposed
+        m_imguiLayer->drawPhysicsDebugPanel(m_physicsDebugRenderer.enabled,
+                                             m_physicsDebugRenderer.depthTestEnabled);
 
         // Settings panel — sun light + scene knobs.
         ImGui::SetNextWindowPos({310.f, 10.f}, ImGuiCond_FirstUseEver);
@@ -609,6 +625,32 @@ void Renderer::drawFrame() {
             m_gpuProfiler->endZone(cmd);
         };
         m_renderGraph->addRasterPass(std::move(lightPassDesc));
+
+        // Physics debug wireframe overlay — inserted after lighting so it
+        // composites on top of the final lit image. Only active when enabled
+        // and there are lines to draw (upload() sets the count).
+        if (m_physicsDebugRenderer.enabled) {
+            m_physicsDebugRenderer.upload();
+
+            gfx::RenderGraph::RasterPassDesc debugDesc{};
+            debugDesc.name        = "PhysicsDebugPass";
+            debugDesc.colorTargets = {colorHandle};
+            debugDesc.colorLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
+            if (m_physicsDebugRenderer.depthTestEnabled) {
+                // Re-attach the G-buffer depth read-only so lines are occluded
+                // by scene geometry. depthWriteEnable=false in the pipeline
+                // ensures the depth buffer is never modified.
+                debugDesc.depthTarget = gbufDepth;
+                debugDesc.depthLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+            }
+            debugDesc.execute = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "PhysicsDebugPass");
+                m_physicsDebugRenderer.drawFrame(cmd, m_descriptorAllocator->globalSet(),
+                                                  ext, cameraSlot);
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(debugDesc));
+        }
 
     } else {
         // ---- Forward fallback: TrianglePass ----
