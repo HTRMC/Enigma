@@ -22,6 +22,7 @@
 #include "renderer/WetRoadPass.h"
 #include "renderer/Denoiser.h"
 #include "renderer/TrianglePass.h"
+#include "renderer/AtmosphereSettings.h"
 #include "renderer/Upscaler.h"
 #include "renderer/UpscalerSettings.h"
 #include "physics/DeformationSystem.h"
@@ -163,6 +164,17 @@ private:
     Terrain* m_terrain = nullptr;
 
     SunLight m_light{};
+
+    // Atmosphere and post-process settings driven from the UI.
+    AtmosphereSettings m_atmosphereSettings{};
+
+    // Canonical sun world direction (FROM surface TO sun, unit length).
+    // Computed once per frame from m_atmosphereSettings.sunAzimuth/Elevation
+    // and fanned to LightingPass, RT passes, and AtmospherePass push constants.
+    // No shader ever recomputes this from az/el — grep "fromAzimuthElevation"
+    // should only match Renderer.cpp.
+    vec3 m_sunWorldDir{0.574f, 0.574f, 0.574f}; // ~45° elevation, 135° azimuth
+    bool m_sunDirty = true; // triggers LUT rebake in AtmospherePass
 
     // Previous frame's viewProj — uploaded to the camera SSBO for motion vectors.
     mat4 m_prevViewProj{1.0f};

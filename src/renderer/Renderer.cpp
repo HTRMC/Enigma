@@ -46,6 +46,19 @@ namespace enigma {
 
 namespace {
 
+// Convert spherical sun angles (degrees) to a unit world-space direction
+// pointing FROM the surface TO the sun (Y-up world, azimuth clockwise from Z+).
+// This is the ONLY place az/el are used — all shaders receive the resulting vec3.
+vec3 fromAzimuthElevation(f32 azimuthDeg, f32 elevationDeg) {
+    const f32 az = glm::radians(azimuthDeg);
+    const f32 el = glm::radians(elevationDeg);
+    return glm::normalize(vec3{
+        glm::cos(el) * glm::sin(az),
+        glm::sin(el),
+        glm::cos(el) * glm::cos(az)
+    });
+}
+
 // Halton sequence value for a given index and base (typically 2 or 3).
 // Returns a f32 in [0, 1).
 f32 haltonJitter(u32 index, u32 base) {
@@ -330,6 +343,18 @@ void Renderer::drawFrame() {
 
     m_shaderHotReload->poll();
 
+    // Compute canonical sun direction once per frame from UI az/el.
+    // This is the single source of truth fanned to all pass push constants.
+    {
+        const vec3 newDir = fromAzimuthElevation(
+            m_atmosphereSettings.sunAzimuth,
+            m_atmosphereSettings.sunElevation);
+        if (glm::any(glm::notEqual(newDir, m_sunWorldDir))) {
+            m_sunWorldDir = newDir;
+            m_sunDirty    = true;
+        }
+    }
+
     VkDevice dev = m_device->logical();
     gfx::FrameContext& frame = m_frames->get(m_frameIndex);
 
@@ -431,10 +456,22 @@ void Renderer::drawFrame() {
         ImGui::SetNextWindowPos({310.f, 10.f}, ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize({300.f, 260.f}, ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Settings")) {
-            if (ImGui::CollapsingHeader("Sun Light", ImGuiTreeNodeFlags_DefaultOpen)) {
-                ImGui::SliderFloat3("Direction",  &m_light.direction.x, -1.f, 1.f);
-                ImGui::ColorEdit3 ("Color",       &m_light.color.x);
-                ImGui::SliderFloat("Intensity",   &m_light.intensity,    0.f, 20.f);
+            if (ImGui::CollapsingHeader("Atmosphere", ImGuiTreeNodeFlags_DefaultOpen)) {
+                ImGui::SliderFloat("Sun Azimuth",   &m_atmosphereSettings.sunAzimuth,   0.f,   360.f, "%.1f deg");
+                ImGui::SliderFloat("Sun Elevation", &m_atmosphereSettings.sunElevation, -10.f,  90.f, "%.1f deg");
+                ImGui::SliderFloat("Sun Intensity", &m_atmosphereSettings.sunIntensity,  0.f,   20.f);
+                ImGui::Separator();
+                ImGui::SliderFloat("Exposure EV",        &m_atmosphereSettings.exposureEV,      -6.f, 6.f, "%.2f EV");
+                ImGui::SliderFloat("Bloom Threshold",    &m_atmosphereSettings.bloomThreshold,   0.f, 4.f);
+                ImGui::SliderFloat("Bloom Intensity",    &m_atmosphereSettings.bloomIntensity,   0.f, 2.f);
+                ImGui::Checkbox("Bloom",              &m_atmosphereSettings.bloomEnabled);
+                ImGui::SameLine();
+                ImGui::Checkbox("Aerial Perspective", &m_atmosphereSettings.aerialPerspectiveEnabled);
+                const char* tonemapItems[] = {"AgX", "ACES"};
+                ImGui::Combo("Tonemap", &m_atmosphereSettings.tonemapMode, tonemapItems, 2);
+            }
+            if (ImGui::CollapsingHeader("Sun Light")) {
+                ImGui::ColorEdit3 ("Color",    &m_light.color.x);
             }
             if (ImGui::CollapsingHeader("Environment")) {
                 ImGui::SliderFloat("Wetness", &m_wetnessFactor, 0.f, 1.f);
@@ -580,7 +617,7 @@ void Renderer::drawFrame() {
                 m_shadowPass->record(cmd, m_descriptorAllocator->globalSet(), ext,
                                       m_gbufNormalSlot, m_gbufDepthSlot,
                                       cameraSlot, m_tlasSlot, m_shadowSlot,
-                                      vec4{m_light.direction, 0.02f}); // 0.02 rad cone angle
+                                      vec4{m_sunWorldDir, 0.02f}); // 0.02 rad cone angle
                 m_gpuProfiler->endZone(cmd);
             };
             m_renderGraph->addRasterPass(std::move(rtShadowDesc));
@@ -633,7 +670,7 @@ void Renderer::drawFrame() {
                                     m_gbufAlbedoSlot, m_gbufNormalSlot,
                                     m_gbufMetalRoughSlot, m_gbufDepthSlot,
                                     cameraSlot, m_gbufferSamplerSlot,
-                                    vec4{m_light.direction, m_light.intensity},
+                                    vec4{m_sunWorldDir, m_atmosphereSettings.sunIntensity},
                                     vec4{m_light.color, 0.0f});
             m_gpuProfiler->endZone(cmd);
         };
