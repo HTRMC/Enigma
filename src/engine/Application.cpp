@@ -132,6 +132,8 @@ int Application::run(int argc, char** argv) {
 
     rebuildHeightField({0.0f, 0.0f});
 
+    bool f3PrevDown = false;
+
     // GPU-driven clipmap terrain — built and wired into the G-buffer pass.
     Terrain terrain(renderer.device(),
                     renderer.allocator(),
@@ -218,6 +220,21 @@ int Application::run(int argc, char** argv) {
 
         // Rebuild terrain chunk positions for this frame.
         terrain.update(camera.position);
+
+        // F3 edge-detect toggle for physics debug wireframe overlay.
+        {
+            const bool f3Down = input.isKeyDown(GLFW_KEY_F3);
+            if (f3Down && !f3PrevDown) {
+                renderer.physicsDebugRenderer().enabled =
+                    !renderer.physicsDebugRenderer().enabled;
+            }
+            f3PrevDown = f3Down;
+        }
+
+        // Gather wireframe geometry this frame (clear + DrawBodies via Jolt).
+        if (renderer.physicsDebugRenderer().enabled) {
+            renderer.physicsDebugRenderer().gather(engine.physics().system());
+        }
 
         renderer.drawFrame();
     }
