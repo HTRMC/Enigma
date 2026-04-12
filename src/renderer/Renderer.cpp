@@ -123,7 +123,7 @@ Renderer::Renderer(Window& window)
     m_lightingPass = std::make_unique<LightingPass>(*m_device);
     m_lightingPass->buildPipeline(*m_shaderManager,
                                    m_descriptorAllocator->layout(),
-                                   m_swapchain->format());
+                                   VK_FORMAT_R16G16B16A16_SFLOAT);
     m_lightingPass->registerHotReload(*m_shaderHotReload);
 
     // RT reflection pass.
@@ -238,9 +238,11 @@ Renderer::Renderer(Window& window)
     dbgInfo.descriptorAllocator = m_descriptorAllocator.get();
     dbgInfo.shaderManager       = m_shaderManager.get();
     dbgInfo.globalSetLayout     = m_descriptorAllocator->layout();
-    dbgInfo.colorFormat         = m_swapchain->format();
+    dbgInfo.colorFormat         = VK_FORMAT_R16G16B16A16_SFLOAT;
     dbgInfo.depthFormat         = GBufferPass::kDepthFormat;
     m_physicsDebugRenderer.init(dbgInfo);
+
+    createHdrColor(m_swapchain->extent());
 }
 
 Renderer::~Renderer() {
@@ -260,6 +262,9 @@ Renderer::~Renderer() {
     if (m_gbufferSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device->logical(), m_gbufferSampler, nullptr);
     }
+
+    // HDR intermediate — destroyed before VMA teardown.
+    destroyHdrColor();
 
     // Physics debug renderer owns a VMA buffer — must be destroyed before VMA teardown.
     m_physicsDebugRenderer.destroy();
@@ -470,6 +475,14 @@ void Renderer::drawFrame() {
         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, // must end ready for present
         VK_IMAGE_ASPECT_COLOR_BIT);
 
+    // HDR intermediate — all deferred passes write here; upscaler reads from it.
+    const auto hdrColorHandle = m_renderGraph->importImage(
+        "hdr_color",
+        m_hdrColor, m_hdrColorView, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_LAYOUT_UNDEFINED,                  // re-written every frame
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   // upscaler reads as SRV
+        VK_IMAGE_ASPECT_COLOR_BIT);
+
     const u32 cameraSlot = m_cameraBuffers[m_frameIndex].bindlessSlot;
 
     if (m_scene != nullptr) {
@@ -611,7 +624,7 @@ void Renderer::drawFrame() {
 
         gfx::RenderGraph::RasterPassDesc lightPassDesc{};
         lightPassDesc.name          = "LightingPass";
-        lightPassDesc.colorTargets  = {colorHandle};
+        lightPassDesc.colorTargets  = {hdrColorHandle};
         lightPassDesc.sampledInputs = {gbufAlbedo, gbufNormal, gbufMetalRough, gbufDepth};
         lightPassDesc.clearColor    = {{0.02f, 0.02f, 0.05f, 1.0f}};
         lightPassDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
@@ -634,7 +647,7 @@ void Renderer::drawFrame() {
 
             gfx::RenderGraph::RasterPassDesc debugDesc{};
             debugDesc.name        = "PhysicsDebugPass";
-            debugDesc.colorTargets = {colorHandle};
+            debugDesc.colorTargets = {hdrColorHandle};
             debugDesc.colorLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
             if (m_physicsDebugRenderer.depthTestEnabled) {
                 // Re-attach the G-buffer depth read-only so lines are occluded
@@ -689,7 +702,7 @@ void Renderer::drawFrame() {
 
     if (m_upscaler && m_scene != nullptr) {
         m_upscaler->evaluate(frame.commandBuffer,
-                             m_swapchain->view(imageIndex),
+                             m_hdrColorView,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                              depthView,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
@@ -927,6 +940,77 @@ void Renderer::resizeGBuffer(VkExtent2D extent) {
 
     m_reflectionDenoiser->allocate(extent, RTReflectionPass::kOutputFormat);
     m_descriptorAllocator->updateStorageImage(m_reflDenoiseSlot, m_reflectionDenoiser->outputView());
+
+    // Recreate HDR intermediate at the new extent and patch bindless slots.
+    createHdrColor(extent);
+}
+
+void Renderer::createHdrColor(VkExtent2D extent) {
+    if (m_hdrColor != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(m_device->logical());
+        destroyHdrColor();
+    }
+
+    VkImageCreateInfo imgCI{};
+    imgCI.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgCI.imageType     = VK_IMAGE_TYPE_2D;
+    imgCI.format        = VK_FORMAT_R16G16B16A16_SFLOAT;
+    imgCI.extent        = {extent.width, extent.height, 1};
+    imgCI.mipLevels     = 1;
+    imgCI.arrayLayers   = 1;
+    imgCI.samples       = VK_SAMPLE_COUNT_1_BIT;
+    imgCI.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    imgCI.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                        | VK_IMAGE_USAGE_SAMPLED_BIT
+                        | VK_IMAGE_USAGE_STORAGE_BIT
+                        | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    imgCI.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    imgCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo allocCI{};
+    allocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+
+    ENIGMA_VK_CHECK(vmaCreateImage(m_allocator->handle(), &imgCI, &allocCI,
+                                   &m_hdrColor, &m_hdrColorAlloc, nullptr));
+
+    VkImageViewCreateInfo viewCI{};
+    viewCI.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCI.image            = m_hdrColor;
+    viewCI.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    viewCI.format           = VK_FORMAT_R16G16B16A16_SFLOAT;
+    viewCI.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+    ENIGMA_VK_CHECK(vkCreateImageView(m_device->logical(), &viewCI, nullptr, &m_hdrColorView));
+
+    if (m_hdrColorSampledSlot == UINT32_MAX) {
+        m_hdrColorSampledSlot = m_descriptorAllocator->registerSampledImage(
+            m_hdrColorView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    } else {
+        m_descriptorAllocator->updateSampledImage(
+            m_hdrColorSampledSlot, m_hdrColorView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+
+    if (m_hdrColorStorageSlot == UINT32_MAX) {
+        m_hdrColorStorageSlot = m_descriptorAllocator->registerStorageImage(m_hdrColorView);
+    } else {
+        m_descriptorAllocator->updateStorageImage(m_hdrColorStorageSlot, m_hdrColorView);
+    }
+
+    ENIGMA_LOG_INFO("[renderer] HDR intermediate {}x{} created (sampled={}, storage={})",
+                    extent.width, extent.height,
+                    m_hdrColorSampledSlot, m_hdrColorStorageSlot);
+}
+
+void Renderer::destroyHdrColor() {
+    if (m_hdrColorView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device->logical(), m_hdrColorView, nullptr);
+        m_hdrColorView = VK_NULL_HANDLE;
+    }
+    if (m_hdrColor != VK_NULL_HANDLE) {
+        vmaDestroyImage(m_allocator->handle(), m_hdrColor, m_hdrColorAlloc);
+        m_hdrColor      = VK_NULL_HANDLE;
+        m_hdrColorAlloc = nullptr;
+    }
 }
 
 } // namespace enigma

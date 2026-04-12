@@ -108,6 +108,11 @@ private:
     void resizeGBuffer(VkExtent2D extent);
     // Build BLASes for all scene primitives and the TLAS.
     void buildAccelerationStructures();
+    // Allocate/reallocate the HDR intermediate (R16G16B16A16_SFLOAT).
+    // If already allocated, idles the device and recreates at the new size.
+    void createHdrColor(VkExtent2D extent);
+    // Destroy HDR intermediate image + view. Does not idle the device.
+    void destroyHdrColor();
 
     Window& m_window;
 
@@ -196,6 +201,16 @@ private:
     bool                 m_deformationPending = false;
 
     PhysicsDebugRenderer m_physicsDebugRenderer;
+
+    // HDR linear intermediate — R16G16B16A16_SFLOAT, render-extent sized.
+    // All deferred passes (lighting, physics debug, sky, post-process) target
+    // this buffer. The upscaler reads from it; only its output touches the
+    // swapchain image.
+    VkImage       m_hdrColor             = VK_NULL_HANDLE;
+    VkImageView   m_hdrColorView         = VK_NULL_HANDLE;
+    VmaAllocation m_hdrColorAlloc        = nullptr;
+    u32           m_hdrColorSampledSlot  = UINT32_MAX;
+    u32           m_hdrColorStorageSlot  = UINT32_MAX;
 
     // Per-frame camera SSBOs (one per frame-in-flight, double-buffered).
     struct CameraBuffer {

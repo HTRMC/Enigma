@@ -159,8 +159,5 @@ float4 PSMain(VSOut vs) : SV_Target {
 
     float3 color = ambient + Lo;
 
-    // ACES tone mapping.
-    color = ACES(color);
-
     return float4(color, 1.0);
 }
