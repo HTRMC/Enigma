@@ -182,7 +182,9 @@ float4 PSMain(VSOut vs) : SV_Target {
                 uv + kOffsets[i] * texelSize * kBloomScale, 0).rgb * expMul;
             float luma = dot(c, float3(0.2126f, 0.7152f, 0.0722f));
             float knee = max(0.0f, luma - pc.bloomThreshold);
-            bloomSum += c * knee;
+            // Colour-preserving weight: ratio in [0,1] so contribution stays
+            // proportional to the original colour, not quadratically amplified.
+            bloomSum += c * (knee / max(luma, 1e-6f));
         }
         color += bloomSum * (pc.bloomIntensity / 13.0f);
     }

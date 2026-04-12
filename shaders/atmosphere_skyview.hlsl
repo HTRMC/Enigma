@@ -117,8 +117,10 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
         camPos = float3(0.0f, R_EARTH + 0.001f, 0.0f); // fallback at origin
 
     float3 up      = normalize(camPos);
-    float3 right   = normalize(cross(up, float3(0, 0, 1)));
-    if (length(right) < 0.01f) right = normalize(cross(up, float3(1, 0, 0)));
+    // Check cross-product length BEFORE normalising (same pattern as sky_background.hlsl).
+    float3 rightRaw = cross(up, float3(0, 0, 1));
+    if (length(rightRaw) < 0.01f) rightRaw = cross(up, float3(1, 0, 0));
+    float3 right = normalize(rightRaw);
     float3 forward = cross(right, up);
 
     // Decode view direction in local frame
