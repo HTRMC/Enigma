@@ -146,6 +146,18 @@ Renderer::Renderer(Window& window)
                               VK_FORMAT_R16G16B16A16_SFLOAT);
     m_skyPass->registerHotReload(*m_shaderHotReload);
 
+    // Atmosphere pass — must be initialized before PostProcessPass reads its AP layout.
+    m_atmospherePass = std::make_unique<AtmospherePass>();
+    {
+        AtmospherePass::InitInfo atmInfo{};
+        atmInfo.device              = m_device.get();
+        atmInfo.allocator           = m_allocator.get();
+        atmInfo.descriptorAllocator = m_descriptorAllocator.get();
+        atmInfo.shaderManager       = m_shaderManager.get();
+        atmInfo.globalSetLayout     = m_descriptorAllocator->layout();
+        m_atmospherePass->init(atmInfo);
+    }
+
     // Post-process pass — AP apply + bloom + tonemap → swapchain.
     // Uses the swapchain format since it writes the final display-ready image.
     m_postProcessPass = std::make_unique<PostProcessPass>(*m_device);
@@ -272,18 +284,6 @@ Renderer::Renderer(Window& window)
     m_physicsDebugRenderer.init(dbgInfo);
 
     createHdrColor(m_swapchain->extent());
-
-    // Atmosphere LUT pass — must be initialized after sampler is registered.
-    m_atmospherePass = std::make_unique<AtmospherePass>();
-    {
-        AtmospherePass::InitInfo atmInfo{};
-        atmInfo.device              = m_device.get();
-        atmInfo.allocator           = m_allocator.get();
-        atmInfo.descriptorAllocator = m_descriptorAllocator.get();
-        atmInfo.shaderManager       = m_shaderManager.get();
-        atmInfo.globalSetLayout     = m_descriptorAllocator->layout();
-        m_atmospherePass->init(atmInfo);
-    }
 
     // Bake Transmittance + MultiScatter LUTs on startup (one-shot command buffer).
     {
