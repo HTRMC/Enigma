@@ -19,15 +19,23 @@
 [[vk::binding(0, 1)]] RWTexture3D<float4> g_apVolume    : register(u0, space1);
 
 struct PushBlock {
-    float4x4 invViewProj;        // inverse view-projection for world pos reconstruction
-    float3   sunDirection;
-    float    sunIntensity;
-    float3   cameraWorldPos;     // km from planet center
-    float    apSliceFar;         // world-space distance of the far slice (km)
-    uint     transmittanceLutSlot;
-    uint     multiScatterLutSlot;
-    uint     samplerSlot;
-    uint     _pad;
+    // Camera basis vectors + half-FOV tangents (replaces invViewProj to avoid
+    // all column/row-major matrix convention issues in push constants).
+    // Layout: each float3+float pair is 16 bytes — unambiguous on all drivers.
+    float3 cameraRight;      // world-space right vector (unit length)
+    float  tanHalfFovX;      // tan(horizontal FOV / 2)
+    float3 cameraUp;         // world-space up vector (unit length)
+    float  tanHalfFovY;      // tan(vertical FOV / 2)
+    float3 cameraForward;    // world-space forward vector (unit length, into scene)
+    float  _pad0;
+    float3 sunDirection;
+    float  sunIntensity;
+    float3 cameraWorldPos;   // km from planet center
+    float  apSliceFar;       // world-space distance of the far slice (km)
+    uint   transmittanceLutSlot;
+    uint   multiScatterLutSlot;
+    uint   samplerSlot;
+    uint   _pad1;
 };
 [[vk::push_constant]] PushBlock pc;
 
@@ -46,16 +54,29 @@ void CSMain(uint3 tid : SV_DispatchThreadID) {
     // Froxel center in normalized [0,1]^3 space
     float3 uvw = (float3(tid) + 0.5f) / float3(dims);
 
-    // Reconstruct world position of froxel center
-    float depth    = sliceToDepth(uvw.z);
-    float2 ndc     = uvw.xy * 2.0f - 1.0f;
-    float4 clipPos = float4(ndc.x, ndc.y, 0.5f, 1.0f);
-    float4 worldH  = mul(pc.invViewProj, clipPos);
-    float3 worldDir = normalize(worldH.xyz / worldH.w - pc.cameraWorldPos);
-    float3 froxelPos = pc.cameraWorldPos + worldDir * depth;
-
-    // Ray march from camera to froxel center, accumulating in-scatter and transmittance
+    // Camera position in km from planet centre.
+    // If the renderer world-space scale is metres the camera km coords will
+    // be near zero (at the planet centre, underground).  Snap to just above
+    // the surface using the same fallback as atmosphere_skyview.hlsl.
     float3 camPos = pc.cameraWorldPos;
+    if (dot(camPos, camPos) < 1.0f)
+        camPos = float3(0.0f, R_EARTH + 0.001f, 0.0f);
+
+    // View-ray direction for this froxel column.
+    // Reconstructed from camera basis vectors + FOV tangents — no matrix
+    // inversion or column/row-major ambiguity.  Each froxel column (uvw.xy)
+    // maps to a unique screen-space NDC:
+    //   ndc ∈ [-1,+1]^2,  +X = right,  +Y = DOWN in Vulkan NDC.
+    // Therefore screen-top (ndc.y=-1) → +cameraUp, screen-bottom → -cameraUp.
+    float depth = sliceToDepth(uvw.z);
+    float2 ndc  = uvw.xy * 2.0f - 1.0f;
+    float3 worldDir = normalize(
+         ndc.x * pc.tanHalfFovX * pc.cameraRight
+        - ndc.y * pc.tanHalfFovY * pc.cameraUp   // flip: NDC +Y = screen-down = -up
+        + pc.cameraForward);
+    float3 froxelPos = camPos + worldDir * depth;
+
+    // Ray march from camera to froxel centre, accumulating in-scatter and transmittance
     float3 marchDir = worldDir;
 
     // Clamp march to atmosphere boundary

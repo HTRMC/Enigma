@@ -23,8 +23,8 @@ struct PostProcessPushBlock {
     u32  tonemapMode;     //  4  (0=AgX, 1=ACES)
     u32  bloomEnabled;    //  4
     u32  apEnabled;       //  4
-    u32  _pad0;           //  4
-    u32  _pad1;           //  4
+    u32  apSamplerSlot;   //  4  linear sampler for the AP volume
+    f32  apStrength;      //  4  0=off, 1=full physical (lerp weight)
 };                        // Total: 64 bytes
 
 static_assert(sizeof(PostProcessPushBlock) == 64);
@@ -121,6 +121,7 @@ void PostProcessPass::record(VkCommandBuffer cmd,
                               u32 depthSlot,
                               u32 cameraSlot,
                               u32 samplerSlot,
+                              u32 apSamplerSlot,
                               const AtmosphereSettings& settings,
                               vec4 cameraWorldPosKm) {
     ENIGMA_ASSERT(m_pipeline != nullptr && "PostProcessPass::record before buildPipeline");
@@ -155,6 +156,8 @@ void PostProcessPass::record(VkCommandBuffer cmd,
     pc.tonemapMode    = static_cast<u32>(settings.tonemapMode);
     pc.bloomEnabled   = settings.bloomEnabled  ? 1u : 0u;
     pc.apEnabled      = settings.aerialPerspectiveEnabled ? 1u : 0u;
+    pc.apSamplerSlot  = apSamplerSlot;
+    pc.apStrength     = settings.aerialPerspectiveStrength;
 
     vkCmdPushConstants(cmd, m_pipeline->layout(),
                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

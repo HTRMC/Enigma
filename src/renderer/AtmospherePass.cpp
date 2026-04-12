@@ -55,17 +55,24 @@ struct SkyViewPush {
 static_assert(sizeof(SkyViewPush) == 48);
 
 struct APPush {
-    float invViewProj[16];  // row-major 4x4
-    float sunDirX, sunDirY, sunDirZ;
-    float sunIntensity;
-    float camX, camY, camZ;
-    float apSliceFar;
-    u32  transmittanceLutSlot;
-    u32  multiScatterLutSlot;
-    u32  samplerSlot;
-    u32  _pad;
-};
-static_assert(sizeof(APPush) == 112);
+    // Camera basis vectors — each float3+float pair is 16 bytes, unambiguous
+    // in both HLSL C-pack and std430 layouts (avoids float3 alignment disputes).
+    float cameraRight[3];    // 12 bytes, offset  0
+    float tanHalfFovX;       //  4 bytes, offset 12
+    float cameraUp[3];       // 12 bytes, offset 16
+    float tanHalfFovY;       //  4 bytes, offset 28
+    float cameraForward[3];  // 12 bytes, offset 32
+    float _pad0;             //  4 bytes, offset 44
+    float sunDirX, sunDirY, sunDirZ;  // 12 bytes, offset 48
+    float sunIntensity;      //  4 bytes, offset 60
+    float camX, camY, camZ;  // 12 bytes, offset 64
+    float apSliceFar;        //  4 bytes, offset 76
+    u32  transmittanceLutSlot; // offset 80
+    u32  multiScatterLutSlot;  // offset 84
+    u32  samplerSlot;          // offset 88
+    u32  _pad1;                // offset 92
+};                           // Total: 96 bytes
+static_assert(sizeof(APPush) == 96);
 
 // ---------------------------------------------------------------------------
 
@@ -125,7 +132,7 @@ void AtmospherePass::init(const InitInfo& info) {
         VkPushConstantRange pcRange{};
         pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         pcRange.offset     = 0;
-        pcRange.size       = sizeof(APPush);
+        pcRange.size = sizeof(APPush);
 
         VkPipelineLayoutCreateInfo layoutCI{};
         layoutCI.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
@@ -243,7 +250,11 @@ void AtmospherePass::updatePerFrame(VkCommandBuffer cmd,
                                      const AtmosphereSettings& settings,
                                      const vec3& sunWorldDir,
                                      const vec3& cameraWorldPosKm,
-                                     const mat4& invViewProj,
+                                     const vec3& cameraRight,
+                                     const vec3& cameraUp,
+                                     const vec3& cameraForward,
+                                     float tanHalfFovX,
+                                     float tanHalfFovY,
                                      u32 samplerSlot) {
     VkDescriptorSet globalSet = m_descriptorAllocator->globalSet();
 
@@ -280,11 +291,15 @@ void AtmospherePass::updatePerFrame(VkCommandBuffer cmd,
                   (kSkyViewSize.height + 7) / 8,
                   1);
 
+    // SkyView LUT is read by the sky background fragment shader and the RT
+    // reflection miss shader — include both stages so the layout transition
+    // and memory dependency are visible before those passes run.
     transitionImage(cmd, m_skyViewImg,
                     VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
                     VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
-                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
                     VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
 
     // ---- Aerial Perspective Volume ----
@@ -301,10 +316,18 @@ void AtmospherePass::updatePerFrame(VkCommandBuffer cmd,
                             0, 2, apSets, 0, nullptr);
 
     APPush apPush{};
-    // Column-major glm mat4 → row-major float[16] for HLSL float4x4
-    for (int col = 0; col < 4; ++col)
-        for (int row = 0; row < 4; ++row)
-            apPush.invViewProj[row * 4 + col] = invViewProj[col][row];
+    apPush.cameraRight[0]  = cameraRight.x;
+    apPush.cameraRight[1]  = cameraRight.y;
+    apPush.cameraRight[2]  = cameraRight.z;
+    apPush.tanHalfFovX     = tanHalfFovX;
+    apPush.cameraUp[0]     = cameraUp.x;
+    apPush.cameraUp[1]     = cameraUp.y;
+    apPush.cameraUp[2]     = cameraUp.z;
+    apPush.tanHalfFovY     = tanHalfFovY;
+    apPush.cameraForward[0] = cameraForward.x;
+    apPush.cameraForward[1] = cameraForward.y;
+    apPush.cameraForward[2] = cameraForward.z;
+    apPush._pad0            = 0.0f;
     apPush.sunDirX              = sunWorldDir.x;
     apPush.sunDirY              = sunWorldDir.y;
     apPush.sunDirZ              = sunWorldDir.z;

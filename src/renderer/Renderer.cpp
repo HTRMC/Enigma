@@ -40,6 +40,7 @@
 #endif
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 namespace enigma {
@@ -131,6 +132,20 @@ Renderer::Renderer(Window& window)
     samplerCI.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     ENIGMA_VK_CHECK(vkCreateSampler(m_device->logical(), &samplerCI, nullptr, &m_gbufferSampler));
     m_gbufferSamplerSlot = m_descriptorAllocator->registerSampler(m_gbufferSampler);
+
+    // Trilinear clamp sampler — used for the AP volume and atmosphere LUTs
+    // so that the low-resolution (32³) froxel grid blends smoothly instead of
+    // stepping at each froxel boundary and producing horizontal bands.
+    VkSamplerCreateInfo linearCI{};
+    linearCI.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    linearCI.magFilter    = VK_FILTER_LINEAR;
+    linearCI.minFilter    = VK_FILTER_LINEAR;
+    linearCI.mipmapMode   = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    linearCI.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    linearCI.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    linearCI.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    ENIGMA_VK_CHECK(vkCreateSampler(m_device->logical(), &linearCI, nullptr, &m_linearSampler));
+    m_linearSamplerSlot = m_descriptorAllocator->registerSampler(m_linearSampler);
 
     // Deferred lighting pass.
     m_lightingPass = std::make_unique<LightingPass>(*m_device);
@@ -347,9 +362,12 @@ Renderer::~Renderer() {
         m_upscaler->shutdown();
     }
 
-    // Clean up G-buffer sampler (pass objects destroy their own images/pipelines).
+    // Clean up samplers (pass objects destroy their own images/pipelines).
     if (m_gbufferSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device->logical(), m_gbufferSampler, nullptr);
+    }
+    if (m_linearSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device->logical(), m_linearSampler, nullptr);
     }
 
     // Atmosphere pass owns LUT images + pipelines.
@@ -387,6 +405,12 @@ void Renderer::uploadCameraData() {
     GpuCameraData data{};
     if (m_camera != nullptr) {
         data = m_camera->gpuData(aspect);
+        // Cache camera basis vectors and FOV tangents for the AP bake shader.
+        m_cameraRight   = m_camera->right();
+        m_cameraUp      = m_camera->up();
+        m_cameraForward = m_camera->forward();
+        m_tanHalfFovY   = std::tan(m_camera->fovY * 0.5f);
+        m_tanHalfFovX   = m_tanHalfFovY * aspect;
     } else {
         // Identity camera fallback.
         data.view        = mat4{1.0f};
@@ -394,6 +418,7 @@ void Renderer::uploadCameraData() {
         data.viewProj    = mat4{1.0f};
         data.invViewProj = mat4{1.0f};
         data.worldPos    = vec4{0.0f, 0.0f, 0.0f, 1.0f};
+        // Basis vectors stay at their initialized defaults.
     }
 
     // Inject previous frame's viewProj for motion vector computation.
@@ -570,7 +595,11 @@ void Renderer::drawFrame() {
             m_atmosphereSettings,
             m_sunWorldDir,
             m_cameraWorldPos * 0.001f, // metres → km
-            m_invViewProj,
+            m_cameraRight,
+            m_cameraUp,
+            m_cameraForward,
+            m_tanHalfFovX,
+            m_tanHalfFovY,
             m_gbufferSamplerSlot);
     }
 
@@ -615,6 +644,8 @@ void Renderer::drawFrame() {
                 ImGui::Checkbox("Bloom",              &m_atmosphereSettings.bloomEnabled);
                 ImGui::SameLine();
                 ImGui::Checkbox("Aerial Perspective", &m_atmosphereSettings.aerialPerspectiveEnabled);
+                if (m_atmosphereSettings.aerialPerspectiveEnabled)
+                    ImGui::SliderFloat("AP Strength", &m_atmosphereSettings.aerialPerspectiveStrength, 0.0f, 1.0f);
                 const char* tonemapItems[] = {"AgX", "ACES"};
                 ImGui::Combo("Tonemap", &m_atmosphereSettings.tonemapMode, tonemapItems, 2);
             }
@@ -901,6 +932,7 @@ void Renderer::drawFrame() {
                     m_gbufDepthSlot,
                     cameraSlot,
                     m_gbufferSamplerSlot,
+                    m_linearSamplerSlot,
                     m_atmosphereSettings,
                     vec4{m_cameraWorldPos * 0.001f, 0.0f}); // metres → km
                 m_gpuProfiler->endZone(cmd);

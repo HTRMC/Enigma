@@ -11,14 +11,15 @@ struct AtmosphereSettings {
     float sunElevation =  45.0f; // degrees above horizon, -10..90 (UI only)
     float sunIntensity =  10.0f;
 
-    float exposureEV       = 0.0f;  // EV offset applied pre-tone-map
-    float bloomThreshold   = 1.0f;  // linear luminance threshold
-    float bloomIntensity   = 0.8f;
+    float exposureEV       = -3.0f; // EV offset applied pre-tone-map (-3 EV ÷8 brings sunIntensity=10 into AgX sweet spot)
+    float bloomThreshold   = 2.0f;  // post-exposure luminance threshold: fires on bright specular/emissives only
+    float bloomIntensity   = 0.4f;
 
     int   tonemapMode = 0;  // 0 = AgX, 1 = ACES
 
-    bool bloomEnabled              = true;
-    bool aerialPerspectiveEnabled  = true;
+    bool  bloomEnabled             = true;
+    bool  aerialPerspectiveEnabled = true;
+    float aerialPerspectiveStrength = 0.25f; // 0=off, 1=full physical; 0.25 suits ground-level game scenes
 };
 
 } // namespace enigma

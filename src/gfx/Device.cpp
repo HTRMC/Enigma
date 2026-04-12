@@ -106,7 +106,12 @@ void RequiredFeatures::requestAllRequired() {
 
     features2 = {};
     features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-    features2.features.samplerAnisotropy = VK_TRUE;
+    features2.features.samplerAnisotropy                    = VK_TRUE;
+    // Required for DXC-compiled compute shaders: RWTexture2D<float4> emits
+    // SPIR-V OpTypeImage with Unknown format; without these features, storage
+    // image reads/writes are undefined (LUTs silently stay zeroed → black sky).
+    features2.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
+    features2.features.shaderStorageImageReadWithoutFormat  = VK_TRUE;
 
     features2.pNext = &v11;
     v11.pNext       = &v12;
@@ -162,7 +167,9 @@ Device::Device(Instance& instance) {
     ok &= check(have.v12.descriptorBindingStorageBufferUpdateAfterBind, "Vulkan12.descriptorBindingStorageBufferUpdateAfterBind");
     ok &= check(have.v12.timelineSemaphore,                        "Vulkan12.timelineSemaphore");
     ok &= check(have.v12.bufferDeviceAddress,                     "Vulkan12.bufferDeviceAddress");
-    ok &= check(have.features2.features.samplerAnisotropy,        "features.samplerAnisotropy");
+    ok &= check(have.features2.features.samplerAnisotropy,                    "features.samplerAnisotropy");
+    ok &= check(have.features2.features.shaderStorageImageWriteWithoutFormat, "features.shaderStorageImageWriteWithoutFormat");
+    ok &= check(have.features2.features.shaderStorageImageReadWithoutFormat,  "features.shaderStorageImageReadWithoutFormat");
     if (!ok) {
         ENIGMA_ASSERT(false);
         return;

@@ -185,8 +185,16 @@ private:
     // Previous frame's viewProj — uploaded to the camera SSBO for motion vectors.
     mat4 m_prevViewProj{1.0f};
 
-    // Current frame's inverse view-projection — cached for AtmospherePass AP volume.
+    // Current frame's inverse view-projection — used by post-process depth reconstruction.
     mat4 m_invViewProj{1.0f};
+
+    // Camera basis vectors + FOV tangents — cached for AtmospherePass AP bake.
+    // Replaces passing invViewProj into the compute shader (avoids column/row-major ambiguity).
+    vec3  m_cameraRight  {1.0f, 0.0f,  0.0f};
+    vec3  m_cameraUp     {0.0f, 1.0f,  0.0f};
+    vec3  m_cameraForward{0.0f, 0.0f, -1.0f};
+    float m_tanHalfFovX  = 0.5774f; // tan(60°/2), updated each frame from camera
+    float m_tanHalfFovY  = 0.5774f;
 
     // Camera world-space position (world units, NOT km) — cached in uploadCameraData
     // and converted to km when passed to AtmospherePass::updatePerFrame.
@@ -194,6 +202,8 @@ private:
 
     // Nearest-neighbour sampler for G-buffer reads in the lighting pass.
     VkSampler m_gbufferSampler = VK_NULL_HANDLE;
+    // Trilinear clamp sampler for LUT / volume reads (AP volume, etc.).
+    VkSampler m_linearSampler  = VK_NULL_HANDLE;
 
     // Bindless slots for the five G-buffer textures.
     u32 m_gbufAlbedoSlot     = 0;
@@ -202,6 +212,7 @@ private:
     u32 m_gbufMotionVecSlot  = 0;
     u32 m_gbufDepthSlot      = 0;
     u32 m_gbufferSamplerSlot = 0;
+    u32 m_linearSamplerSlot  = 0;
 
     // Per-effect quality toggles (Settings panel → RT conditions in drawFrame).
     bool m_rtReflectionsEnabled = true;

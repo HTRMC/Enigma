@@ -68,11 +68,16 @@ public:
                         u32 samplerSlot);
 
     // Per-frame: dispatches SkyView LUT + Aerial Perspective volume.
+    // Camera basis vectors replace invViewProj to avoid matrix layout ambiguity.
     void updatePerFrame(VkCommandBuffer cmd,
                         const AtmosphereSettings& settings,
                         const vec3& sunWorldDir,
                         const vec3& cameraWorldPosKm,
-                        const mat4& invViewProj,
+                        const vec3& cameraRight,
+                        const vec3& cameraUp,
+                        const vec3& cameraForward,
+                        float tanHalfFovX,
+                        float tanHalfFovY,
                         u32 samplerSlot);
 
     void shutdown();

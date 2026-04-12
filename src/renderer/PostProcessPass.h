@@ -54,7 +54,8 @@ public:
                 u32 hdrColorSlot,
                 u32 depthSlot,
                 u32 cameraSlot,
-                u32 samplerSlot,
+                u32 samplerSlot,    // nearest — depth, HDR, bloom taps
+                u32 apSamplerSlot,  // linear  — AP volume (avoids froxel banding)
                 const AtmosphereSettings& settings,
                 vec4 cameraWorldPosKm);  // xyz = km from planet centre
 
