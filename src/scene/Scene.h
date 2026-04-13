@@ -59,6 +59,8 @@ struct MeshPrimitive {
     u32       vertexCount      = 0;
     // Meshlet data for visibility-buffer / mesh-shader pipeline.
     MeshletData meshlets{};
+    // Global meshlet buffer offset assigned by Renderer::setScene(). UINT32_MAX = not uploaded.
+    u32 meshletOffset = UINT32_MAX;
 };
 
 struct MeshNode {

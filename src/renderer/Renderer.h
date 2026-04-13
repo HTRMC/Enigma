@@ -122,6 +122,8 @@ private:
     void resizeGBuffer(VkExtent2D extent);
     // Build BLASes for all scene primitives and the TLAS.
     void buildAccelerationStructures();
+    // Upload meshlet data for all scene primitives to the GPU meshlet buffer.
+    void uploadMeshlets();
     // Allocate/reallocate the HDR intermediate (R16G16B16A16_SFLOAT).
     // If already allocated, idles the device and recreates at the new size.
     void createHdrColor(VkExtent2D extent);

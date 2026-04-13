@@ -785,24 +785,40 @@ void Renderer::drawFrame() {
     // ---- Visibility buffer pipeline (direct cmd recording, before render graph) ----
     if (m_scene != nullptr && m_useVisibilityBuffer && m_visibilityPass && m_materialEvalPass) {
         m_gpuScene->begin_frame();
-        // TODO Phase 3: populate GpuSceneBuffer from ECS here.
+        for (const auto& node : m_scene->nodes) {
+            for (u32 primIdx : node.primitiveIndices) {
+                const auto& prim = m_scene->primitives[primIdx];
+                if (prim.meshletOffset == UINT32_MAX) continue;
+                GpuInstance inst{};
+                inst.transform          = node.worldTransform;
+                inst.meshlet_offset     = prim.meshletOffset;
+                inst.meshlet_count      = static_cast<u32>(prim.meshlets.meshlets.size());
+                inst.material_index     = prim.materialIndex < 0 ? 0u : static_cast<u32>(prim.materialIndex);
+                inst.vertex_buffer_slot = prim.vertexBufferSlot;
+                m_gpuScene->add_instance(inst);
+            }
+        }
+        m_gpuScene->upload(frame.commandBuffer);
 
         m_indirectBuffer->reset_count(frame.commandBuffer);
 
-        // Barrier: vkCmdFillBuffer (TRANSFER) → vkCmdDrawMeshTasksIndirectCountEXT (DRAW_INDIRECT).
+        // Barrier: all TRANSFER writes (scene SSBO upload + indirect count reset) →
+        //   DRAW_INDIRECT (count read) + COMPUTE_SHADER (scene SSBO read in cull pass).
         // Must be unconditional — the indirect count read happens even when no meshlets are loaded.
         {
-            VkMemoryBarrier2 resetBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-            resetBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-            resetBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-            resetBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-            resetBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
-            resetBarrier.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
-            VkDependencyInfo resetDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-            resetDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-            resetDep.memoryBarrierCount = 1;
-            resetDep.pMemoryBarriers    = &resetBarrier;
-            vkCmdPipelineBarrier2(frame.commandBuffer, &resetDep);
+            VkMemoryBarrier2 transferBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+            transferBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+            transferBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            transferBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            transferBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT
+                                          | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            transferBarrier.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT
+                                          | VK_ACCESS_2_SHADER_READ_BIT;
+            VkDependencyInfo transferDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+            transferDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            transferDep.memoryBarrierCount = 1;
+            transferDep.pMemoryBarriers    = &transferBarrier;
+            vkCmdPipelineBarrier2(frame.commandBuffer, &transferDep);
         }
 
         if (m_gpuMeshlets->total_meshlet_count() > 0) {
@@ -831,7 +847,7 @@ void Renderer::drawFrame() {
             m_materialEvalPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
                                         extent, m_visibilityPass->vis_buffer_slot(),
                                         *m_gpuScene, *m_gpuMeshlets,
-                                        0 /* materialBufferSlot — Phase 3 */, cameraSlot);
+                                        m_scene->materialBufferSlot, cameraSlot);
         }
     }
 
@@ -1339,6 +1355,9 @@ void Renderer::setScene(Scene* scene) {
     if (m_scene != nullptr && m_device->gpuTier() >= gfx::GpuTier::Recommended) {
         buildAccelerationStructures();
     }
+    if (m_scene != nullptr && m_gpuMeshlets) {
+        uploadMeshlets();
+    }
 }
 
 void Renderer::buildAccelerationStructures() {
@@ -1427,6 +1446,58 @@ void Renderer::buildAccelerationStructures() {
 
     ENIGMA_LOG_INFO("[renderer] acceleration structures built ({} BLASes, TLAS slot={})",
                     m_scene->primitives.size(), m_tlasSlot);
+}
+
+void Renderer::uploadMeshlets() {
+    ENIGMA_ASSERT(m_scene != nullptr);
+    ENIGMA_ASSERT(m_gpuMeshlets != nullptr);
+
+    bool anyMeshlets = false;
+    for (auto& prim : m_scene->primitives) {
+        if (prim.meshlets.meshlets.empty()) continue;
+        prim.meshletOffset = m_gpuMeshlets->append(prim.meshlets);
+        anyMeshlets = true;
+    }
+
+    if (!anyMeshlets) return;
+
+    VkCommandPoolCreateInfo poolCI{};
+    poolCI.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolCI.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolCI.queueFamilyIndex = m_device->graphicsQueueFamily();
+
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    ENIGMA_VK_CHECK(vkCreateCommandPool(m_device->logical(), &poolCI, nullptr, &cmdPool));
+
+    VkCommandBufferAllocateInfo cmdAllocInfo{};
+    cmdAllocInfo.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    cmdAllocInfo.commandPool        = cmdPool;
+    cmdAllocInfo.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cmdAllocInfo.commandBufferCount = 1;
+
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    ENIGMA_VK_CHECK(vkAllocateCommandBuffers(m_device->logical(), &cmdAllocInfo, &cmd));
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    ENIGMA_VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
+
+    m_gpuMeshlets->upload(cmd);
+
+    ENIGMA_VK_CHECK(vkEndCommandBuffer(cmd));
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers    = &cmd;
+    ENIGMA_VK_CHECK(vkQueueSubmit(m_device->graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
+    ENIGMA_VK_CHECK(vkQueueWaitIdle(m_device->graphicsQueue()));
+
+    m_gpuMeshlets->flush_staging();
+    vkDestroyCommandPool(m_device->logical(), cmdPool, nullptr);
+
+    ENIGMA_LOG_INFO("[renderer] meshlets uploaded ({} total)", m_gpuMeshlets->total_meshlet_count());
 }
 
 void Renderer::applyImpact(const ImpactEvent& event) {
