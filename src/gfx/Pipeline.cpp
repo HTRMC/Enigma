@@ -142,15 +142,25 @@ Pipeline::Pipeline(Device& device, const CreateInfo& info)
     multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
 
     // -------------------------------------------------------------------
-    // Color blend: none (opaque overwrite). One blend state per target.
+    // Color blend: one state per target. Alpha-blend if requested, else opaque.
     // -------------------------------------------------------------------
     const u32 numColorTargets = info.colorAttachmentCount > 0 ? info.colorAttachmentCount : 1;
     std::array<VkPipelineColorBlendAttachmentState, 8> colorBlendAttachments{};
     for (u32 i = 0; i < numColorTargets; ++i) {
-        colorBlendAttachments[i].blendEnable    = VK_FALSE;
         colorBlendAttachments[i].colorWriteMask =
             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+        if (info.blendEnable) {
+            colorBlendAttachments[i].blendEnable         = VK_TRUE;
+            colorBlendAttachments[i].srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            colorBlendAttachments[i].dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            colorBlendAttachments[i].colorBlendOp        = VK_BLEND_OP_ADD;
+            colorBlendAttachments[i].srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            colorBlendAttachments[i].dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            colorBlendAttachments[i].alphaBlendOp        = VK_BLEND_OP_ADD;
+        } else {
+            colorBlendAttachments[i].blendEnable = VK_FALSE;
+        }
     }
 
     VkPipelineColorBlendStateCreateInfo colorBlend{};
@@ -182,7 +192,7 @@ Pipeline::Pipeline(Device& device, const CreateInfo& info)
     VkPipelineDepthStencilStateCreateInfo depthStencil{};
     depthStencil.sType                 = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
     depthStencil.depthTestEnable       = depthEnabled ? VK_TRUE : VK_FALSE;
-    depthStencil.depthWriteEnable      = depthEnabled ? VK_TRUE : VK_FALSE;
+    depthStencil.depthWriteEnable      = (depthEnabled && info.depthWriteEnable) ? VK_TRUE : VK_FALSE;
     depthStencil.depthCompareOp        = info.depthCompareOp;
     depthStencil.depthBoundsTestEnable = VK_FALSE;
     depthStencil.stencilTestEnable     = VK_FALSE;

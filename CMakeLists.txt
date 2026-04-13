@@ -78,6 +78,16 @@ target_sources(Enigma PRIVATE
     src/renderer/SkyBackgroundPass.cpp
     src/renderer/PostProcessPass.cpp
     src/renderer/TrianglePass.cpp
+    src/renderer/MeshletBuilder.cpp
+    src/renderer/GpuMeshletBuffer.cpp
+    src/renderer/GpuSceneBuffer.cpp
+    src/renderer/IndirectDrawBuffer.cpp
+    src/renderer/HiZPass.cpp
+    src/renderer/GpuCullPass.cpp
+    src/renderer/VisibilityBufferPass.cpp
+    src/renderer/MaterialEvalPass.cpp
+    src/renderer/ClusteredForwardPass.cpp
+    src/renderer/SMAAPass.cpp
     src/renderer/UpscalerFactory.cpp
     src/renderer/UpscalerSettings.cpp
     src/renderer/DLSSUpscaler.cpp
@@ -91,6 +101,7 @@ target_sources(Enigma PRIVATE
     src/physics/PhysicsInterpolation.cpp
     src/physics/CrumpleZone.cpp
     src/physics/DeformationSystem.cpp
+    src/ecs/World.cpp
     ${imgui_SOURCE_DIR}/imgui.cpp
     ${imgui_SOURCE_DIR}/imgui_draw.cpp
     ${imgui_SOURCE_DIR}/imgui_tables.cpp
@@ -177,6 +188,46 @@ add_custom_command(TARGET Enigma POST_BUILD
             $<TARGET_FILE_DIR:Enigma>/shaders
     COMMENT "Copying shaders next to Enigma executable"
 )
+
+# -----------------------------------------------------------------------------
+# Milestone 0: P2996 feasibility probe
+# Compile-only target — not linked against Vulkan/Jolt/etc.
+# PASS (exits 0): proceed with P2996 path for Phase 1 ECS Core
+# FAIL (compile error): commit to ENIGMA_COMPONENT macro path
+# -----------------------------------------------------------------------------
+add_executable(p2996_probe tests/p2996_probe.cpp)
+if(MSVC)
+    target_compile_options(p2996_probe PRIVATE /std:c++latest /W4 /WX /permissive- /Zc:preprocessor)
+else()
+    target_compile_options(p2996_probe PRIVATE -std=c++2c -Wall -Wextra -Werror)
+endif()
+
+# -----------------------------------------------------------------------------
+# ECS compile test — validates the ECS core library compiles and passes
+# basic runtime checks. Does not link against Vulkan/Jolt/etc.
+# -----------------------------------------------------------------------------
+add_executable(ecs_compile_test tests/ecs_compile_test.cpp src/ecs/World.cpp)
+target_include_directories(ecs_compile_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(ecs_compile_test PRIVATE glm::glm)
+target_include_directories(ecs_compile_test SYSTEM PRIVATE ${glm_SOURCE_DIR})
+if(MSVC)
+    target_compile_options(ecs_compile_test PRIVATE /std:c++latest /W4 /WX /permissive- /Zc:preprocessor /wd4127)
+else()
+    target_compile_options(ecs_compile_test PRIVATE -std=c++2c -Wall -Wextra -Wpedantic -Werror)
+endif()
+
+# -----------------------------------------------------------------------------
+# ECS benchmark — AC 1.2: 1M entity Query<Position,Velocity>.for_each() < 0.5ms
+# -----------------------------------------------------------------------------
+add_executable(ecs_bench tests/ecs_bench.cpp src/ecs/World.cpp)
+target_include_directories(ecs_bench PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_link_libraries(ecs_bench PRIVATE glm::glm)
+target_include_directories(ecs_bench SYSTEM PRIVATE ${glm_SOURCE_DIR})
+if(MSVC)
+    target_compile_options(ecs_bench PRIVATE /std:c++latest /W4 /WX /permissive- /Zc:preprocessor /wd4127 /O2)
+else()
+    target_compile_options(ecs_bench PRIVATE -std=c++2c -Wall -Wextra -Wpedantic -Werror -O2)
+endif()
 
 # Copy bundled assets (default glTF model) next to the executable.
 if(EXISTS "${CMAKE_SOURCE_DIR}/assets")

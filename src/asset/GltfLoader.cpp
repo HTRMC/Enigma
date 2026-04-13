@@ -7,6 +7,7 @@
 #include "gfx/DescriptorAllocator.h"
 #include "gfx/Device.h"
 #include "gfx/UploadContext.h"
+#include "renderer/MeshletBuilder.h"
 #include "scene/Scene.h"
 
 #define VMA_STATIC_VULKAN_FUNCTIONS  0
@@ -472,6 +473,18 @@ std::optional<Scene> loadGltf(const std::filesystem::path& path,
             auto idxBuf = createAndUploadIndexBuffer(device, allocator, indices.data(), idxSize);
             scene.ownedBuffers.push_back(idxBuf);
 
+            // Build meshlets for visibility-buffer pipeline.
+            std::vector<float> positions;
+            positions.reserve(vertCount * 3);
+            for (const auto& v : vertices) {
+                positions.push_back(v.position.x);
+                positions.push_back(v.position.y);
+                positions.push_back(v.position.z);
+            }
+            MeshletData meshlets = MeshletBuilder::build(
+                positions.data(), vertCount,
+                indices.data(), indices.size());
+
             MeshPrimitive meshPrim{};
             meshPrim.vertexBufferSlot = ssboSlot;
             meshPrim.indexCount       = static_cast<u32>(indices.size());
@@ -481,6 +494,7 @@ std::optional<Scene> loadGltf(const std::filesystem::path& path,
                                             : -1;
             meshPrim.vertexBuffer     = gpuBuf.buffer;
             meshPrim.vertexCount      = static_cast<u32>(vertCount);
+            meshPrim.meshlets         = std::move(meshlets);
             scene.primitives.push_back(meshPrim);
         }
     }

@@ -3,6 +3,7 @@
 #include "core/Math.h"
 #include "core/Types.h"
 #include "gfx/AccelerationStructure.h"
+#include "renderer/Meshlet.h"
 
 #include <volk.h>
 
@@ -56,6 +57,8 @@ struct MeshPrimitive {
     // Vertex buffer handle + count needed for BLAS building.
     VkBuffer  vertexBuffer     = VK_NULL_HANDLE;
     u32       vertexCount      = 0;
+    // Meshlet data for visibility-buffer / mesh-shader pipeline.
+    MeshletData meshlets{};
 };
 
 struct MeshNode {

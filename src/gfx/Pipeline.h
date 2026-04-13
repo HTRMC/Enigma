@@ -75,6 +75,13 @@ public:
         // graphics-specific fields above are ignored in that case.
         VkShaderModule        computeShader             = VK_NULL_HANDLE;
         const char*           computeEntryPoint         = nullptr;
+        // Alpha blending for all color attachments (src_alpha / one_minus_src_alpha).
+        // When false (default), all attachments use opaque overwrite.
+        bool                  blendEnable               = false;
+        // When depthAttachmentFormat is set, depthWriteEnable controls whether
+        // depth values are written. Default true (opaque passes write depth).
+        // Set false for transparent passes that only depth-test, not depth-write.
+        bool                  depthWriteEnable          = true;
     };
 
     Pipeline(Device& device, const CreateInfo& info);

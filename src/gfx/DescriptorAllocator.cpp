@@ -15,9 +15,10 @@ namespace {
 // Binding indices — must match the shader declarations in shaders/*.
 constexpr u32 kBindingSampledImage  = 0;
 constexpr u32 kBindingStorageImage  = 1;
-constexpr u32 kBindingStorageBuffer = 2;
+constexpr u32 kBindingStorageBuffer = 2; // StructuredBuffer<float4>[] — read-only SRV
 constexpr u32 kBindingSampler       = 3;
 constexpr u32 kBindingAccelStruct   = 4;
+constexpr u32 kBindingUavBuffer     = 5; // RWByteAddressBuffer[] — read-write UAV
 
 constexpr u32 kAccelStructCount = 1; // single TLAS slot
 
@@ -55,20 +56,19 @@ DescriptorAllocator::DescriptorAllocator(Device& device, Caps caps)
     m_caps = clampCapsToDevice(device.physical(), caps);
 
     ENIGMA_LOG_INFO("[renderer] bindless layout: sampledImages={} storageImages={} "
-                    "storageBuffers={} samplers={}",
+                    "storageBuffers={} samplers={} uavBuffers={}",
                     m_caps.sampledImages, m_caps.storageImages,
-                    m_caps.storageBuffers, m_caps.samplers);
+                    m_caps.storageBuffers, m_caps.samplers, m_caps.uavBuffers);
 
     // -------------------------------------------------------------------
-    // Layout: 5 bindings. UPDATE_AFTER_BIND + PARTIALLY_BOUND on 0-3.
-    // Binding 4 is the acceleration structure (fixed count 1).
-    // The Vulkan spec (VUID-VkDescriptorSetLayoutBindingFlagsCreateInfo-
-    // pBindingFlags-03004) requires VARIABLE_DESCRIPTOR_COUNT_BIT on the
-    // binding with the HIGHEST binding number. Since binding 4 (AS) is the
-    // last binding, NO binding can have VARIABLE_DESCRIPTOR_COUNT — all
-    // bindings use fixed descriptor counts.
+    // Layout: 6 bindings. UPDATE_AFTER_BIND + PARTIALLY_BOUND on 0-3.
+    // Binding 4: acceleration structure (TLAS, fixed count 1).
+    // Binding 5: UAV storage buffers (RWByteAddressBuffer[], fixed count).
+    // The Vulkan spec requires VARIABLE_DESCRIPTOR_COUNT_BIT only on the
+    // HIGHEST binding, and we don't use variable counts — all bindings
+    // use fixed descriptor counts with PARTIALLY_BOUND.
     // -------------------------------------------------------------------
-    const std::array<VkDescriptorSetLayoutBinding, 5> bindings = {{
+    const std::array<VkDescriptorSetLayoutBinding, 6> bindings = {{
         {
             kBindingSampledImage,
             VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -104,18 +104,26 @@ DescriptorAllocator::DescriptorAllocator(Device& device, Caps caps)
             VK_SHADER_STAGE_ALL,
             nullptr,
         },
+        {
+            kBindingUavBuffer,
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            m_caps.uavBuffers,
+            VK_SHADER_STAGE_ALL,
+            nullptr,
+        },
     }};
 
     constexpr VkDescriptorBindingFlags kCommonFlags =
         VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT |
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
 
-    const std::array<VkDescriptorBindingFlags, 5> bindingFlags = {{
+    const std::array<VkDescriptorBindingFlags, 6> bindingFlags = {{
         kCommonFlags,
         kCommonFlags,
         kCommonFlags,
         kCommonFlags,                               // sampler: fixed count
         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT, // AS: no UAB needed
+        kCommonFlags,                               // UAV buffers
     }};
 
     VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsInfo{};
@@ -133,14 +141,15 @@ DescriptorAllocator::DescriptorAllocator(Device& device, Caps caps)
     ENIGMA_VK_CHECK(vkCreateDescriptorSetLayout(m_device->logical(), &layoutInfo, nullptr, &m_layout));
 
     // -------------------------------------------------------------------
-    // Pool sized to hold the five type arrays.
+    // Pool sized to hold the six type arrays. Bindings 2 and 5 both use
+    // STORAGE_BUFFER — their counts are summed in a single pool entry.
     // -------------------------------------------------------------------
     const std::array<VkDescriptorPoolSize, 5> poolSizes = {{
-        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,               m_caps.sampledImages  },
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,               m_caps.storageImages  },
-        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,              m_caps.storageBuffers },
-        { VK_DESCRIPTOR_TYPE_SAMPLER,                     m_caps.samplers       },
-        { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,  kAccelStructCount     },
+        { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,               m_caps.sampledImages                    },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,               m_caps.storageImages                    },
+        { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,              m_caps.storageBuffers + m_caps.uavBuffers },
+        { VK_DESCRIPTOR_TYPE_SAMPLER,                     m_caps.samplers                         },
+        { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,  kAccelStructCount                       },
     }};
 
     VkDescriptorPoolCreateInfo poolInfo{};
@@ -343,6 +352,34 @@ u32 DescriptorAllocator::registerAccelerationStructure(VkAccelerationStructureKH
     return 0; // single slot, always index 0
 }
 
+u32 DescriptorAllocator::registerUavBuffer(VkBuffer buffer, VkDeviceSize size) {
+    u32 slot = 0;
+    if (!m_freeUavBuffers.empty()) {
+        slot = m_freeUavBuffers.back();
+        m_freeUavBuffers.pop_back();
+    } else {
+        ENIGMA_ASSERT(m_nextUavBuffer < m_caps.uavBuffers);
+        slot = m_nextUavBuffer++;
+    }
+
+    VkDescriptorBufferInfo bufferInfo{};
+    bufferInfo.buffer = buffer;
+    bufferInfo.offset = 0;
+    bufferInfo.range  = size;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = m_globalSet;
+    write.dstBinding      = kBindingUavBuffer;
+    write.dstArrayElement = slot;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.pBufferInfo     = &bufferInfo;
+
+    vkUpdateDescriptorSets(m_device->logical(), 1, &write, 0, nullptr);
+    return slot;
+}
+
 void DescriptorAllocator::releaseSampledImage(u32 slot) {
     m_freeSampledImages.push_back(slot);
 }
@@ -357,6 +394,10 @@ void DescriptorAllocator::releaseStorageBuffer(u32 slot) {
 
 void DescriptorAllocator::releaseSampler(u32 slot) {
     m_freeSamplers.push_back(slot);
+}
+
+void DescriptorAllocator::releaseUavBuffer(u32 slot) {
+    m_freeUavBuffers.push_back(slot);
 }
 
 } // namespace enigma::gfx

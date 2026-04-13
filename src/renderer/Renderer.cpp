@@ -23,8 +23,16 @@
 #include "renderer/RTShadowPass.h"
 #include "renderer/WetRoadPass.h"
 #include "renderer/Denoiser.h"
+#include "renderer/ClusteredForwardPass.h"
+#include "renderer/GpuCullPass.h"
+#include "renderer/GpuMeshletBuffer.h"
+#include "renderer/GpuSceneBuffer.h"
+#include "renderer/HiZPass.h"
+#include "renderer/IndirectDrawBuffer.h"
+#include "renderer/MaterialEvalPass.h"
 #include "renderer/TrianglePass.h"
 #include "renderer/UpscalerFactory.h"
+#include "renderer/VisibilityBufferPass.h"
 #include "scene/Camera.h"
 #include "scene/Scene.h"
 
@@ -109,7 +117,8 @@ Renderer::Renderer(Window& window)
     m_gbufferPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
     m_gbufferPass->registerHotReload(*m_shaderHotReload);
 
-    // Register G-buffer textures as bindless sampled images.
+    // Register G-buffer textures as bindless sampled images (read path:
+    // LightingPass, RT passes, Denoiser, atmosphere, post-process).
     m_gbufAlbedoSlot     = m_descriptorAllocator->registerSampledImage(
         m_gbufferPass->albedoView(),     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     m_gbufNormalSlot     = m_descriptorAllocator->registerSampledImage(
@@ -120,6 +129,18 @@ Renderer::Renderer(Window& window)
         m_gbufferPass->motionVecView(),  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     m_gbufDepthSlot      = m_descriptorAllocator->registerSampledImage(
         m_gbufferPass->depthView(),      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
+    // Register G-buffer colour targets as bindless storage images (write path:
+    // MaterialEvalPass compute shader writes PBR evaluation results via
+    // imageStore()). Depth cannot be a storage image in Vulkan — no slot needed.
+    m_gbufAlbedoStorageSlot     = m_descriptorAllocator->registerStorageImage(
+        m_gbufferPass->albedoView());
+    m_gbufNormalStorageSlot     = m_descriptorAllocator->registerStorageImage(
+        m_gbufferPass->normalView());
+    m_gbufMetalRoughStorageSlot = m_descriptorAllocator->registerStorageImage(
+        m_gbufferPass->metalRoughView());
+    m_gbufMotionVecStorageSlot  = m_descriptorAllocator->registerStorageImage(
+        m_gbufferPass->motionVecView());
 
     // Nearest-neighbour sampler for G-buffer reads in the lighting pass.
     VkSamplerCreateInfo samplerCI{};
@@ -182,6 +203,14 @@ Renderer::Renderer(Window& window)
                                       m_swapchain->format());
     m_postProcessPass->registerHotReload(*m_shaderHotReload);
 
+    // SMAA anti-aliasing pass — allocates edge + weight textures, builds pipelines.
+    m_smaaPass = std::make_unique<SMAAPass>(*m_device, *m_allocator);
+    m_smaaPass->allocate(m_swapchain->extent(), *m_descriptorAllocator);
+    m_smaaPass->buildPipelines(*m_shaderManager,
+                                m_descriptorAllocator->layout(),
+                                m_swapchain->format());
+    m_smaaPass->registerHotReload(*m_shaderHotReload);
+
     // RT reflection pass.
     m_rtReflectionPass = std::make_unique<RTReflectionPass>(*m_device, *m_allocator);
     m_rtReflectionPass->allocate(m_swapchain->extent());
@@ -239,6 +268,45 @@ Renderer::Renderer(Window& window)
     m_reflectionDenoiser->registerHotReload(*m_shaderHotReload);
     m_reflDenoiseSlot = m_descriptorAllocator->registerStorageImage(m_reflectionDenoiser->outputView());
     m_reflectionDenoiser->outputSlot = m_reflDenoiseSlot;
+
+    // Visibility buffer pipeline — GPU-driven mesh-shader path.
+    m_gpuScene       = std::make_unique<GpuSceneBuffer>(*m_device, *m_allocator, *m_descriptorAllocator);
+    m_gpuMeshlets    = std::make_unique<GpuMeshletBuffer>(*m_device, *m_allocator, *m_descriptorAllocator);
+    m_indirectBuffer = std::make_unique<IndirectDrawBuffer>(*m_device, *m_allocator, *m_descriptorAllocator);
+    m_indirectBuffer->resize(65536); // reserve for up to 64K meshlets
+
+    m_hizPass = std::make_unique<HiZPass>(*m_device, *m_allocator, *m_descriptorAllocator);
+    m_hizPass->allocate(m_swapchain->extent());
+    m_hizPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
+    m_hizPass->registerHotReload(*m_shaderHotReload);
+
+    m_gpuCullPass = std::make_unique<GpuCullPass>(*m_device);
+    m_gpuCullPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
+    m_gpuCullPass->registerHotReload(*m_shaderHotReload);
+
+    m_visibilityPass = std::make_unique<VisibilityBufferPass>(*m_device, *m_allocator, *m_descriptorAllocator);
+    m_visibilityPass->allocate(m_swapchain->extent(), GBufferPass::kDepthFormat);
+    m_visibilityPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
+    m_visibilityPass->registerHotReload(*m_shaderHotReload);
+
+    m_materialEvalPass = std::make_unique<MaterialEvalPass>(*m_device);
+    m_materialEvalPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
+    m_materialEvalPass->registerHotReload(*m_shaderHotReload);
+    m_materialEvalPass->prepare(
+        m_swapchain->extent(),
+        m_gbufferPass->albedoImage(),     m_gbufferPass->normalImage(),
+        m_gbufferPass->metalRoughImage(), m_gbufferPass->motionVecImage(),
+        m_gbufferPass->depthImage(),
+        m_gbufAlbedoStorageSlot,     m_gbufNormalStorageSlot,
+        m_gbufMetalRoughStorageSlot, m_gbufMotionVecStorageSlot,
+        m_gbufDepthSlot);
+
+    // Clustered forward pass — renders transparent geometry after opaque lighting.
+    m_clusteredForwardPass = std::make_unique<ClusteredForwardPass>(*m_device);
+    m_clusteredForwardPass->buildPipeline(*m_shaderManager,
+                                          m_descriptorAllocator->layout(),
+                                          VK_FORMAT_R16G16B16A16_SFLOAT);
+    m_clusteredForwardPass->registerHotReload(*m_shaderHotReload);
 
     // Create per-frame camera SSBOs (host-visible, persistently mapped).
     // 13 float4s = 208 bytes per camera buffer.
@@ -299,6 +367,7 @@ Renderer::Renderer(Window& window)
     m_physicsDebugRenderer.init(dbgInfo);
 
     createHdrColor(m_swapchain->extent());
+    createSmaaLdr(m_swapchain->extent());
 
     // Bake Transmittance + MultiScatter LUTs on startup (one-shot command buffer).
     {
@@ -374,6 +443,12 @@ Renderer::~Renderer() {
     if (m_atmospherePass) {
         m_atmospherePass->shutdown();
     }
+
+    // SMAA intermediate textures — free before SMAAPass is destroyed.
+    if (m_smaaPass && m_smaaPass->isAllocated()) {
+        m_smaaPass->free(*m_descriptorAllocator);
+    }
+    destroySmaaLdr();
 
     // HDR intermediate — destroyed before VMA teardown.
     destroyHdrColor();
@@ -655,6 +730,12 @@ void Renderer::drawFrame() {
             if (ImGui::CollapsingHeader("Environment")) {
                 ImGui::SliderFloat("Wetness", &m_wetnessFactor, 0.f, 1.f);
             }
+            if (ImGui::CollapsingHeader("Renderer")) {
+                ImGui::Checkbox("Visibility Buffer Pipeline", &m_useVisibilityBuffer);
+                ImGui::Separator();
+                ImGui::Checkbox("SMAA", &m_aaSettings.smaaEnabled);
+                ImGui::Separator();
+            }
             if (ImGui::CollapsingHeader("Graphics Quality")) {
                 const bool rtAvailable = m_device->gpuTier() >= gfx::GpuTier::Recommended;
                 if (!rtAvailable) {
@@ -701,54 +782,118 @@ void Renderer::drawFrame() {
 
     const u32 cameraSlot = m_cameraBuffers[m_frameIndex].bindlessSlot;
 
+    // ---- Visibility buffer pipeline (direct cmd recording, before render graph) ----
+    if (m_scene != nullptr && m_useVisibilityBuffer && m_visibilityPass && m_materialEvalPass) {
+        m_gpuScene->begin_frame();
+        // TODO Phase 3: populate GpuSceneBuffer from ECS here.
+
+        m_indirectBuffer->reset_count(frame.commandBuffer);
+
+        // Barrier: vkCmdFillBuffer (TRANSFER) → vkCmdDrawMeshTasksIndirectCountEXT (DRAW_INDIRECT).
+        // Must be unconditional — the indirect count read happens even when no meshlets are loaded.
+        {
+            VkMemoryBarrier2 resetBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+            resetBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+            resetBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            resetBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            resetBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+            resetBarrier.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+            VkDependencyInfo resetDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+            resetDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            resetDep.memoryBarrierCount = 1;
+            resetDep.pMemoryBarriers    = &resetBarrier;
+            vkCmdPipelineBarrier2(frame.commandBuffer, &resetDep);
+        }
+
+        if (m_gpuMeshlets->total_meshlet_count() > 0) {
+            m_gpuCullPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
+                                   *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot);
+
+            // Compute (cull) → draw-indirect barrier.
+            VkMemoryBarrier2 cullBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+            cullBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+            cullBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            cullBarrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+            cullBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
+            cullBarrier.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+            VkDependencyInfo cullDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+            cullDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            cullDep.memoryBarrierCount = 1;
+            cullDep.pMemoryBarriers    = &cullBarrier;
+            vkCmdPipelineBarrier2(frame.commandBuffer, &cullDep);
+        }
+
+        m_visibilityPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
+                                  extent,
+                                  m_gbufferPass->depthView(), m_gbufferPass->depthImage(),
+                                  *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot);
+
+        // MaterialEvalPass reads vis buffer + depth, writes G-buffer to SHADER_READ_ONLY_OPTIMAL.
+        m_materialEvalPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
+                                    extent, m_visibilityPass->vis_buffer_slot(),
+                                    *m_gpuScene, *m_gpuMeshlets,
+                                    0 /* materialBufferSlot — Phase 3 */, cameraSlot);
+    }
+
     if (m_scene != nullptr) {
-        // ---- Deferred path: GBufferPass → LightingPass ----
+        // ---- Geometry pass: visibility buffer or legacy deferred ----
+        // In VB mode the G-buffer images are already in SHADER_READ_ONLY_OPTIMAL
+        // from MaterialEvalPass; in legacy mode they start as UNDEFINED.
+        const VkImageLayout gbufInitLayout = m_useVisibilityBuffer
+            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            : VK_IMAGE_LAYOUT_UNDEFINED;
+        (void)gbufInitLayout; // used in importImage calls below
         const auto gbufAlbedo = m_renderGraph->importImage(
             "gbuf_albedo", m_gbufferPass->albedoImage(), m_gbufferPass->albedoView(),
             GBufferPass::kAlbedoFormat,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED,
+            gbufInitLayout, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_ASPECT_COLOR_BIT);
         const auto gbufNormal = m_renderGraph->importImage(
             "gbuf_normal", m_gbufferPass->normalImage(), m_gbufferPass->normalView(),
             GBufferPass::kNormalFormat,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED,
+            gbufInitLayout, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_ASPECT_COLOR_BIT);
         const auto gbufMetalRough = m_renderGraph->importImage(
             "gbuf_metalrough", m_gbufferPass->metalRoughImage(), m_gbufferPass->metalRoughView(),
             GBufferPass::kMetalRoughFormat,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED,
+            gbufInitLayout, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_ASPECT_COLOR_BIT);
         const auto gbufMotionVec = m_renderGraph->importImage(
             "gbuf_motionvec", m_gbufferPass->motionVecImage(), m_gbufferPass->motionVecView(),
             GBufferPass::kMotionVecFormat,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED,
+            gbufInitLayout, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_ASPECT_COLOR_BIT);
+        const VkImageLayout depthInitLayout = m_useVisibilityBuffer
+            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+            : VK_IMAGE_LAYOUT_UNDEFINED;
         const auto gbufDepth = m_renderGraph->importImage(
             "gbuf_depth", m_gbufferPass->depthImage(), m_gbufferPass->depthView(),
             GBufferPass::kDepthFormat,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_UNDEFINED,
+            depthInitLayout, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_ASPECT_DEPTH_BIT);
 
-        gfx::RenderGraph::RasterPassDesc gbufPassDesc{};
-        gbufPassDesc.name         = "GBufferPass";
-        gbufPassDesc.colorTargets = {gbufAlbedo, gbufNormal, gbufMetalRough, gbufMotionVec};
-        gbufPassDesc.depthTarget  = gbufDepth;
-        gbufPassDesc.clearColor   = {{0.0f, 0.0f, 0.0f, 0.0f}};
-        gbufPassDesc.clearDepth   = {0.0f, 0}; // reverse-Z: far = 0
-        gbufPassDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
-            m_gpuProfiler->beginZone(cmd, "GBufferPass");
-            m_gbufferPass->record(cmd, m_descriptorAllocator->globalSet(),
-                                   ext, *m_scene, cameraSlot);
-            // Terrain shares the same render pass so it writes directly
-            // into the G-buffer MRT attachments and participates in all
-            // downstream lighting and RT effects.
-            if (m_terrain != nullptr) {
-                m_terrain->record(cmd, ext,
-                                   m_descriptorAllocator->globalSet(), cameraSlot);
-            }
-            m_gpuProfiler->endZone(cmd);
-        };
-        m_renderGraph->addRasterPass(std::move(gbufPassDesc));
+        if (!m_useVisibilityBuffer) {
+            gfx::RenderGraph::RasterPassDesc gbufPassDesc{};
+            gbufPassDesc.name         = "GBufferPass";
+            gbufPassDesc.colorTargets = {gbufAlbedo, gbufNormal, gbufMetalRough, gbufMotionVec};
+            gbufPassDesc.depthTarget  = gbufDepth;
+            gbufPassDesc.clearColor   = {{0.0f, 0.0f, 0.0f, 0.0f}};
+            gbufPassDesc.clearDepth   = {0.0f, 0}; // reverse-Z: far = 0
+            gbufPassDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "GBufferPass");
+                m_gbufferPass->record(cmd, m_descriptorAllocator->globalSet(),
+                                       ext, *m_scene, cameraSlot);
+                // Terrain shares the same render pass so it writes directly
+                // into the G-buffer MRT attachments and participates in all
+                // downstream lighting and RT effects.
+                if (m_terrain != nullptr) {
+                    m_terrain->record(cmd, ext,
+                                       m_descriptorAllocator->globalSet(), cameraSlot);
+                }
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(gbufPassDesc));
+        }
 
         // RT reflection pass — runs between G-buffer and lighting.
         // On RT hardware: dispatches vkCmdTraceRaysKHR.
@@ -912,11 +1057,127 @@ void Renderer::drawFrame() {
             m_renderGraph->addRasterPass(std::move(debugDesc));
         }
 
-        // PostProcessPass — final output to swapchain.
-        // Reads hdrColorHandle (via sampledInputs → SHADER_READ_ONLY) and writes to
-        // colorHandle (swapchain). This is the only pass that writes to colorHandle
-        // in the deferred path; the upscaler is skipped when this pass is active.
-        {
+        // Clustered forward pass — transparent geometry blended onto HDR after sky/debug.
+        if (m_scene != nullptr && m_clusteredForwardPass) {
+            gfx::RenderGraph::RasterPassDesc fwdDesc{};
+            fwdDesc.name         = "ClusteredForwardPass";
+            fwdDesc.colorTargets = {hdrColorHandle};
+            fwdDesc.colorLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
+            fwdDesc.depthTarget  = gbufDepth;
+            fwdDesc.depthLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
+            fwdDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "ClusteredForwardPass");
+                m_clusteredForwardPass->record(
+                    cmd, m_descriptorAllocator->globalSet(), ext, *m_scene,
+                    cameraSlot, m_scene->materialBufferSlot,
+                    m_sunWorldDir, vec3(1.0f), m_atmosphereSettings.sunIntensity);
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(fwdDesc));
+        }
+
+        // PostProcessPass + optional SMAA.
+        // When SMAA is on: PostProcess → LDR intermediate, then 3 SMAA passes → swapchain.
+        // When SMAA is off: PostProcess → swapchain directly.
+        const bool smaaActive = m_aaSettings.smaaEnabled
+                             && m_smaaPass
+                             && m_smaaPass->isAllocated()
+                             && m_smaaLdrImage != VK_NULL_HANDLE;
+
+        if (smaaActive) {
+            const auto ldrHandle = m_renderGraph->importImage(
+                "smaa_ldr",
+                m_smaaLdrImage, m_smaaLdrView, m_swapchain->format(),
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_IMAGE_ASPECT_COLOR_BIT);
+            const auto smaaEdgeHandle = m_renderGraph->importImage(
+                "smaa_edge",
+                m_smaaPass->edgeImage(), m_smaaPass->edgeView(), VK_FORMAT_R8G8_UNORM,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_IMAGE_ASPECT_COLOR_BIT);
+            const auto smaaWeightHandle = m_renderGraph->importImage(
+                "smaa_weight",
+                m_smaaPass->weightImage(), m_smaaPass->weightView(), VK_FORMAT_R8G8B8A8_UNORM,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_IMAGE_ASPECT_COLOR_BIT);
+
+            // PostProcessPass → LDR intermediate.
+            {
+                gfx::RenderGraph::RasterPassDesc ppDesc{};
+                ppDesc.name          = "PostProcessPass";
+                ppDesc.colorTargets  = {ldrHandle};
+                ppDesc.sampledInputs = {hdrColorHandle, gbufDepth};
+                ppDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 1.0f}};
+                ppDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                    m_gpuProfiler->beginZone(cmd, "PostProcessPass");
+                    m_postProcessPass->record(cmd,
+                        m_descriptorAllocator->globalSet(),
+                        m_atmospherePass->aerialPerspectiveReadSet(),
+                        ext,
+                        m_hdrColorSampledSlot,
+                        m_gbufDepthSlot,
+                        cameraSlot,
+                        m_gbufferSamplerSlot,
+                        m_linearSamplerSlot,
+                        m_atmosphereSettings,
+                        vec4{m_cameraWorldPos * 0.001f, 0.0f});
+                    m_gpuProfiler->endZone(cmd);
+                };
+                m_renderGraph->addRasterPass(std::move(ppDesc));
+            }
+
+            // SMAA Pass 1: luma edge detection — LDR → edge texture.
+            {
+                gfx::RenderGraph::RasterPassDesc edgeDesc{};
+                edgeDesc.name          = "SMAAEdgePass";
+                edgeDesc.colorTargets  = {smaaEdgeHandle};
+                edgeDesc.sampledInputs = {ldrHandle};
+                edgeDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 0.0f}};
+                edgeDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                    m_gpuProfiler->beginZone(cmd, "SMAAEdgePass");
+                    m_smaaPass->recordEdge(cmd, m_descriptorAllocator->globalSet(), ext,
+                                            m_smaaLdrSampledSlot, m_gbufferSamplerSlot);
+                    m_gpuProfiler->endZone(cmd);
+                };
+                m_renderGraph->addRasterPass(std::move(edgeDesc));
+            }
+
+            // SMAA Pass 2: blending weights — edge → weight texture.
+            {
+                gfx::RenderGraph::RasterPassDesc blendDesc{};
+                blendDesc.name          = "SMAABlendPass";
+                blendDesc.colorTargets  = {smaaWeightHandle};
+                blendDesc.sampledInputs = {smaaEdgeHandle};
+                blendDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 0.0f}};
+                blendDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                    m_gpuProfiler->beginZone(cmd, "SMAABlendPass");
+                    m_smaaPass->recordBlend(cmd, m_descriptorAllocator->globalSet(), ext,
+                                             m_gbufferSamplerSlot);
+                    m_gpuProfiler->endZone(cmd);
+                };
+                m_renderGraph->addRasterPass(std::move(blendDesc));
+            }
+
+            // SMAA Pass 3: neighbourhood blend — LDR + weights → swapchain.
+            {
+                gfx::RenderGraph::RasterPassDesc nbrDesc{};
+                nbrDesc.name          = "SMAANeighborPass";
+                nbrDesc.colorTargets  = {colorHandle};
+                nbrDesc.sampledInputs = {ldrHandle, smaaWeightHandle};
+                nbrDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 1.0f}};
+                nbrDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                    m_gpuProfiler->beginZone(cmd, "SMAANeighborPass");
+                    m_smaaPass->recordNeighborhood(cmd, m_descriptorAllocator->globalSet(), ext,
+                                                    m_smaaLdrSampledSlot, m_gbufferSamplerSlot);
+                    m_gpuProfiler->endZone(cmd);
+                };
+                m_renderGraph->addRasterPass(std::move(nbrDesc));
+            }
+        } else {
+            // PostProcessPass — final output directly to swapchain.
             gfx::RenderGraph::RasterPassDesc ppDesc{};
             ppDesc.name          = "PostProcessPass";
             ppDesc.colorTargets  = {colorHandle};
@@ -934,7 +1195,7 @@ void Renderer::drawFrame() {
                     m_gbufferSamplerSlot,
                     m_linearSamplerSlot,
                     m_atmosphereSettings,
-                    vec4{m_cameraWorldPos * 0.001f, 0.0f}); // metres → km
+                    vec4{m_cameraWorldPos * 0.001f, 0.0f});
                 m_gpuProfiler->endZone(cmd);
             };
             m_renderGraph->addRasterPass(std::move(ppDesc));
@@ -1220,8 +1481,37 @@ void Renderer::resizeGBuffer(VkExtent2D extent) {
     m_reflectionDenoiser->allocate(extent, RTReflectionPass::kOutputFormat);
     m_descriptorAllocator->updateStorageImage(m_reflDenoiseSlot, m_reflectionDenoiser->outputView());
 
+    // Update storage image slots to point at the new G-buffer views.
+    m_descriptorAllocator->updateStorageImage(m_gbufAlbedoStorageSlot,     m_gbufferPass->albedoView());
+    m_descriptorAllocator->updateStorageImage(m_gbufNormalStorageSlot,     m_gbufferPass->normalView());
+    m_descriptorAllocator->updateStorageImage(m_gbufMetalRoughStorageSlot, m_gbufferPass->metalRoughView());
+    m_descriptorAllocator->updateStorageImage(m_gbufMotionVecStorageSlot,  m_gbufferPass->motionVecView());
+
+    // VB pipeline resize.
+    if (m_hizPass)        m_hizPass->allocate(extent);
+    if (m_visibilityPass) m_visibilityPass->allocate(extent, GBufferPass::kDepthFormat);
+    if (m_materialEvalPass) {
+        m_materialEvalPass->prepare(
+            extent,
+            m_gbufferPass->albedoImage(),     m_gbufferPass->normalImage(),
+            m_gbufferPass->metalRoughImage(), m_gbufferPass->motionVecImage(),
+            m_gbufferPass->depthImage(),
+            m_gbufAlbedoStorageSlot,     m_gbufNormalStorageSlot,
+            m_gbufMetalRoughStorageSlot, m_gbufMotionVecStorageSlot,
+            m_gbufDepthSlot);
+    }
+
     // Recreate HDR intermediate at the new extent and patch bindless slots.
     createHdrColor(extent);
+
+    // Recreate SMAA intermediates (LDR + edge/weight textures) at the new extent.
+    createSmaaLdr(extent);
+    if (m_smaaPass) {
+        if (m_smaaPass->isAllocated()) {
+            m_smaaPass->free(*m_descriptorAllocator);
+        }
+        m_smaaPass->allocate(extent, *m_descriptorAllocator);
+    }
 }
 
 void Renderer::createHdrColor(VkExtent2D extent) {
@@ -1289,6 +1579,64 @@ void Renderer::destroyHdrColor() {
         vmaDestroyImage(m_allocator->handle(), m_hdrColor, m_hdrColorAlloc);
         m_hdrColor      = VK_NULL_HANDLE;
         m_hdrColorAlloc = nullptr;
+    }
+}
+
+void Renderer::createSmaaLdr(VkExtent2D extent) {
+    if (m_smaaLdrImage != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(m_device->logical());
+        destroySmaaLdr();
+    }
+
+    VkImageCreateInfo imgCI{};
+    imgCI.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imgCI.imageType     = VK_IMAGE_TYPE_2D;
+    imgCI.format        = m_swapchain->format();
+    imgCI.extent        = {extent.width, extent.height, 1};
+    imgCI.mipLevels     = 1;
+    imgCI.arrayLayers   = 1;
+    imgCI.samples       = VK_SAMPLE_COUNT_1_BIT;
+    imgCI.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    imgCI.usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
+                        | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imgCI.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+    imgCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo allocCI{};
+    allocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+
+    ENIGMA_VK_CHECK(vmaCreateImage(m_allocator->handle(), &imgCI, &allocCI,
+                                    &m_smaaLdrImage, &m_smaaLdrAlloc, nullptr));
+
+    VkImageViewCreateInfo viewCI{};
+    viewCI.sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCI.image            = m_smaaLdrImage;
+    viewCI.viewType         = VK_IMAGE_VIEW_TYPE_2D;
+    viewCI.format           = m_swapchain->format();
+    viewCI.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    ENIGMA_VK_CHECK(vkCreateImageView(m_device->logical(), &viewCI, nullptr, &m_smaaLdrView));
+
+    if (m_smaaLdrSampledSlot == UINT32_MAX) {
+        m_smaaLdrSampledSlot = m_descriptorAllocator->registerSampledImage(
+            m_smaaLdrView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    } else {
+        m_descriptorAllocator->updateSampledImage(
+            m_smaaLdrSampledSlot, m_smaaLdrView, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+
+    ENIGMA_LOG_INFO("[renderer] SMAA LDR intermediate {}x{} created (slot={})",
+                    extent.width, extent.height, m_smaaLdrSampledSlot);
+}
+
+void Renderer::destroySmaaLdr() {
+    if (m_smaaLdrView != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device->logical(), m_smaaLdrView, nullptr);
+        m_smaaLdrView = VK_NULL_HANDLE;
+    }
+    if (m_smaaLdrImage != VK_NULL_HANDLE) {
+        vmaDestroyImage(m_allocator->handle(), m_smaaLdrImage, m_smaaLdrAlloc);
+        m_smaaLdrImage = VK_NULL_HANDLE;
+        m_smaaLdrAlloc = nullptr;
     }
 }
 

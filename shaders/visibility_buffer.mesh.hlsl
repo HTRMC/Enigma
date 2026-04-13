@@ -1,0 +1,204 @@
+// visibility_buffer.mesh.hlsl
+// ============================
+// Mesh shader for the visibility buffer pipeline. One workgroup per surviving
+// meshlet. Reads vertex positions, transforms to clip space, and outputs
+// triangles. The pixel shader writes a packed instance+triangle ID to the
+// R32_UINT visibility buffer.
+//
+// Vertex data layout: 3 float4 per vertex (same as mesh.hlsl / gbuffer.hlsl):
+//   [vid*3+0] = (position.x, position.y, position.z, normal.x)
+//   [vid*3+1] = (normal.y,   normal.z,   uv.x,       uv.y)
+//   [vid*3+2] = (tangent.x,  tangent.y,  tangent.z,  tangent.w)
+//
+// Depth convention: reverse-Z (far = 0, near = 1).
+
+#include "common.hlsl"
+
+#define TASK_GROUP_SIZE 32
+#define MAX_VERTICES    64
+#define MAX_TRIANGLES   124
+
+// --- Bindless resource arrays ---
+[[vk::binding(2, 0)]]
+StructuredBuffer<float4> g_buffers[] : register(t0, space1);
+
+[[vk::binding(5, 0)]]
+RWByteAddressBuffer g_rwBuffers[] : register(u1, space0);
+
+// --- Push constants (unified with visibility_buffer.task.hlsl) ---
+struct PushBlock {
+    uint instanceBufferSlot;    // both task+mesh: GpuInstance[]
+    uint meshletBufferSlot;     // both task+mesh: Meshlet[]
+    uint survivingIdsSlot;      // task: (unused in mesh stage)
+    uint meshletVerticesSlot;   // mesh: vertex index remapping (u32[])
+    uint meshletTrianglesSlot;  // mesh: packed u8 triangle indices
+    uint cameraSlot;            // both: camera matrices
+    uint totalSurviving;        // task: (unused in mesh stage)
+};
+
+[[vk::push_constant]] PushBlock pc;
+
+// --- GPU struct accessors ---
+struct GpuInstance {
+    float4x4 transform;
+    uint     meshlet_offset;
+    uint     meshlet_count;
+    uint     material_index;
+    uint     vertex_buffer_slot;
+};
+
+GpuInstance loadInstance(uint idx) {
+    StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.instanceBufferSlot)];
+    const uint base = idx * 5;
+    GpuInstance inst;
+    inst.transform = transpose(float4x4(buf[base + 0], buf[base + 1], buf[base + 2], buf[base + 3]));
+    uint4 packed   = asuint(buf[base + 4]);
+    inst.meshlet_offset    = packed.x;
+    inst.meshlet_count     = packed.y;
+    inst.material_index    = packed.z;
+    inst.vertex_buffer_slot = packed.w;
+    return inst;
+}
+
+struct Meshlet {
+    uint   vertex_offset;
+    uint   triangle_offset;
+    uint   vertex_count;
+    uint   triangle_count;
+    float3 center;
+    float  radius;
+    float3 cone_axis;
+    float  cone_cutoff;
+};
+
+Meshlet loadMeshlet(uint idx) {
+    StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.meshletBufferSlot)];
+    const uint base = idx * 3;
+    uint4  m0 = asuint(buf[base + 0]);
+    float4 m1 = buf[base + 1];
+    float4 m2 = buf[base + 2];
+
+    Meshlet m;
+    m.vertex_offset   = m0.x;
+    m.triangle_offset = m0.y;
+    m.vertex_count    = m0.z;
+    m.triangle_count  = m0.w;
+    m.center          = m1.xyz;
+    m.radius          = m1.w;
+    m.cone_axis       = m2.xyz;
+    m.cone_cutoff     = m2.w;
+    return m;
+}
+
+CameraData loadCamera(uint slot) {
+    StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(slot)];
+    CameraData cam;
+    cam.view         = transpose(float4x4(buf[0],  buf[1],  buf[2],  buf[3]));
+    cam.proj         = transpose(float4x4(buf[4],  buf[5],  buf[6],  buf[7]));
+    cam.viewProj     = transpose(float4x4(buf[8],  buf[9],  buf[10], buf[11]));
+    cam.prevViewProj = transpose(float4x4(buf[12], buf[13], buf[14], buf[15]));
+    cam.invViewProj  = transpose(float4x4(buf[16], buf[17], buf[18], buf[19]));
+    cam.worldPos     = buf[20];
+    return cam;
+}
+
+// --- Mesh payload (shared with visibility_buffer.task.hlsl) ---
+struct MeshPayload {
+    uint meshlet_indices[TASK_GROUP_SIZE]; // global meshlet IDs
+    uint instance_ids[TASK_GROUP_SIZE];    // corresponding instance IDs
+};
+
+// --- Vertex output ---
+struct VertexOutput {
+    float4 pos : SV_Position;
+    nointerpolation uint vis_value : TEXCOORD0; // packed instance + triangle ID
+};
+
+// --- Mesh shader main ---
+[numthreads(MAX_VERTICES, 1, 1)]
+[outputtopology("triangle")]
+void MSMain(
+    in uint3 groupId    : SV_GroupID,
+    in uint  groupIndex : SV_GroupIndex,
+    in payload MeshPayload p,
+    out vertices VertexOutput verts[MAX_VERTICES],
+    out indices uint3 tris[MAX_TRIANGLES]
+) {
+    uint globalMeshletId = p.meshlet_indices[groupId.x];
+    uint instanceId      = p.instance_ids[groupId.x];
+
+    GpuInstance inst = loadInstance(instanceId);
+    Meshlet meshlet  = loadMeshlet(inst.meshlet_offset + (globalMeshletId - inst.meshlet_offset));
+
+    CameraData cam = loadCamera(pc.cameraSlot);
+
+    SetMeshOutputCounts(meshlet.vertex_count, meshlet.triangle_count);
+
+    // Each thread processes one vertex (threads beyond vertex_count are idle).
+    if (groupIndex < meshlet.vertex_count) {
+        // Read remapped vertex index from the meshlet vertex buffer.
+        StructuredBuffer<float4> meshletVertBuf = g_buffers[NonUniformResourceIndex(pc.meshletVerticesSlot)];
+        uint vertIdx = asuint(meshletVertBuf[meshlet.vertex_offset + groupIndex / 4])[((meshlet.vertex_offset + groupIndex) % 4)];
+
+        // Actually: meshlet_vertices is a flat uint array. Read as uint from StructuredBuffer<float4>.
+        // Each float4 holds 4 uints. Index = (meshlet.vertex_offset + groupIndex).
+        uint flatIdx    = meshlet.vertex_offset + groupIndex;
+        uint float4Idx  = flatIdx / 4;
+        uint component  = flatIdx % 4;
+        uint4 packed    = asuint(meshletVertBuf[float4Idx]);
+        uint globalVertIdx;
+        if      (component == 0) globalVertIdx = packed.x;
+        else if (component == 1) globalVertIdx = packed.y;
+        else if (component == 2) globalVertIdx = packed.z;
+        else                     globalVertIdx = packed.w;
+
+        // Load vertex position from the instance's vertex SSBO.
+        StructuredBuffer<float4> vbuf = g_buffers[NonUniformResourceIndex(inst.vertex_buffer_slot)];
+        float3 position = vbuf[globalVertIdx * 3 + 0].xyz;
+
+        // Transform to clip space.
+        float4 worldPos = mul(inst.transform, float4(position, 1.0));
+        float4 clipPos  = mul(cam.viewProj, worldPos);
+
+        VertexOutput v;
+        v.pos       = clipPos;
+        // Pack visibility: instance_id in upper 16 bits, local triangle ID written per-primitive below.
+        // Per-vertex we store instance_id; the actual triangle_id is set per-primitive.
+        v.vis_value = instanceId << 16; // triangle ID portion filled per-primitive
+        verts[groupIndex] = v;
+    }
+
+    // Each thread processes one triangle (threads beyond triangle_count are idle).
+    if (groupIndex < meshlet.triangle_count) {
+        // Meshlet triangles are packed as 3 u8 indices per triangle in a ByteAddressBuffer.
+        // Each triangle = 3 bytes. We load a uint and extract bytes.
+        RWByteAddressBuffer triBuf = g_rwBuffers[NonUniformResourceIndex(pc.meshletTrianglesSlot)];
+        uint byteOffset = (meshlet.triangle_offset + groupIndex) * 3;
+        uint wordOffset = byteOffset & ~3u; // align to 4 bytes
+        uint shift      = (byteOffset & 3u) * 8;
+
+        uint word0 = triBuf.Load(wordOffset);
+        uint word1 = triBuf.Load(wordOffset + 4);
+
+        // Extract 3 consecutive bytes starting at byteOffset.
+        uint bits = (word0 >> shift) | (word1 << (32 - shift));
+        uint i0 = bits & 0xFF;
+        uint i1 = (bits >> 8) & 0xFF;
+        uint i2 = (bits >> 16) & 0xFF;
+
+        tris[groupIndex] = uint3(i0, i1, i2);
+
+        // Update the vis_value on each vertex to include the triangle id.
+        // Since vis_value is nointerpolation and per-vertex, we encode the
+        // triangle index into the provoking vertex. The pixel shader uses
+        // SV_PrimitiveID to determine which triangle within the meshlet.
+    }
+}
+
+// --- Pixel shader ---
+// Writes packed visibility value to R32_UINT render target.
+uint PSMain(VertexOutput input, uint primitiveId : SV_PrimitiveID) : SV_Target0 {
+    // Upper 16 bits: instance ID (already in vis_value from mesh shader).
+    // Lower 16 bits: primitive ID within this meshlet.
+    return (input.vis_value & 0xFFFF0000u) | (primitiveId & 0xFFFFu);
+}

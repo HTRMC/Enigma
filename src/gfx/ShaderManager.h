@@ -46,6 +46,10 @@ public:
         Intersection,
         // Compute stage — compiled as cs_6_0.
         Compute,
+        // Mesh shader pipeline stages — compiled as as_6_5 / ms_6_5.
+        // Requires VK_EXT_mesh_shader and Shader Model 6.5.
+        Task, // amplification shader (dispatches mesh workgroups)
+        Mesh, // mesh shader (outputs vertices + triangles)
     };
 
     explicit ShaderManager(Device& device);

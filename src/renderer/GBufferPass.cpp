@@ -103,20 +103,29 @@ void GBufferPass::allocate(VkExtent2D extent) {
     }
     m_extent = extent;
 
+    // STORAGE_BIT is required on all colour targets so that the
+    // MaterialEvalPass compute shader can write to them via imageStore().
+    // Downstream passes (LightingPass, RT passes, Denoiser) continue to
+    // read these via their existing sampled-image descriptor slots; the
+    // storage-image slots are used exclusively by MaterialEvalPass.
     createImage(kAlbedoFormat,
-                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_STORAGE_BIT,
                 VK_IMAGE_ASPECT_COLOR_BIT, m_albedo);
 
     createImage(kNormalFormat,
-                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_STORAGE_BIT,
                 VK_IMAGE_ASPECT_COLOR_BIT, m_normal);
 
     createImage(kMetalRoughFormat,
-                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_STORAGE_BIT,
                 VK_IMAGE_ASPECT_COLOR_BIT, m_metalRough);
 
     createImage(kMotionVecFormat,
-                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_STORAGE_BIT,
                 VK_IMAGE_ASPECT_COLOR_BIT, m_motionVec);
 
     createImage(kDepthFormat,

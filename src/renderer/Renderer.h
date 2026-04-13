@@ -23,9 +23,19 @@
 #include "renderer/Denoiser.h"
 #include "renderer/TrianglePass.h"
 #include "renderer/AtmospherePass.h"
+#include "renderer/GpuCullPass.h"
+#include "renderer/GpuMeshletBuffer.h"
+#include "renderer/GpuSceneBuffer.h"
+#include "renderer/HiZPass.h"
+#include "renderer/IndirectDrawBuffer.h"
+#include "renderer/MaterialEvalPass.h"
+#include "renderer/VisibilityBufferPass.h"
 #include "renderer/AtmosphereSettings.h"
+#include "renderer/ClusteredForwardPass.h"
 #include "renderer/SkyBackgroundPass.h"
 #include "renderer/PostProcessPass.h"
+#include "renderer/SMAAPass.h"
+#include "renderer/AASettings.h"
 #include "renderer/Upscaler.h"
 #include "renderer/UpscalerSettings.h"
 #include "physics/DeformationSystem.h"
@@ -117,6 +127,10 @@ private:
     void createHdrColor(VkExtent2D extent);
     // Destroy HDR intermediate image + view. Does not idle the device.
     void destroyHdrColor();
+    // Allocate/reallocate the SMAA LDR intermediate (swapchain format).
+    void createSmaaLdr(VkExtent2D extent);
+    // Destroy SMAA LDR intermediate. Does not idle the device.
+    void destroySmaaLdr();
 
     Window& m_window;
 
@@ -145,6 +159,31 @@ private:
     std::unique_ptr<Denoiser>                m_giDenoiser;
     std::unique_ptr<Denoiser>                m_shadowDenoiser;
     std::unique_ptr<Denoiser>                m_reflectionDenoiser;
+    std::unique_ptr<ClusteredForwardPass>    m_clusteredForwardPass;
+    std::unique_ptr<SMAAPass>               m_smaaPass;
+
+    // AA settings — driven from the Settings ImGui panel.
+    AASettings m_aaSettings{};
+
+    // SMAA LDR intermediate — swapchain format, render-extent sized.
+    // PostProcessPass writes here when SMAA is active; the three SMAA passes
+    // then read from it and produce the final anti-aliased swapchain output.
+    VkImage       m_smaaLdrImage      = VK_NULL_HANDLE;
+    VkImageView   m_smaaLdrView       = VK_NULL_HANDLE;
+    VmaAllocation m_smaaLdrAlloc      = nullptr;
+    u32           m_smaaLdrSampledSlot = UINT32_MAX;
+
+    // Visibility buffer pipeline (replaces deferred GBufferPass when active).
+    std::unique_ptr<GpuSceneBuffer>          m_gpuScene;
+    std::unique_ptr<GpuMeshletBuffer>        m_gpuMeshlets;
+    std::unique_ptr<IndirectDrawBuffer>      m_indirectBuffer;
+    std::unique_ptr<HiZPass>                 m_hizPass;
+    std::unique_ptr<GpuCullPass>             m_gpuCullPass;
+    std::unique_ptr<VisibilityBufferPass>    m_visibilityPass;
+    std::unique_ptr<MaterialEvalPass>        m_materialEvalPass;
+
+    // Toggle: true = visibility buffer pipeline, false = legacy deferred.
+    bool m_useVisibilityBuffer = false;
 
     std::unique_ptr<IUpscaler>               m_upscaler;
     UpscalerSettings                         m_upscalerSettings{};
@@ -205,7 +244,8 @@ private:
     // Trilinear clamp sampler for LUT / volume reads (AP volume, etc.).
     VkSampler m_linearSampler  = VK_NULL_HANDLE;
 
-    // Bindless slots for the five G-buffer textures.
+    // Bindless slots for the five G-buffer textures (sampled — read by
+    // LightingPass, RT passes, Denoiser, post-process).
     u32 m_gbufAlbedoSlot     = 0;
     u32 m_gbufNormalSlot     = 0;
     u32 m_gbufMetalRoughSlot = 0;
@@ -213,6 +253,14 @@ private:
     u32 m_gbufDepthSlot      = 0;
     u32 m_gbufferSamplerSlot = 0;
     u32 m_linearSamplerSlot  = 0;
+
+    // Storage-image slots for the four colour G-buffer targets — written by
+    // MaterialEvalPass compute shader via imageStore(). Depth cannot be a
+    // storage image in Vulkan, so no storage slot for depth.
+    u32 m_gbufAlbedoStorageSlot     = 0;
+    u32 m_gbufNormalStorageSlot     = 0;
+    u32 m_gbufMetalRoughStorageSlot = 0;
+    u32 m_gbufMotionVecStorageSlot  = 0;
 
     // Per-effect quality toggles (Settings panel → RT conditions in drawFrame).
     bool m_rtReflectionsEnabled = true;
