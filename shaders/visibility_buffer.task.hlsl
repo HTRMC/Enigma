@@ -27,6 +27,7 @@ struct PushBlock {
     uint meshletTrianglesSlot;  // mesh: packed u8 triangle indices
     uint cameraSlot;            // both: camera matrices
     uint totalSurviving;        // task: total surviving meshlet count
+    uint instanceCount;         // task: number of GpuInstance entries
 };
 
 [[vk::push_constant]] PushBlock pc;
@@ -184,7 +185,7 @@ void ASMain(
 
         // Resolve instance from global meshlet ID for payload.
         uint localMeshletId;
-        findInstanceAndLocal(globalMeshletId, 512, instanceId, localMeshletId);
+        findInstanceAndLocal(globalMeshletId, pc.instanceCount, instanceId, localMeshletId);
 
         visible = true; // Already culled in gpu_cull; pass through.
     }

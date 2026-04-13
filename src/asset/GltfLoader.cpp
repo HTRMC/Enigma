@@ -244,7 +244,9 @@ mat4 computeWorldTransform(const fastgltf::Asset& asset, usize nodeIdx) {
 }
 
 void flattenNodes(const fastgltf::Asset& asset, usize nodeIdx, const mat4& parentTransform,
-                  const std::vector<usize>& meshBasePrimitive, Scene& scene) {
+                  const std::vector<usize>& meshBasePrimitive,
+                  const std::vector<usize>& meshPrimCount,
+                  Scene& scene) {
     const auto& node = asset.nodes[nodeIdx];
     const mat4 world = parentTransform * computeWorldTransform(asset, nodeIdx);
 
@@ -253,18 +255,16 @@ void flattenNodes(const fastgltf::Asset& asset, usize nodeIdx, const mat4& paren
         MeshNode meshNode{};
         meshNode.worldTransform = world;
 
-        const auto& mesh = asset.meshes[meshIdx];
         const usize basePrim = meshBasePrimitive[meshIdx];
-        for (usize p = 0; p < mesh.primitives.size(); ++p) {
-            if (basePrim + p < scene.primitives.size()) {
-                meshNode.primitiveIndices.push_back(static_cast<u32>(basePrim + p));
-            }
+        const usize count    = meshPrimCount[meshIdx]; // actual triangle primitive count
+        for (usize p = 0; p < count; ++p) {
+            meshNode.primitiveIndices.push_back(static_cast<u32>(basePrim + p));
         }
         scene.nodes.push_back(std::move(meshNode));
     }
 
     for (usize child : node.children) {
-        flattenNodes(asset, child, world, meshBasePrimitive, scene);
+        flattenNodes(asset, child, world, meshBasePrimitive, meshPrimCount, scene);
     }
 }
 
@@ -405,8 +405,10 @@ std::optional<Scene> loadGltf(const std::filesystem::path& path,
 
     // --- Load mesh primitives ---
     std::vector<usize> meshBasePrimitive;
+    std::vector<usize> meshPrimCount; // actual triangle primitive count per mesh (skipped prims excluded)
     for (const auto& mesh : asset.meshes) {
         meshBasePrimitive.push_back(scene.primitives.size());
+        const usize countBefore = scene.primitives.size();
 
         for (const auto& prim : mesh.primitives) {
             if (prim.type != fastgltf::PrimitiveType::Triangles) {
@@ -497,13 +499,14 @@ std::optional<Scene> loadGltf(const std::filesystem::path& path,
             meshPrim.meshlets         = std::move(meshlets);
             scene.primitives.push_back(meshPrim);
         }
+        meshPrimCount.push_back(scene.primitives.size() - countBefore);
     }
 
     // --- Flatten node hierarchy ---
     if (!asset.scenes.empty()) {
         const auto& defaultScene = asset.scenes[asset.defaultScene.value_or(0)];
         for (usize nodeIdx : defaultScene.nodeIndices) {
-            flattenNodes(asset, nodeIdx, mat4{1.0f}, meshBasePrimitive, scene);
+            flattenNodes(asset, nodeIdx, mat4{1.0f}, meshBasePrimitive, meshPrimCount, scene);
         }
     }
 

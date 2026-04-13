@@ -34,9 +34,10 @@ struct VBPushBlock {
     u32 meshletTrianglesSlot; // u8 packed triangle indices — mesh only
     u32 cameraSlot;           // CameraData — both task + mesh
     u32 totalSurviving;       // total surviving meshlet count — task only
+    u32 instanceCount;        // number of GpuInstance entries — task only
 };
 
-static_assert(sizeof(VBPushBlock) == 28);
+static_assert(sizeof(VBPushBlock) == 32);
 
 VisibilityBufferPass::VisibilityBufferPass(gfx::Device& device,
                                            gfx::Allocator& allocator,
@@ -622,6 +623,7 @@ void VisibilityBufferPass::record(VkCommandBuffer           cmd,
     pc.meshletTrianglesSlot = meshlets.triangles_slot();
     pc.cameraSlot           = cameraSlot;
     pc.totalSurviving       = static_cast<u32>(indirect.capacity());
+    pc.instanceCount        = static_cast<u32>(scene.instance_count());
 
     if (usingMeshShaders) {
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_pipeline);
