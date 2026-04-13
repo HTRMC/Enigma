@@ -917,6 +917,26 @@ void Renderer::drawFrame() {
             m_renderGraph->addRasterPass(std::move(gbufPassDesc));
         }
 
+        // When the VB pipeline rendered opaque scene geometry, terrain still needs
+        // to be drawn. It uses GPU-driven clipmap (procedural SV_VertexID vertices)
+        // and is meshlet-incompatible, so it always runs as a separate raster pass.
+        // LOAD ops preserve the VB G-buffer output; depth test/write works correctly
+        // against the reverse-Z depth filled by VisibilityBufferPass.
+        if (vbRendered && m_terrain != nullptr) {
+            gfx::RenderGraph::RasterPassDesc terrainPassDesc{};
+            terrainPassDesc.name         = "TerrainPass";
+            terrainPassDesc.colorTargets = {gbufAlbedo, gbufNormal, gbufMetalRough, gbufMotionVec};
+            terrainPassDesc.depthTarget  = gbufDepth;
+            terrainPassDesc.colorLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
+            terrainPassDesc.depthLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
+            terrainPassDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "TerrainPass");
+                m_terrain->record(cmd, ext, m_descriptorAllocator->globalSet(), cameraSlot);
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(terrainPassDesc));
+        }
+
         // RT reflection pass — runs between G-buffer and lighting.
         // On RT hardware: dispatches vkCmdTraceRaysKHR.
         // On Min tier: no-op (SSR integration deferred to Phase 2).
