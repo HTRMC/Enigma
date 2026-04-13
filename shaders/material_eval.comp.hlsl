@@ -211,7 +211,15 @@ uint3 loadTriangleIndices(uint trianglesSlot, uint triangleOffset, uint triIdx) 
     uint word0 = triBuf.Load(wordOffset);
     uint word1 = triBuf.Load(wordOffset + 4);
 
-    uint bits = (word0 >> shift) | (word1 << (32 - shift));
+    // When shift == 0, (32 - shift) == 32 and HLSL masks shift amounts
+    // modulo 32, so word1 << 32 becomes word1 << 0 = word1 (wrong).
+    // Guard against this: if shift == 0, word0 already contains the bytes.
+    uint bits;
+    if (shift == 0) {
+        bits = word0;
+    } else {
+        bits = (word0 >> shift) | (word1 << (32 - shift));
+    }
     uint i0 = bits & 0xFF;
     uint i1 = (bits >> 8) & 0xFF;
     uint i2 = (bits >> 16) & 0xFF;

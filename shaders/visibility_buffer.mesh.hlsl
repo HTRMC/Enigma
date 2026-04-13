@@ -181,7 +181,14 @@ void MSMain(
         uint word1 = triBuf.Load(wordOffset + 4);
 
         // Extract 3 consecutive bytes starting at byteOffset.
-        uint bits = (word0 >> shift) | (word1 << (32 - shift));
+        // Guard shift == 0: HLSL masks shift amounts mod 32, so
+        // word1 << (32 - 0) becomes word1 << 0 = word1 (not 0).
+        uint bits;
+        if (shift == 0) {
+            bits = word0;
+        } else {
+            bits = (word0 >> shift) | (word1 << (32 - shift));
+        }
         uint i0 = bits & 0xFF;
         uint i1 = (bits >> 8) & 0xFF;
         uint i2 = (bits >> 16) & 0xFF;

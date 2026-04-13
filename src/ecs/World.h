@@ -31,8 +31,23 @@ public:
         Archetype* arch = get_or_create_archetype(aid, layouts);
 
         Entity e = m_entity_pool.allocate();
-        const void* ptrs[] = { static_cast<const void*>(&components)... };
-        std::vector<const void*> data(ptrs, ptrs + sizeof...(Cs));
+
+        // Build a TypeId -> component-pointer map first, then iterate the
+        // archetype's SORTED layout to produce the data array in the correct
+        // column order. Without this, when type_id sort order differs from
+        // the Cs... pack order, component bytes are written to the wrong columns.
+        const TypeId   pack_ids[]  = { type_id<Cs>()... };
+        const void*    pack_ptrs[] = { static_cast<const void*>(&components)... };
+        std::vector<const void*> data;
+        data.reserve(sizeof...(Cs));
+        for (const auto& col : arch->layout()) {
+            for (size_t k = 0; k < sizeof...(Cs); ++k) {
+                if (pack_ids[k] == col.type_id) {
+                    data.push_back(pack_ptrs[k]);
+                    break;
+                }
+            }
+        }
         size_t row = arch->emplace(e, data);
 
         m_entity_records[e.index()] = EntityRecord{ aid, row };
