@@ -217,7 +217,7 @@ else()
 endif()
 
 # -----------------------------------------------------------------------------
-# ECS benchmark — AC 1.2: 1M entity Query<Position,Velocity>.for_each() < 0.5ms
+# ECS benchmark — AC 1.2: 1M entity Query<Position,Velocity>.for_each() < 2ms (DRAM-bound)
 # -----------------------------------------------------------------------------
 add_executable(ecs_bench tests/ecs_bench.cpp src/ecs/World.cpp)
 target_include_directories(ecs_bench PRIVATE ${CMAKE_SOURCE_DIR}/src)

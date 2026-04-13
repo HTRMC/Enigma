@@ -20,11 +20,19 @@ public:
             const size_t count = arch->size();
             if (count == 0) continue;
 
-            const Entity* entities = arch->entities().data();
             auto columns = std::tuple{ reinterpret_cast<Cs*>(arch->get_column(type_id<Cs>()).data())... };
 
-            for (size_t i = 0; i < count; ++i) {
-                fn(entities[i], std::get<Cs*>(columns)[i]...);
+            // If the callable accepts (Cs&...) without Entity, skip the entity
+            // array entirely — saves one memory stream on the hot path.
+            if constexpr (std::is_invocable_v<Fn, Cs&...>) {
+                for (size_t i = 0; i < count; ++i) {
+                    fn(std::get<Cs*>(columns)[i]...);
+                }
+            } else {
+                const Entity* entities = arch->entities().data();
+                for (size_t i = 0; i < count; ++i) {
+                    fn(entities[i], std::get<Cs*>(columns)[i]...);
+                }
             }
         }
     }
@@ -35,11 +43,17 @@ public:
             const size_t count = arch->size();
             if (count == 0) continue;
 
-            const Entity* entities = arch->entities().data();
             auto columns = std::tuple{ reinterpret_cast<const Cs*>(arch->get_column(type_id<Cs>()).data())... };
 
-            for (size_t i = 0; i < count; ++i) {
-                fn(entities[i], std::get<const Cs*>(columns)[i]...);
+            if constexpr (std::is_invocable_v<Fn, const Cs&...>) {
+                for (size_t i = 0; i < count; ++i) {
+                    fn(std::get<const Cs*>(columns)[i]...);
+                }
+            } else {
+                const Entity* entities = arch->entities().data();
+                for (size_t i = 0; i < count; ++i) {
+                    fn(entities[i], std::get<const Cs*>(columns)[i]...);
+                }
             }
         }
     }
