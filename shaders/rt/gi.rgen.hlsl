@@ -22,15 +22,18 @@ SamplerState g_samplers[] : register(s0, space0);
 [[vk::binding(4, 0)]]
 RaytracingAccelerationStructure g_tlas[] : register(t0, space2);
 
+// Must exactly match reflection.rmiss.hlsl PushBlock (shared miss shader needs 64 bytes).
 struct PushBlock {
-    uint normalSlot;
-    uint depthSlot;
-    uint cameraSlot;
-    uint tlasSlot;
-    uint outputSlot;
-    uint _pad0;
-    uint _pad1;
-    uint _pad2;
+    uint   normalSlot;
+    uint   depthSlot;
+    uint   cameraSlot;
+    uint   samplerSlot;
+    uint   tlasSlot;
+    uint   outputSlot;
+    uint   skyViewLutSlot;
+    uint   transmittanceLutSlot;
+    float4 sunWorldDirIntensity;
+    float4 cameraWorldPosKm;
 };
 
 [[vk::push_constant]] PushBlock pc;

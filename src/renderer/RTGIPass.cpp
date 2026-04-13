@@ -16,18 +16,21 @@
 
 namespace enigma {
 
-// RT push constants — must match gi.rgen.hlsl PushBlock.
+// RT push constants — must match gi.rgen.hlsl AND reflection.rmiss.hlsl PushBlock (64 bytes).
+// The miss shader (reflection.rmiss) needs all 64 bytes; the rgen only uses the first 24.
 struct RTGIPushBlock {
-    u32 normalSlot;
-    u32 depthSlot;
-    u32 cameraSlot;
-    u32 tlasSlot;
-    u32 outputSlot;
-    u32 _pad0;
-    u32 _pad1;
-    u32 _pad2;
+    u32  normalSlot;
+    u32  depthSlot;
+    u32  cameraSlot;
+    u32  samplerSlot;
+    u32  tlasSlot;
+    u32  outputSlot;
+    u32  skyViewLutSlot;
+    u32  transmittanceLutSlot;
+    vec4 sunWorldDirIntensity; // xyz = sun dir, w = intensity
+    vec4 cameraWorldPosKm;    // xyz = camera pos in km
 };
-static_assert(sizeof(RTGIPushBlock) == 32);
+static_assert(sizeof(RTGIPushBlock) == 64);
 
 // SSAO fallback push constants — must match ssao.hlsl PushBlock.
 struct SSAOPushBlock {
@@ -155,8 +158,13 @@ void RTGIPass::record(VkCommandBuffer cmd,
                        u32 normalSlot,
                        u32 depthSlot,
                        u32 cameraSlot,
+                       u32 samplerSlot,
                        u32 tlasSlot,
-                       u32 outputSlotVal) {
+                       u32 outputSlotVal,
+                       u32 skyViewLutSlot,
+                       u32 transmittanceLutSlot,
+                       vec4 sunWorldDirIntensity,
+                       vec4 cameraWorldPosKm) {
     // Transition GI image to GENERAL for storage writes.
     VkImageMemoryBarrier2 toGeneral{};
     toGeneral.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -184,11 +192,16 @@ void RTGIPass::record(VkCommandBuffer cmd,
                                 m_rtPipeline->layout(), 0, 1, &globalSet, 0, nullptr);
 
         RTGIPushBlock pc{};
-        pc.normalSlot = normalSlot;
-        pc.depthSlot  = depthSlot;
-        pc.cameraSlot = cameraSlot;
-        pc.tlasSlot   = tlasSlot;
-        pc.outputSlot = outputSlotVal;
+        pc.normalSlot            = normalSlot;
+        pc.depthSlot             = depthSlot;
+        pc.cameraSlot            = cameraSlot;
+        pc.samplerSlot           = samplerSlot;
+        pc.tlasSlot              = tlasSlot;
+        pc.outputSlot            = outputSlotVal;
+        pc.skyViewLutSlot        = skyViewLutSlot;
+        pc.transmittanceLutSlot  = transmittanceLutSlot;
+        pc.sunWorldDirIntensity  = sunWorldDirIntensity;
+        pc.cameraWorldPosKm      = cameraWorldPosKm;
 
         vkCmdPushConstants(cmd, m_rtPipeline->layout(),
                            VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
@@ -208,8 +221,13 @@ void RTGIPass::record(VkCommandBuffer cmd,
         (void)normalSlot;
         (void)depthSlot;
         (void)cameraSlot;
+        (void)samplerSlot;
         (void)tlasSlot;
         (void)outputSlotVal;
+        (void)skyViewLutSlot;
+        (void)transmittanceLutSlot;
+        (void)sunWorldDirIntensity;
+        (void)cameraWorldPosKm;
     }
 
     // Transition to SHADER_READ_ONLY for downstream passes.

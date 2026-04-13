@@ -16,6 +16,7 @@
 [[vk::binding(3, 0)]] SamplerState        g_samplers[]  : register(s0, space0);
 
 // Dedicated set 1 for the 3D volume (Texture2D[] cannot hold Texture3D in HLSL)
+[[vk::image_format("rgba16f")]]
 [[vk::binding(0, 1)]] RWTexture3D<float4> g_apVolume    : register(u0, space1);
 
 struct PushBlock {

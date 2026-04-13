@@ -16,18 +16,25 @@
 
 namespace enigma {
 
-// RT push constants — must match wetroad.rgen.hlsl PushBlock.
+// RT push constants — must match wetroad.rgen.hlsl AND reflection.rmiss.hlsl PushBlock.
+// First 64 bytes match the miss shader; wetnessFactor follows at offset 64.
 struct WetRoadPushBlock {
-    u32 normalSlot;
-    u32 depthSlot;
-    u32 cameraSlot;
-    u32 tlasSlot;
-    u32 outputSlot;
-    f32 wetnessFactor;
-    u32 _pad0;
-    u32 _pad1;
+    u32  normalSlot;
+    u32  depthSlot;
+    u32  cameraSlot;
+    u32  samplerSlot;
+    u32  tlasSlot;
+    u32  outputSlot;
+    u32  skyViewLutSlot;
+    u32  transmittanceLutSlot;
+    vec4 sunWorldDirIntensity;
+    vec4 cameraWorldPosKm;
+    f32  wetnessFactor;
+    u32  _pad0;
+    u32  _pad1;
+    u32  _pad2;
 };
-static_assert(sizeof(WetRoadPushBlock) == 32);
+static_assert(sizeof(WetRoadPushBlock) == 80);
 
 // Fallback push constants — must match wetroad_fallback.hlsl PushBlock.
 struct WetRoadFallbackPushBlock {
@@ -154,8 +161,13 @@ void WetRoadPass::record(VkCommandBuffer cmd,
                           u32 normalSlot,
                           u32 depthSlot,
                           u32 cameraSlot,
+                          u32 samplerSlot,
                           u32 tlasSlot,
                           u32 outputSlotVal,
+                          u32 skyViewLutSlot,
+                          u32 transmittanceLutSlot,
+                          vec4 sunWorldDirIntensity,
+                          vec4 cameraWorldPosKm,
                           f32 wetnessFactor) {
     // Transition output image to GENERAL for storage writes.
     VkImageMemoryBarrier2 toGeneral{};
@@ -184,12 +196,17 @@ void WetRoadPass::record(VkCommandBuffer cmd,
                                 m_rtPipeline->layout(), 0, 1, &globalSet, 0, nullptr);
 
         WetRoadPushBlock pc{};
-        pc.normalSlot    = normalSlot;
-        pc.depthSlot     = depthSlot;
-        pc.cameraSlot    = cameraSlot;
-        pc.tlasSlot      = tlasSlot;
-        pc.outputSlot    = outputSlotVal;
-        pc.wetnessFactor = wetnessFactor;
+        pc.normalSlot           = normalSlot;
+        pc.depthSlot            = depthSlot;
+        pc.cameraSlot           = cameraSlot;
+        pc.samplerSlot          = samplerSlot;
+        pc.tlasSlot             = tlasSlot;
+        pc.outputSlot           = outputSlotVal;
+        pc.skyViewLutSlot       = skyViewLutSlot;
+        pc.transmittanceLutSlot = transmittanceLutSlot;
+        pc.sunWorldDirIntensity = sunWorldDirIntensity;
+        pc.cameraWorldPosKm     = cameraWorldPosKm;
+        pc.wetnessFactor        = wetnessFactor;
 
         vkCmdPushConstants(cmd, m_rtPipeline->layout(),
                            VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR
@@ -208,8 +225,13 @@ void WetRoadPass::record(VkCommandBuffer cmd,
         (void)normalSlot;
         (void)depthSlot;
         (void)cameraSlot;
+        (void)samplerSlot;
         (void)tlasSlot;
         (void)outputSlotVal;
+        (void)skyViewLutSlot;
+        (void)transmittanceLutSlot;
+        (void)sunWorldDirIntensity;
+        (void)cameraWorldPosKm;
         (void)wetnessFactor;
     }
 

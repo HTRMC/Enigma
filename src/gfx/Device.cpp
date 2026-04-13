@@ -112,6 +112,9 @@ void RequiredFeatures::requestAllRequired() {
     // image reads/writes are undefined (LUTs silently stay zeroed → black sky).
     features2.features.shaderStorageImageWriteWithoutFormat = VK_TRUE;
     features2.features.shaderStorageImageReadWithoutFormat  = VK_TRUE;
+    // DXC emits Capability Geometry in some VS shaders (e.g. clustered_forward.hlsl);
+    // enabling this suppresses the spurious validation error.
+    features2.features.geometryShader                       = VK_TRUE;
 
     features2.pNext = &v11;
     v11.pNext       = &v12;

@@ -821,25 +821,31 @@ void Renderer::drawFrame() {
             cullDep.memoryBarrierCount = 1;
             cullDep.pMemoryBarriers    = &cullBarrier;
             vkCmdPipelineBarrier2(frame.commandBuffer, &cullDep);
+
+            m_visibilityPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
+                                      extent,
+                                      m_gbufferPass->depthView(), m_gbufferPass->depthImage(),
+                                      *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot);
+
+            // MaterialEvalPass reads vis buffer + depth, writes G-buffer to SHADER_READ_ONLY_OPTIMAL.
+            m_materialEvalPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
+                                        extent, m_visibilityPass->vis_buffer_slot(),
+                                        *m_gpuScene, *m_gpuMeshlets,
+                                        0 /* materialBufferSlot — Phase 3 */, cameraSlot);
         }
-
-        m_visibilityPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
-                                  extent,
-                                  m_gbufferPass->depthView(), m_gbufferPass->depthImage(),
-                                  *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot);
-
-        // MaterialEvalPass reads vis buffer + depth, writes G-buffer to SHADER_READ_ONLY_OPTIMAL.
-        m_materialEvalPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
-                                    extent, m_visibilityPass->vis_buffer_slot(),
-                                    *m_gpuScene, *m_gpuMeshlets,
-                                    0 /* materialBufferSlot — Phase 3 */, cameraSlot);
     }
 
     if (m_scene != nullptr) {
         // ---- Geometry pass: visibility buffer or legacy deferred ----
+        // vbRendered is true only when the VB pipeline actually executed (meshlets present).
+        // When VB is enabled but no meshlets exist yet (Phase 3 TODO), fall back to
+        // GBufferPass so existing scene geometry remains visible.
+        const bool vbRendered = m_useVisibilityBuffer && m_visibilityPass && m_materialEvalPass
+                                && m_gpuMeshlets && m_gpuMeshlets->total_meshlet_count() > 0;
+
         // In VB mode the G-buffer images are already in SHADER_READ_ONLY_OPTIMAL
         // from MaterialEvalPass; in legacy mode they start as UNDEFINED.
-        const VkImageLayout gbufInitLayout = m_useVisibilityBuffer
+        const VkImageLayout gbufInitLayout = vbRendered
             ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
             : VK_IMAGE_LAYOUT_UNDEFINED;
         (void)gbufInitLayout; // used in importImage calls below
@@ -863,7 +869,7 @@ void Renderer::drawFrame() {
             GBufferPass::kMotionVecFormat,
             gbufInitLayout, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_ASPECT_COLOR_BIT);
-        const VkImageLayout depthInitLayout = m_useVisibilityBuffer
+        const VkImageLayout depthInitLayout = vbRendered
             ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
             : VK_IMAGE_LAYOUT_UNDEFINED;
         const auto gbufDepth = m_renderGraph->importImage(
@@ -872,7 +878,7 @@ void Renderer::drawFrame() {
             depthInitLayout, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_ASPECT_DEPTH_BIT);
 
-        if (!m_useVisibilityBuffer) {
+        if (!vbRendered) {
             gfx::RenderGraph::RasterPassDesc gbufPassDesc{};
             gbufPassDesc.name         = "GBufferPass";
             gbufPassDesc.colorTargets = {gbufAlbedo, gbufNormal, gbufMetalRough, gbufMotionVec};
@@ -929,7 +935,11 @@ void Renderer::drawFrame() {
                 m_gpuProfiler->beginZone(cmd, "RTGIPass");
                 m_giPass->record(cmd, m_descriptorAllocator->globalSet(), ext,
                                   m_gbufNormalSlot, m_gbufDepthSlot,
-                                  cameraSlot, m_tlasSlot, m_giSlot);
+                                  cameraSlot, m_gbufferSamplerSlot, m_tlasSlot, m_giSlot,
+                                  m_atmospherePass->skyViewLutSlot(),
+                                  m_atmospherePass->transmittanceLutSlot(),
+                                  vec4{m_sunWorldDir, m_atmosphereSettings.sunIntensity},
+                                  vec4{m_cameraWorldPos * 0.001f, 0.0f});
                 m_gpuProfiler->endZone(cmd);
             };
             m_renderGraph->addRasterPass(std::move(rtGIDesc));
@@ -960,7 +970,11 @@ void Renderer::drawFrame() {
                 m_gpuProfiler->beginZone(cmd, "WetRoadPass");
                 m_wetRoadPass->record(cmd, m_descriptorAllocator->globalSet(), ext,
                                        m_gbufNormalSlot, m_gbufDepthSlot,
-                                       cameraSlot, m_tlasSlot, m_wetRoadSlot,
+                                       cameraSlot, m_gbufferSamplerSlot, m_tlasSlot, m_wetRoadSlot,
+                                       m_atmospherePass->skyViewLutSlot(),
+                                       m_atmospherePass->transmittanceLutSlot(),
+                                       vec4{m_sunWorldDir, m_atmosphereSettings.sunIntensity},
+                                       vec4{m_cameraWorldPos * 0.001f, 0.0f},
                                        m_wetnessFactor);
                 m_gpuProfiler->endZone(cmd);
             };
