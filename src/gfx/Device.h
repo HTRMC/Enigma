@@ -67,9 +67,8 @@ public:
     // GPU capability tier detected at construction time.
     GpuTier gpuTier() const { return m_gpuTier; }
 
-    // Mesh shaders (VK_EXT_mesh_shader) require Recommended tier or above.
-    // Min-tier hardware (GTX 1xxx, no RT) does not support mesh shaders.
-    bool supportsMeshShaders() const { return m_gpuTier >= GpuTier::Recommended; }
+    // True only when VK_EXT_mesh_shader was found and enabled at device creation.
+    bool supportsMeshShaders() const { return m_meshShadersEnabled; }
 
     const VkPhysicalDeviceProperties& properties() const { return m_properties; }
 
@@ -86,6 +85,7 @@ private:
     std::optional<VkQueue>      m_transferQueue;
     std::optional<u32>          m_transferQueueFamily;
     GpuTier                     m_gpuTier             = GpuTier::Min;
+    bool                        m_meshShadersEnabled  = false;
     VkPhysicalDeviceProperties  m_properties{};
 };
 

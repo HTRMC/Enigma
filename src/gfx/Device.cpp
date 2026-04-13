@@ -199,11 +199,12 @@ Device::Device(Instance& instance) {
         }
     }
 
-    // RT feature structs declared at constructor scope: they must remain alive
+    // Feature structs declared at constructor scope: they must remain alive
     // until vkCreateDevice (pNext chain references them by pointer).
     VkPhysicalDeviceAccelerationStructureFeaturesKHR accelStructFeatures{};
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR    rtPipelineFeatures{};
     VkPhysicalDeviceRayQueryFeaturesKHR              rayQueryFeatures{};
+    VkPhysicalDeviceMeshShaderFeaturesEXT            meshShaderFeatures{};
 
     // Conditionally enable RT extensions when hardware supports them.
     {
@@ -243,6 +244,32 @@ Device::Device(Instance& instance) {
             }
 
             ENIGMA_LOG_INFO("[gfx] enabling RT extensions (acceleration_structure + ray_tracing_pipeline + deferred_host_operations)");
+        }
+    }
+
+    // Conditionally enable VK_EXT_mesh_shader (task + mesh shaders).
+    {
+        bool hasMeshShader = false;
+        for (const auto& ep : extProps) {
+            if (std::strcmp(ep.extensionName, VK_EXT_MESH_SHADER_EXTENSION_NAME) == 0) {
+                hasMeshShader = true;
+                break;
+            }
+        }
+        if (hasMeshShader) {
+            enabledExts.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
+
+            meshShaderFeatures.sType      = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
+            meshShaderFeatures.taskShader = VK_TRUE;
+            meshShaderFeatures.meshShader = VK_TRUE;
+
+            // Append to the tail of the existing pNext chain rooted at want.v13.
+            auto* tail = reinterpret_cast<VkBaseOutStructure*>(&want.v13);
+            while (tail->pNext != nullptr) tail = tail->pNext;
+            tail->pNext = reinterpret_cast<VkBaseOutStructure*>(&meshShaderFeatures);
+
+            m_meshShadersEnabled = true;
+            ENIGMA_LOG_INFO("[gfx] enabling mesh shaders (VK_EXT_mesh_shader)");
         }
     }
 
