@@ -114,6 +114,30 @@ void GpuCullPass::record(VkCommandBuffer           cmd,
     // One thread per meshlet, 64 threads per workgroup.
     const u32 groups = (totalMeshlets + 63) / 64;
     vkCmdDispatch(cmd, groups, 1, 1);
+
+    // Barrier: compute SSBO writes (count + surviving IDs) → task shader SSBO reads.
+    // Without this the task shader can read a stale/zero count and wrong meshlet IDs.
+    const VkBufferMemoryBarrier2 barriers[2] = {
+        {
+            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2, nullptr,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+            indirect.count_buffer(), 0, sizeof(u32)
+        },
+        {
+            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2, nullptr,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT, VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+            indirect.surviving_buffer(), 0, VK_WHOLE_SIZE
+        },
+    };
+
+    VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+    dep.bufferMemoryBarrierCount = 2;
+    dep.pBufferMemoryBarriers    = barriers;
+    vkCmdPipelineBarrier2(cmd, &dep);
 }
 
 } // namespace enigma

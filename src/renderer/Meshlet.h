@@ -33,4 +33,7 @@ struct MeshletData {
     std::vector<u8>      meshlet_triangles;  // packed: 3 u8 indices per triangle (local to meshlet)
 };
 
+static_assert(sizeof(Meshlet) == 48,
+              "Meshlet layout mismatch: GPU shader reads 3 float4s (48 bytes) per meshlet");
+
 } // namespace enigma

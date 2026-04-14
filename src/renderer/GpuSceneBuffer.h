@@ -33,6 +33,9 @@ struct alignas(16) GpuInstance {
     u32  vertex_buffer_slot; // bindless vertex SSBO slot
 };
 
+static_assert(sizeof(GpuInstance) == 80,
+              "GpuInstance layout mismatch: GPU shader reads 5 float4s (80 bytes) per instance");
+
 // CPU-side builder — filled from ECS query or Scene, then uploaded to GPU.
 class GpuSceneBuffer {
 public:

@@ -122,8 +122,12 @@ Frustum extractFrustum(float4x4 vp) {
     f.planes[4] = float4(vp[0][3]-vp[0][2], vp[1][3]-vp[1][2], vp[2][3]-vp[2][2], vp[3][3]-vp[3][2]); // Near
     f.planes[5] = float4(vp[0][2],           vp[1][2],           vp[2][2],           vp[3][2]);          // Far
 
+    // Skip plane[5] (far) — for reverse-Z infinite projection, row2 of VP is
+    // (0, 0, 0, near), so planes[5].xyz = 0 and normalization would divide by
+    // zero.  Nothing is ever beyond an infinite far plane, so the test always
+    // passes and we simply omit it.
     [unroll]
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 5; ++i) {
         float len = length(f.planes[i].xyz);
         f.planes[i] /= len;
     }
@@ -133,7 +137,7 @@ Frustum extractFrustum(float4x4 vp) {
 // Sphere-vs-frustum test. Returns true if the sphere is at least partially inside.
 bool sphereInsideFrustum(Frustum frust, float3 center, float radius) {
     [unroll]
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 5; ++i) { // plane[5] (far) skipped — infinite projection, always passes
         float dist = dot(frust.planes[i].xyz, center) + frust.planes[i].w;
         if (dist < -radius)
             return false;
@@ -183,10 +187,13 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
     float3 worldCenter = mul(inst.transform, float4(meshlet.center, 1.0)).xyz;
 
     // Scale radius by the maximum axis scale of the world matrix.
-    float3 scaleX = float3(inst.transform[0][0], inst.transform[1][0], inst.transform[2][0]);
-    float3 scaleY = float3(inst.transform[0][1], inst.transform[1][1], inst.transform[2][1]);
-    float3 scaleZ = float3(inst.transform[0][2], inst.transform[1][2], inst.transform[2][2]);
-    float maxScale = max(length(scaleX), max(length(scaleY), length(scaleZ)));
+    // With -Zpc (column-major), transform[col][row], so column vectors are:
+    //   col0 = (transform[0][0], transform[0][1], transform[0][2]), etc.
+    // Column lengths give the actual axis scales; row lengths do not.
+    float3 col0 = float3(inst.transform[0][0], inst.transform[0][1], inst.transform[0][2]);
+    float3 col1 = float3(inst.transform[1][0], inst.transform[1][1], inst.transform[1][2]);
+    float3 col2 = float3(inst.transform[2][0], inst.transform[2][1], inst.transform[2][2]);
+    float maxScale = max(length(col0), max(length(col1), length(col2)));
     float worldRadius = meshlet.radius * maxScale;
 
     // Frustum cull.
