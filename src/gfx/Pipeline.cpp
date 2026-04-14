@@ -125,7 +125,11 @@ Pipeline::Pipeline(Device& device, const CreateInfo& info)
     viewportState.scissorCount  = 1;
 
     // -------------------------------------------------------------------
-    // Rasterizer: default solid fill, back-face cull, CCW front.
+    // Rasterizer: default solid fill, back-face cull.
+    // frontFace comes from CreateInfo (default CLOCKWISE — the Y-flip in
+    // frontFace comes from CreateInfo (default CLOCKWISE — the Y-flip in
+    // projMatrix() negates NDC Y, reversing screen-space winding so CCW
+    // world triangles appear CW; CLOCKWISE makes them front-facing).
     // -------------------------------------------------------------------
     VkPipelineRasterizationStateCreateInfo rasterizer{};
     rasterizer.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;

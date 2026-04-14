@@ -112,7 +112,16 @@ struct MeshPayload {
 // --- Vertex output ---
 struct VertexOutput {
     float4 pos : SV_Position;
-    nointerpolation uint vis_value : TEXCOORD0; // packed instance + triangle ID
+    nointerpolation uint vis_value : TEXCOORD0; // globalMeshletId << 7 (lower 7 bits zeroed)
+};
+
+// --- Per-primitive output ---
+// localTriId is the per-meshlet triangle index [0, triangle_count).
+// Declared nointerpolation so DXC emits PerPrimitiveEXT in SPIR-V.
+// SV_PrimitiveID in the pixel shader would be the global draw-call counter on
+// NVIDIA hardware — using an explicit per-primitive attribute avoids that bug.
+struct PrimAttrib {
+    nointerpolation uint localTriId : TEXCOORD1;
 };
 
 // --- Mesh shader main ---
@@ -122,8 +131,9 @@ void MSMain(
     in uint3 groupId    : SV_GroupID,
     in uint  groupIndex : SV_GroupIndex,
     in payload MeshPayload p,
-    out vertices VertexOutput verts[MAX_VERTICES],
-    out indices uint3 tris[MAX_TRIANGLES]
+    out vertices  VertexOutput verts[MAX_VERTICES],
+    out indices   uint3        tris[MAX_TRIANGLES],
+    out primitives PrimAttrib  prims[MAX_TRIANGLES]
 ) {
     uint globalMeshletId = p.meshlet_indices[groupId.x];
     uint instanceId      = p.instance_ids[groupId.x];
@@ -202,17 +212,22 @@ void MSMain(
 
         tris[groupIndex] = uint3(i0, i1, i2);
 
-        // Update the vis_value on each vertex to include the triangle id.
-        // Since vis_value is nointerpolation and per-vertex, we encode the
-        // triangle index into the provoking vertex. The pixel shader uses
-        // SV_PrimitiveID to determine which triangle within the meshlet.
+        // Write the per-meshlet local triangle index as a per-primitive attribute.
+        // The pixel shader reads this instead of SV_PrimitiveID (which on NVIDIA
+        // hardware is the global draw-call primitive counter, not the per-meshlet
+        // local index, causing vis buffer corruption for all meshlets after the first).
+        prims[groupIndex].localTriId = groupIndex;
     }
 }
 
 // --- Pixel shader ---
 // Writes packed visibility value to R32_UINT render target.
 // Encoding: [31:7] globalMeshletId | [6:0] localPrimId
-uint PSMain(VertexOutput input, uint primitiveId : SV_PrimitiveID) : SV_Target0 {
-    // Lower 7 bits of vis_value are 0 (globalMeshletId << 7); OR in the primitive ID.
-    return input.vis_value | (primitiveId & 0x7Fu);
+//
+// localTriId comes from the per-primitive attribute written by MSMain.
+// Do NOT use SV_PrimitiveID here: on NVIDIA EXT_mesh_shader hardware it is
+// the global draw-call primitive counter (accumulates across meshlets), so
+// `& 0x7F` wraps incorrectly for every meshlet after the first.
+uint PSMain(VertexOutput input, PrimAttrib primInput) : SV_Target0 {
+    return input.vis_value | (primInput.localTriId & 0x7Fu);
 }
