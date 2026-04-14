@@ -825,13 +825,16 @@ void Renderer::drawFrame() {
             m_gpuCullPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
                                    *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot);
 
-            // Compute (cull) → draw-indirect barrier.
+            // Compute (cull) → task shader barrier.
+            // The task shader reads the count buffer and surviving IDs buffer
+            // written by the cull compute pass. No indirect buffer is used since
+            // the dispatch is vkCmdDrawMeshTasksEXT (direct, not indirect).
             VkMemoryBarrier2 cullBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
             cullBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
             cullBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
             cullBarrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
-            cullBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;
-            cullBarrier.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+            cullBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT;
+            cullBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
             VkDependencyInfo cullDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
             cullDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
             cullDep.memoryBarrierCount = 1;

@@ -23,6 +23,9 @@
 
 namespace enigma {
 
+// Must match TASK_GROUP_SIZE in visibility_buffer.task.hlsl.
+static constexpr u32 TASK_GROUP_SIZE = 32;
+
 // Unified push block — shared by task and mesh stages.
 // Must match the PushBlock declaration in both visibility_buffer.task.hlsl
 // and visibility_buffer.mesh.hlsl.
@@ -33,7 +36,7 @@ struct VBPushBlock {
     u32 meshletVerticesSlot;  // u32[] vertex index remapping — mesh only
     u32 meshletTrianglesSlot; // u8 packed triangle indices — mesh only
     u32 cameraSlot;           // CameraData — both task + mesh
-    u32 totalSurviving;       // total surviving meshlet count — task only
+    u32 countBufferSlot;      // u32 actual surviving count (GPU buffer) — task only
     u32 instanceCount;        // number of GpuInstance entries — task only
 };
 
@@ -622,7 +625,7 @@ void VisibilityBufferPass::record(VkCommandBuffer           cmd,
     pc.meshletVerticesSlot  = meshlets.vertices_slot();
     pc.meshletTrianglesSlot = meshlets.triangles_slot();
     pc.cameraSlot           = cameraSlot;
-    pc.totalSurviving       = static_cast<u32>(indirect.capacity());
+    pc.countBufferSlot      = indirect.count_slot();
     pc.instanceCount        = static_cast<u32>(scene.instance_count());
 
     if (usingMeshShaders) {
@@ -633,12 +636,12 @@ void VisibilityBufferPass::record(VkCommandBuffer           cmd,
                            VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT
                            | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(pc), &pc);
-        // Indirect count draw: one task dispatch per surviving meshlet.
-        vkCmdDrawMeshTasksIndirectCountEXT(cmd,
-                                           indirect.buffer(), 0,
-                                           indirect.count_buffer(), 0,
-                                           static_cast<u32>(indirect.capacity()),
-                                           12u);
+        // Dispatch ceil(totalMeshlets / TASK_GROUP_SIZE) task groups. Each group
+        // processes up to TASK_GROUP_SIZE surviving meshlets read from the
+        // surviving IDs buffer, using the GPU count buffer for the valid range.
+        const u32 totalMeshlets = meshlets.total_meshlet_count();
+        const u32 taskGroups    = (totalMeshlets + TASK_GROUP_SIZE - 1) / TASK_GROUP_SIZE;
+        vkCmdDrawMeshTasksEXT(cmd, taskGroups, 1, 1);
     } else {
         // VS fallback: draw each meshlet as a direct indexed triangle draw.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_vsFallbackPipeline);

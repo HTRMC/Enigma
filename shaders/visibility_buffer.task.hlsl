@@ -26,7 +26,7 @@ struct PushBlock {
     uint meshletVerticesSlot;   // mesh: vertex index remapping (u32[])
     uint meshletTrianglesSlot;  // mesh: packed u8 triangle indices
     uint cameraSlot;            // both: camera matrices
-    uint totalSurviving;        // task: total surviving meshlet count
+    uint countBufferSlot;       // task: GPU buffer slot holding actual surviving count
     uint instanceCount;         // task: number of GpuInstance entries
 };
 
@@ -134,11 +134,10 @@ struct MeshPayload {
 };
 
 groupshared MeshPayload s_payload;
-groupshared uint s_surviving_count;
 
 // --- Find which instance owns a global meshlet index ---
 // Walks the instance buffer linearly. The gpu_cull pass already filtered by
-// totalSurviving so the surviving IDs buffer is compact.
+// actualSurviving so the surviving IDs buffer is compact.
 void findInstanceAndLocal(uint globalMeshletIdx, uint instanceCount,
                           out uint instanceId, out uint localMeshletIdx) {
     uint offset = 0;
@@ -158,36 +157,35 @@ void findInstanceAndLocal(uint globalMeshletIdx, uint instanceCount,
 }
 
 // --- Main ---
+// Dispatch: vkCmdDrawMeshTasksEXT(ceil(totalMeshlets / TASK_GROUP_SIZE), 1, 1).
+// Each task group processes up to TASK_GROUP_SIZE entries from the surviving IDs
+// buffer, using the actual GPU count (read from countBufferSlot) as the bound.
+// Wave ballot compacts valid entries into the payload and dispatches one mesh
+// group per surviving meshlet in this batch.
 [numthreads(TASK_GROUP_SIZE, 1, 1)]
 void ASMain(
     in uint3 groupId    : SV_GroupID,
     in uint  groupIndex : SV_GroupIndex
 ) {
-    // Initialize shared counter.
-    if (groupIndex == 0)
-        s_surviving_count = 0;
-    GroupMemoryBarrierWithGroupSync();
+    // Read actual surviving count from the GPU count buffer.
+    RWByteAddressBuffer countBuf = g_rwBuffers[NonUniformResourceIndex(pc.countBufferSlot)];
+    uint actualSurviving = countBuf.Load(0);
 
-    // Global meshlet slot for this thread (from the surviving IDs written by gpu_cull).
+    // Each thread in this group handles one slot in the surviving IDs buffer.
     uint batchBase   = groupId.x * TASK_GROUP_SIZE;
     uint meshletSlot = batchBase + groupIndex;
 
-    bool valid = meshletSlot < pc.totalSurviving;
-
-    // Read the global meshlet ID from the surviving IDs buffer.
-    uint globalMeshletId = 0;
-    uint instanceId = 0;
     bool visible = false;
+    uint globalMeshletId = 0;
+    uint instanceId      = 0;
 
-    if (valid) {
+    if (meshletSlot < actualSurviving) {
         RWByteAddressBuffer survivingBuf = g_rwBuffers[NonUniformResourceIndex(pc.survivingIdsSlot)];
         globalMeshletId = survivingBuf.Load(meshletSlot * 4);
 
-        // Resolve instance from global meshlet ID for payload.
         uint localMeshletId;
         findInstanceAndLocal(globalMeshletId, pc.instanceCount, instanceId, localMeshletId);
-
-        visible = true; // Already culled in gpu_cull; pass through.
+        visible = true;
     }
 
     // Compact surviving meshlets into groupshared payload using wave ballot.
@@ -199,6 +197,6 @@ void ASMain(
         s_payload.instance_ids[laneIndex]    = instanceId;
     }
 
-    // Dispatch mesh shader workgroups for each surviving meshlet.
+    // Dispatch one mesh shader group per surviving meshlet in this batch.
     DispatchMesh(laneCount, 1, 1, s_payload);
 }
