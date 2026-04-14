@@ -29,11 +29,12 @@ RWByteAddressBuffer g_rwBuffers[] : register(u1, space0);
 struct PushBlock {
     uint instanceBufferSlot;    // both task+mesh: GpuInstance[]
     uint meshletBufferSlot;     // both task+mesh: Meshlet[]
-    uint survivingIdsSlot;      // task: (unused in mesh stage)
+    uint survivingIdsSlot;      // task only (unused in mesh stage)
     uint meshletVerticesSlot;   // mesh: vertex index remapping (u32[])
     uint meshletTrianglesSlot;  // mesh: packed u8 triangle indices
     uint cameraSlot;            // both: camera matrices
-    uint totalSurviving;        // task: (unused in mesh stage)
+    uint countBufferSlot;       // task only (unused in mesh stage)
+    uint instanceCount;         // task only (unused in mesh stage)
 };
 
 [[vk::push_constant]] PushBlock pc;
@@ -128,7 +129,7 @@ void MSMain(
     uint instanceId      = p.instance_ids[groupId.x];
 
     GpuInstance inst = loadInstance(instanceId);
-    Meshlet meshlet  = loadMeshlet(inst.meshlet_offset + (globalMeshletId - inst.meshlet_offset));
+    Meshlet meshlet  = loadMeshlet(globalMeshletId);
 
     CameraData cam = loadCamera(pc.cameraSlot);
 
@@ -136,12 +137,9 @@ void MSMain(
 
     // Each thread processes one vertex (threads beyond vertex_count are idle).
     if (groupIndex < meshlet.vertex_count) {
-        // Read remapped vertex index from the meshlet vertex buffer.
+        // meshlet_vertices is a flat u32 array packed as StructuredBuffer<float4>.
+        // Each float4 holds 4 u32 vertex indices. Compute the float4 element and component.
         StructuredBuffer<float4> meshletVertBuf = g_buffers[NonUniformResourceIndex(pc.meshletVerticesSlot)];
-        uint vertIdx = asuint(meshletVertBuf[meshlet.vertex_offset + groupIndex / 4])[((meshlet.vertex_offset + groupIndex) % 4)];
-
-        // Actually: meshlet_vertices is a flat uint array. Read as uint from StructuredBuffer<float4>.
-        // Each float4 holds 4 uints. Index = (meshlet.vertex_offset + groupIndex).
         uint flatIdx    = meshlet.vertex_offset + groupIndex;
         uint float4Idx  = flatIdx / 4;
         uint component  = flatIdx % 4;

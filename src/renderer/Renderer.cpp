@@ -803,9 +803,13 @@ void Renderer::drawFrame() {
         m_indirectBuffer->reset_count(frame.commandBuffer);
 
         // Barrier: all TRANSFER writes (scene SSBO upload + indirect count reset) →
-        //   DRAW_INDIRECT (count read) + COMPUTE_SHADER (cull reads scene SSBO)
-        //   + TASK_SHADER (task shader reads scene SSBO directly in findInstanceAndLocal).
-        // Must be unconditional — the indirect count read happens even when no meshlets are loaded.
+        //   DRAW_INDIRECT  (count buffer read by vkCmdDrawMeshTasksEXT — unused now but harmless)
+        //   COMPUTE_SHADER (cull pass reads scene SSBO)
+        //   TASK_SHADER    (task shader reads scene SSBO in findInstanceAndLocal)
+        //   MESH_SHADER    (mesh shader reads scene SSBO in loadInstance for transform +
+        //                   vertex_buffer_slot; task→mesh ordering only propagates task writes,
+        //                   not third-party TRANSFER writes, so explicit coverage is required)
+        // Must be unconditional — the reset happens even if there are no meshlets.
         {
             VkMemoryBarrier2 transferBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
             transferBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
@@ -813,7 +817,8 @@ void Renderer::drawFrame() {
             transferBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
             transferBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT
                                           | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                                          | VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT;
+                                          | VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT
+                                          | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
             transferBarrier.dstAccessMask = VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT
                                           | VK_ACCESS_2_SHADER_READ_BIT;
             VkDependencyInfo transferDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
