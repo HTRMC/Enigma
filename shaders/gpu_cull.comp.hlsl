@@ -109,39 +109,19 @@ struct Frustum {
 };
 
 Frustum extractFrustum(float4x4 vp) {
+    // Gribb-Hartmann frustum extraction.
+    // DXC compiles with -Zpc (column-major), so vp[col][row] — i.e. vp[i][j] = VP_{row=j, col=i}.
+    // clip = vp * world  →  clip.x = row0·world, clip.w = row3·world.
+    // Left plane:   clip.w + clip.x ≥ 0  →  (row3 + row0)·world ≥ 0
+    //   A = VP_{3,0} + VP_{0,0} = vp[0][3] + vp[0][0], etc.
     Frustum f;
-    // Left
-    f.planes[0] = float4(vp[0][3] + vp[0][0],
-                          vp[1][3] + vp[1][0],
-                          vp[2][3] + vp[2][0],
-                          vp[3][3] + vp[3][0]);
-    // Right
-    f.planes[1] = float4(vp[0][3] - vp[0][0],
-                          vp[1][3] - vp[1][0],
-                          vp[2][3] - vp[2][0],
-                          vp[3][3] - vp[3][0]);
-    // Bottom
-    f.planes[2] = float4(vp[0][3] + vp[0][1],
-                          vp[1][3] + vp[1][1],
-                          vp[2][3] + vp[2][1],
-                          vp[3][3] + vp[3][1]);
-    // Top
-    f.planes[3] = float4(vp[0][3] - vp[0][1],
-                          vp[1][3] - vp[1][1],
-                          vp[2][3] - vp[2][1],
-                          vp[3][3] - vp[3][1]);
-    // Near (reverse-Z: near plane is z = 1)
-    f.planes[4] = float4(vp[0][3] - vp[0][2],
-                          vp[1][3] - vp[1][2],
-                          vp[2][3] - vp[2][2],
-                          vp[3][3] - vp[3][2]);
-    // Far (reverse-Z: far plane is z = 0)
-    f.planes[5] = float4(vp[0][2],
-                          vp[1][2],
-                          vp[2][2],
-                          vp[3][2]);
+    f.planes[0] = float4(vp[0][3]+vp[0][0], vp[1][3]+vp[1][0], vp[2][3]+vp[2][0], vp[3][3]+vp[3][0]); // Left
+    f.planes[1] = float4(vp[0][3]-vp[0][0], vp[1][3]-vp[1][0], vp[2][3]-vp[2][0], vp[3][3]-vp[3][0]); // Right
+    f.planes[2] = float4(vp[0][3]+vp[0][1], vp[1][3]+vp[1][1], vp[2][3]+vp[2][1], vp[3][3]+vp[3][1]); // Bottom
+    f.planes[3] = float4(vp[0][3]-vp[0][1], vp[1][3]-vp[1][1], vp[2][3]-vp[2][1], vp[3][3]-vp[3][1]); // Top
+    f.planes[4] = float4(vp[0][3]-vp[0][2], vp[1][3]-vp[1][2], vp[2][3]-vp[2][2], vp[3][3]-vp[3][2]); // Near
+    f.planes[5] = float4(vp[0][2],           vp[1][2],           vp[2][2],           vp[3][2]);          // Far
 
-    // Normalize all planes
     [unroll]
     for (int i = 0; i < 6; ++i) {
         float len = length(f.planes[i].xyz);
@@ -162,22 +142,23 @@ bool sphereInsideFrustum(Frustum frust, float3 center, float radius) {
 }
 
 // --- Find which instance a global meshlet index belongs to ---
-// Walk the instance list linearly. For large instance counts a prefix-sum
-// buffer prepared on the CPU would be faster, but this is simple and correct.
+// Uses meshlet_offset + meshlet_count directly from each instance — correct
+// regardless of whether the GpuInstance buffer is in the same order as the
+// meshlet buffer (which is NOT guaranteed when GLTF nodes reference meshes
+// out of their array order). An accumulated-offset walk would fail in that case.
 void findInstanceAndLocal(uint globalMeshletIdx,
                           out uint instanceId,
                           out uint localMeshletIdx) {
-    uint offset = 0;
     for (uint i = 0; i < pc.instanceCount; ++i) {
         StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.instanceBufferSlot)];
-        uint4 packed = asuint(buf[i * 5 + 4]);
-        uint count = packed.y; // meshlet_count
-        if (globalMeshletIdx < offset + count) {
+        uint4 packed          = asuint(buf[i * 5 + 4]);
+        uint meshlet_offset   = packed.x;
+        uint meshlet_count    = packed.y;
+        if (globalMeshletIdx >= meshlet_offset && globalMeshletIdx < meshlet_offset + meshlet_count) {
             instanceId      = i;
-            localMeshletIdx = globalMeshletIdx - offset;
+            localMeshletIdx = globalMeshletIdx - meshlet_offset;
             return;
         }
-        offset += count;
     }
     // Should not reach here if totalMeshlets is correct.
     instanceId      = 0;
@@ -226,6 +207,7 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
     // Write VkDrawMeshTasksIndirectCommandEXT: { groupCountX=1, groupCountY=1, groupCountZ=1 }
     commandsBuf.Store3(prevCount * 12, uint3(1, 1, 1));
 
-    // Store the global meshlet index so the mesh shader can look it up by SV_GroupID.x.
-    survivingBuf.Store(prevCount * 4, globalId);
+    // Store (globalMeshletId, instanceId) as a uint2 so the task shader can use both
+    // without re-running findInstanceAndLocal (which fails for shared primitives).
+    survivingBuf.Store2(prevCount * 8, uint2(globalId, instanceId));
 }

@@ -48,6 +48,7 @@ struct PushBlock {
     uint motionVecStorageSlot;
     uint screenWidth;
     uint screenHeight;
+    uint instanceCount;  // number of GpuInstance entries — for meshlet→instance walk
 };
 
 [[vk::push_constant]] PushBlock pc;
@@ -204,7 +205,7 @@ uint loadMeshletVertexIndex(uint slot, uint flatIdx) {
 // --- Read 3 u8 triangle indices from the packed triangle buffer ---
 uint3 loadTriangleIndices(uint trianglesSlot, uint triangleOffset, uint triIdx) {
     RWByteAddressBuffer triBuf = g_rwBuffers[NonUniformResourceIndex(trianglesSlot)];
-    uint byteOffset = (triangleOffset + triIdx) * 3;
+    uint byteOffset = triangleOffset + triIdx * 3;
     uint wordOffset = byteOffset & ~3u;
     uint shift      = (byteOffset & 3u) * 8;
 
@@ -273,28 +274,26 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
         return;
     }
 
-    // Decode visibility: upper 16 bits = instance_id, lower 16 bits = triangle_id.
-    uint instanceId = visPacked >> 16;
-    uint triangleId = visPacked & 0xFFFFu;
+    // Decode visibility — encoding set by visibility_buffer.mesh.hlsl:
+    //   [31:7] globalMeshletId (25 bits, direct index into the meshlet buffer)
+    //   [6:0]  localTriId      (7 bits, MAX_TRIANGLES=124 fits)
+    uint globalMeshletId = visPacked >> 7u;
+    uint localTriId      = visPacked & 0x7Fu;
 
-    // Load instance and meshlet data.
-    GpuInstance inst = loadInstance(instanceId);
-
-    // Determine which meshlet contains this triangle.
-    // Walk meshlets within the instance to find the one containing triangleId.
-    uint meshletIdx = 0;
-    uint triOffset  = 0;
-    uint localTriId = triangleId;
-    for (uint mi = 0; mi < inst.meshlet_count; ++mi) {
-        Meshlet ml = loadMeshlet(inst.meshlet_offset + mi);
-        if (localTriId < ml.triangle_count) {
-            meshletIdx = inst.meshlet_offset + mi;
+    // Find which instance owns this global meshlet by range-checking meshlet_offset.
+    // O(n_instances) but n_instances is typically small; no extra lookup buffer needed.
+    uint instanceId = 0;
+    for (uint i = 0; i < pc.instanceCount; ++i) {
+        GpuInstance testInst = loadInstance(i);
+        if (globalMeshletId >= testInst.meshlet_offset &&
+            globalMeshletId <  testInst.meshlet_offset + testInst.meshlet_count) {
+            instanceId = i;
             break;
         }
-        localTriId -= ml.triangle_count;
     }
 
-    Meshlet meshlet = loadMeshlet(meshletIdx);
+    GpuInstance inst = loadInstance(instanceId);
+    Meshlet meshlet  = loadMeshlet(globalMeshletId);
 
     // Load 3 local triangle vertex indices and remap to global vertex indices.
     uint3 triLocalIdx = loadTriangleIndices(pc.meshletTrianglesSlot,

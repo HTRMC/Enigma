@@ -86,10 +86,11 @@ void IndirectDrawBuffer::resize(size_t max_meshlets) {
         m_count_slot = m_descriptors->registerUavBuffer(m_count_buffer, size);
     }
 
-    // Surviving IDs buffer: one u32 per surviving meshlet (global meshlet index).
+    // Surviving IDs buffer: two u32s per surviving meshlet — [globalMeshletId, instanceId].
     // Written by GpuCullPass, read by the task shader via survivingIdsSlot.
+    // Stride is 8 bytes so instanceId is available without re-running findInstanceAndLocal.
     {
-        const VkDeviceSize size = max_meshlets * sizeof(u32);
+        const VkDeviceSize size = max_meshlets * sizeof(u32) * 2;
         VkBufferCreateInfo bufCI{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
         bufCI.size = size; bufCI.usage = usage; bufCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ENIGMA_VK_CHECK(vmaCreateBuffer(m_allocator->handle(), &bufCI, &allocCI,

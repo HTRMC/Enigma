@@ -28,9 +28,10 @@ struct MaterialEvalPushBlock {
     u32 motionVecStorageSlot;
     u32 screenWidth;
     u32 screenHeight;
+    u32 instanceCount;  // number of GpuInstance entries — for meshlet→instance walk
 };
 
-static_assert(sizeof(MaterialEvalPushBlock) == 56);
+static_assert(sizeof(MaterialEvalPushBlock) == 60);
 
 MaterialEvalPass::MaterialEvalPass(gfx::Device& device)
     : m_device(&device)
@@ -182,6 +183,7 @@ void MaterialEvalPass::record(VkCommandBuffer         cmd,
     pc.motionVecStorageSlot  = m_motionVec_slot;
     pc.screenWidth           = extent.width;
     pc.screenHeight          = extent.height;
+    pc.instanceCount         = static_cast<u32>(scene.instance_count());
 
     vkCmdPushConstants(cmd, m_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                        0, sizeof(pc), &pc);

@@ -102,13 +102,17 @@ struct Frustum {
 };
 
 Frustum extractFrustum(float4x4 vp) {
+    // DXC compiles with -Zpc (column-major), so vp[col][row] — i.e. vp[i][j] = VP_{row=j, col=i}.
+    // clip = vp * world  →  clip.x = row0·world, clip.w = row3·world.
+    // Left plane:   clip.w + clip.x ≥ 0  →  (row3 + row0)·world ≥ 0
+    //   A = VP_{3,0} + VP_{0,0} = vp[0][3] + vp[0][0], etc.
     Frustum f;
-    f.planes[0] = float4(vp[0][3] + vp[0][0], vp[1][3] + vp[1][0], vp[2][3] + vp[2][0], vp[3][3] + vp[3][0]); // Left
-    f.planes[1] = float4(vp[0][3] - vp[0][0], vp[1][3] - vp[1][0], vp[2][3] - vp[2][0], vp[3][3] - vp[3][0]); // Right
-    f.planes[2] = float4(vp[0][3] + vp[0][1], vp[1][3] + vp[1][1], vp[2][3] + vp[2][1], vp[3][3] + vp[3][1]); // Bottom
-    f.planes[3] = float4(vp[0][3] - vp[0][1], vp[1][3] - vp[1][1], vp[2][3] - vp[2][1], vp[3][3] - vp[3][1]); // Top
-    f.planes[4] = float4(vp[0][3] - vp[0][2], vp[1][3] - vp[1][2], vp[2][3] - vp[2][2], vp[3][3] - vp[3][2]); // Near
-    f.planes[5] = float4(vp[0][2], vp[1][2], vp[2][2], vp[3][2]);                                               // Far
+    f.planes[0] = float4(vp[0][3]+vp[0][0], vp[1][3]+vp[1][0], vp[2][3]+vp[2][0], vp[3][3]+vp[3][0]); // Left
+    f.planes[1] = float4(vp[0][3]-vp[0][0], vp[1][3]-vp[1][0], vp[2][3]-vp[2][0], vp[3][3]-vp[3][0]); // Right
+    f.planes[2] = float4(vp[0][3]+vp[0][1], vp[1][3]+vp[1][1], vp[2][3]+vp[2][1], vp[3][3]+vp[3][1]); // Bottom
+    f.planes[3] = float4(vp[0][3]-vp[0][1], vp[1][3]-vp[1][1], vp[2][3]-vp[2][1], vp[3][3]-vp[3][1]); // Top
+    f.planes[4] = float4(vp[0][3]-vp[0][2], vp[1][3]-vp[1][2], vp[2][3]-vp[2][2], vp[3][3]-vp[3][2]); // Near
+    f.planes[5] = float4(vp[0][2],           vp[1][2],           vp[2][2],           vp[3][2]);          // Far
 
     [unroll]
     for (int i = 0; i < 6; ++i) {
@@ -136,21 +140,22 @@ struct MeshPayload {
 groupshared MeshPayload s_payload;
 
 // --- Find which instance owns a global meshlet index ---
-// Walks the instance buffer linearly. The gpu_cull pass already filtered by
-// actualSurviving so the surviving IDs buffer is compact.
+// Uses meshlet_offset + meshlet_count directly — correct regardless of whether
+// instances appear in the GpuInstance buffer in a different order than their
+// meshlets appear in the global meshlet buffer (which can happen when GLTF nodes
+// reference meshes out of their load order). An accumulated-offset walk fails there.
 void findInstanceAndLocal(uint globalMeshletIdx, uint instanceCount,
                           out uint instanceId, out uint localMeshletIdx) {
-    uint offset = 0;
     for (uint i = 0; i < instanceCount; ++i) {
         StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.instanceBufferSlot)];
-        uint4 packed = asuint(buf[i * 5 + 4]);
-        uint count = packed.y;
-        if (globalMeshletIdx < offset + count) {
+        uint4 packed        = asuint(buf[i * 5 + 4]);
+        uint meshlet_offset = packed.x;
+        uint meshlet_count  = packed.y;
+        if (globalMeshletIdx >= meshlet_offset && globalMeshletIdx < meshlet_offset + meshlet_count) {
             instanceId      = i;
-            localMeshletIdx = globalMeshletIdx - offset;
+            localMeshletIdx = globalMeshletIdx - meshlet_offset;
             return;
         }
-        offset += count;
     }
     instanceId      = 0;
     localMeshletIdx = 0;
@@ -175,16 +180,23 @@ void ASMain(
     uint batchBase   = groupId.x * TASK_GROUP_SIZE;
     uint meshletSlot = batchBase + groupIndex;
 
+    // Pre-initialize payload to sentinel so stale LDS from a prior wave never leaks
+    // into the mesh shader if DispatchMesh(0,...) misbehaves on a given driver.
+    s_payload.meshlet_indices[groupIndex] = 0xFFFFFFFFu;
+    s_payload.instance_ids[groupIndex]    = 0u;
+    GroupMemoryBarrierWithGroupSync();
+
     bool visible = false;
     uint globalMeshletId = 0;
     uint instanceId      = 0;
 
     if (meshletSlot < actualSurviving) {
         RWByteAddressBuffer survivingBuf = g_rwBuffers[NonUniformResourceIndex(pc.survivingIdsSlot)];
-        globalMeshletId = survivingBuf.Load(meshletSlot * 4);
-
-        uint localMeshletId;
-        findInstanceAndLocal(globalMeshletId, pc.instanceCount, instanceId, localMeshletId);
+        // Read (globalMeshletId, instanceId) packed by gpu_cull — stride 8 bytes.
+        // instanceId comes directly from the cull pass so no findInstanceAndLocal needed.
+        uint2 entry     = survivingBuf.Load2(meshletSlot * 8);
+        globalMeshletId = entry.x;
+        instanceId      = entry.y;
         visible = true;
     }
 
@@ -197,6 +209,10 @@ void ASMain(
         s_payload.instance_ids[laneIndex]    = instanceId;
     }
 
-    // Dispatch one mesh shader group per surviving meshlet in this batch.
+    // All invocations MUST call DispatchMesh exactly once (EXT_mesh_shader spec).
+    // Calling it conditionally (only when laneCount > 0) is undefined behavior.
+    // When laneCount == 0, DispatchMesh(0,...) dispatches no mesh groups on a
+    // conformant driver. Stale-LDS safety is handled by the sentinel init above
+    // and the 0xFFFFFFFF guard in the mesh shader.
     DispatchMesh(laneCount, 1, 1, s_payload);
 }

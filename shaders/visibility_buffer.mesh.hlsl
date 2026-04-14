@@ -116,7 +116,7 @@ struct VertexOutput {
 };
 
 // --- Mesh shader main ---
-[numthreads(MAX_VERTICES, 1, 1)]
+[numthreads(MAX_TRIANGLES, 1, 1)]
 [outputtopology("triangle")]
 void MSMain(
     in uint3 groupId    : SV_GroupID,
@@ -127,6 +127,13 @@ void MSMain(
 ) {
     uint globalMeshletId = p.meshlet_indices[groupId.x];
     uint instanceId      = p.instance_ids[groupId.x];
+
+    // Sentinel check: if the task shader wrote 0xFFFFFFFF (uninitialized slot),
+    // output nothing rather than rendering garbage geometry.
+    if (globalMeshletId == 0xFFFFFFFFu) {
+        SetMeshOutputCounts(0, 0);
+        return;
+    }
 
     GpuInstance inst = loadInstance(instanceId);
     Meshlet meshlet  = loadMeshlet(globalMeshletId);
@@ -158,11 +165,13 @@ void MSMain(
         float4 worldPos = mul(inst.transform, float4(position, 1.0));
         float4 clipPos  = mul(cam.viewProj, worldPos);
 
+        // Vis buffer encoding (32 bits):
+        //   [31:7] globalMeshletId (25 bits, up to 33M total meshlets)
+        //   [6:0]  localPrimId     (7 bits, MAX_TRIANGLES=124 fits)
+        // Instance is resolved in material_eval by range-checking meshlet_offset.
         VertexOutput v;
         v.pos       = clipPos;
-        // Pack visibility: instance_id in upper 16 bits, local triangle ID written per-primitive below.
-        // Per-vertex we store instance_id; the actual triangle_id is set per-primitive.
-        v.vis_value = instanceId << 16; // triangle ID portion filled per-primitive
+        v.vis_value = globalMeshletId << 7u;
         verts[groupIndex] = v;
     }
 
@@ -171,7 +180,7 @@ void MSMain(
         // Meshlet triangles are packed as 3 u8 indices per triangle in a ByteAddressBuffer.
         // Each triangle = 3 bytes. We load a uint and extract bytes.
         RWByteAddressBuffer triBuf = g_rwBuffers[NonUniformResourceIndex(pc.meshletTrianglesSlot)];
-        uint byteOffset = (meshlet.triangle_offset + groupIndex) * 3;
+        uint byteOffset = meshlet.triangle_offset + groupIndex * 3;
         uint wordOffset = byteOffset & ~3u; // align to 4 bytes
         uint shift      = (byteOffset & 3u) * 8;
 
@@ -202,8 +211,8 @@ void MSMain(
 
 // --- Pixel shader ---
 // Writes packed visibility value to R32_UINT render target.
+// Encoding: [31:7] globalMeshletId | [6:0] localPrimId
 uint PSMain(VertexOutput input, uint primitiveId : SV_PrimitiveID) : SV_Target0 {
-    // Upper 16 bits: instance ID (already in vis_value from mesh shader).
-    // Lower 16 bits: primitive ID within this meshlet.
-    return (input.vis_value & 0xFFFF0000u) | (primitiveId & 0xFFFFu);
+    // Lower 7 bits of vis_value are 0 (globalMeshletId << 7); OR in the primitive ID.
+    return input.vis_value | (primitiveId & 0x7Fu);
 }
