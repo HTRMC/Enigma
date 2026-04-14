@@ -5,6 +5,7 @@
 #include "gfx/Allocator.h"
 #include "gfx/DescriptorAllocator.h"
 #include "gfx/Device.h"
+#include "gfx/FrameContext.h"
 
 #define VMA_STATIC_VULKAN_FUNCTIONS  0
 #define VMA_DYNAMIC_VULKAN_FUNCTIONS 0
@@ -25,15 +26,18 @@ GpuSceneBuffer::GpuSceneBuffer(gfx::Device& device, gfx::Allocator& allocator,
     , m_descriptors(&descriptors)
 {
     ensure_capacity(kInitialCapacity);
-    ENIGMA_LOG_INFO("[gpu_scene] created ({} bytes initial capacity)", kInitialCapacity);
+    ENIGMA_LOG_INFO("[gpu_scene] created ({} bytes initial capacity, {} staging buffers)",
+                    kInitialCapacity, gfx::MAX_FRAMES_IN_FLIGHT);
 }
 
 GpuSceneBuffer::~GpuSceneBuffer() {
     if (m_slot != 0) {
         m_descriptors->releaseStorageBuffer(m_slot);
     }
-    if (m_staging != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(m_allocator->handle(), m_staging, m_staging_alloc);
+    for (u32 i = 0; i < gfx::MAX_FRAMES_IN_FLIGHT; ++i) {
+        if (m_staging[i] != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(m_allocator->handle(), m_staging[i], m_staging_alloc[i]);
+        }
     }
     if (m_gpu_buffer != VK_NULL_HANDLE) {
         vmaDestroyBuffer(m_allocator->handle(), m_gpu_buffer, m_gpu_alloc);
@@ -50,26 +54,29 @@ u32 GpuSceneBuffer::add_instance(const GpuInstance& inst) {
     return index;
 }
 
-void GpuSceneBuffer::upload(VkCommandBuffer cmd) {
+void GpuSceneBuffer::upload(VkCommandBuffer cmd, u32 frameIndex) {
+    ENIGMA_ASSERT(frameIndex < gfx::MAX_FRAMES_IN_FLIGHT);
     if (m_instances.empty()) return;
 
     const size_t required = m_instances.size() * sizeof(GpuInstance);
     ensure_capacity(required);
 
-    // Map staging buffer, copy data, unmap.
+    // Write into this frame's staging buffer — safe because the GPU is at most
+    // MAX_FRAMES_IN_FLIGHT-1 frames behind, so the previous use of this slot
+    // has completed before we get back to it.
     void* mapped = nullptr;
-    ENIGMA_VK_CHECK(vmaMapMemory(m_allocator->handle(), m_staging_alloc, &mapped));
+    ENIGMA_VK_CHECK(vmaMapMemory(m_allocator->handle(), m_staging_alloc[frameIndex], &mapped));
     std::memcpy(mapped, m_instances.data(), required);
-    vmaUnmapMemory(m_allocator->handle(), m_staging_alloc);
+    vmaUnmapMemory(m_allocator->handle(), m_staging_alloc[frameIndex]);
 
     // Copy staging -> GPU.
     VkBufferCopy region{};
     region.srcOffset = 0;
     region.dstOffset = 0;
     region.size      = required;
-    vkCmdCopyBuffer(cmd, m_staging, m_gpu_buffer, 1, &region);
+    vkCmdCopyBuffer(cmd, m_staging[frameIndex], m_gpu_buffer, 1, &region);
 
-    // Barrier: transfer write -> shader read.
+    // Barrier: transfer write -> shader read (compute cull + mesh shader).
     VkBufferMemoryBarrier2 barrier{};
     barrier.sType         = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
     barrier.srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT;
@@ -103,12 +110,16 @@ void GpuSceneBuffer::ensure_capacity(size_t required) {
         m_slot = 0;
     }
 
-    // Destroy old buffers.
-    if (m_staging != VK_NULL_HANDLE) {
-        vmaDestroyBuffer(m_allocator->handle(), m_staging, m_staging_alloc);
-        m_staging       = VK_NULL_HANDLE;
-        m_staging_alloc = nullptr;
+    // Destroy old per-frame staging buffers.
+    for (u32 i = 0; i < gfx::MAX_FRAMES_IN_FLIGHT; ++i) {
+        if (m_staging[i] != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(m_allocator->handle(), m_staging[i], m_staging_alloc[i]);
+            m_staging[i]       = VK_NULL_HANDLE;
+            m_staging_alloc[i] = nullptr;
+        }
     }
+
+    // Destroy old GPU buffer.
     if (m_gpu_buffer != VK_NULL_HANDLE) {
         vmaDestroyBuffer(m_allocator->handle(), m_gpu_buffer, m_gpu_alloc);
         m_gpu_buffer = VK_NULL_HANDLE;
@@ -128,7 +139,7 @@ void GpuSceneBuffer::ensure_capacity(size_t required) {
     ENIGMA_VK_CHECK(vmaCreateBuffer(m_allocator->handle(), &gpuBufCI, &gpuAllocCI,
                                     &m_gpu_buffer, &m_gpu_alloc, nullptr));
 
-    // Create staging buffer.
+    // Create one staging buffer per frame.
     VkBufferCreateInfo stagingCI{};
     stagingCI.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     stagingCI.size        = new_capacity;
@@ -139,8 +150,10 @@ void GpuSceneBuffer::ensure_capacity(size_t required) {
     stagingAllocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
     stagingAllocCI.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
 
-    ENIGMA_VK_CHECK(vmaCreateBuffer(m_allocator->handle(), &stagingCI, &stagingAllocCI,
-                                    &m_staging, &m_staging_alloc, nullptr));
+    for (u32 i = 0; i < gfx::MAX_FRAMES_IN_FLIGHT; ++i) {
+        ENIGMA_VK_CHECK(vmaCreateBuffer(m_allocator->handle(), &stagingCI, &stagingAllocCI,
+                                        &m_staging[i], &m_staging_alloc[i], nullptr));
+    }
 
     m_gpu_capacity = new_capacity;
 
@@ -148,7 +161,8 @@ void GpuSceneBuffer::ensure_capacity(size_t required) {
     m_slot = m_descriptors->registerStorageBuffer(
         m_gpu_buffer, static_cast<VkDeviceSize>(new_capacity));
 
-    ENIGMA_LOG_INFO("[gpu_scene] resized to {} bytes (slot {})", new_capacity, m_slot);
+    ENIGMA_LOG_INFO("[gpu_scene] resized to {} bytes (slot {}, {} staging buffers)",
+                    new_capacity, m_slot, gfx::MAX_FRAMES_IN_FLIGHT);
 }
 
 } // namespace enigma

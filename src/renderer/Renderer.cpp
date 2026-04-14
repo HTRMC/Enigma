@@ -798,7 +798,7 @@ void Renderer::drawFrame() {
                 m_gpuScene->add_instance(inst);
             }
         }
-        m_gpuScene->upload(frame.commandBuffer);
+        m_gpuScene->upload(frame.commandBuffer, m_frameIndex);
 
         m_indirectBuffer->reset_count(frame.commandBuffer);
 

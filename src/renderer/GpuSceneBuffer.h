@@ -2,9 +2,11 @@
 
 #include "core/Math.h"
 #include "core/Types.h"
+#include "gfx/FrameContext.h"
 
 #include <volk.h>
 
+#include <array>
 #include <vector>
 
 // Forward declare VMA handle — full header included only in the .cpp.
@@ -48,8 +50,10 @@ public:
     u32 add_instance(const GpuInstance& inst);
 
     // Upload all added instances to the GPU buffer.
+    // frameIndex selects which per-frame staging buffer to write into,
+    // preventing CPU/GPU races when MAX_FRAMES_IN_FLIGHT > 1.
     // Must be called after all add_instance() calls and before draw.
-    void upload(VkCommandBuffer cmd);
+    void upload(VkCommandBuffer cmd, u32 frameIndex);
 
     // Bindless slot of the uploaded SSBO (registered in DescriptorAllocator).
     u32 slot() const { return m_slot; }
@@ -69,12 +73,15 @@ private:
 
     std::vector<GpuInstance> m_instances;
 
-    // GPU-side SSBO + staging buffer.
-    VkBuffer      m_gpu_buffer    = VK_NULL_HANDLE;
-    VmaAllocation m_gpu_alloc     = nullptr;
-    VkBuffer      m_staging       = VK_NULL_HANDLE;
-    VmaAllocation m_staging_alloc = nullptr;
-    size_t        m_gpu_capacity  = 0; // in bytes
+    // GPU-side SSBO.
+    VkBuffer      m_gpu_buffer   = VK_NULL_HANDLE;
+    VmaAllocation m_gpu_alloc    = nullptr;
+    size_t        m_gpu_capacity = 0; // in bytes
+
+    // Per-frame staging buffers — one per MAX_FRAMES_IN_FLIGHT to avoid
+    // CPU/GPU races when the CPU writes frame N+1 while the GPU reads frame N.
+    std::array<VkBuffer,      gfx::MAX_FRAMES_IN_FLIGHT> m_staging{};
+    std::array<VmaAllocation, gfx::MAX_FRAMES_IN_FLIGHT> m_staging_alloc{};
 
     u32 m_slot = 0; // bindless SSBO slot
 };
