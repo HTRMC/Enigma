@@ -46,6 +46,15 @@ public:
     // Reset draw count and surviving count to 0 (call each frame before cull).
     void reset_count(VkCommandBuffer cmd);
 
+    // Copy the 24-byte count buffer (surviving + 5 plane counters) to a
+    // HOST_VISIBLE readback buffer. Insert COMPUTE→TRANSFER barrier internally.
+    // Call after the cull pass record, before queue submit.
+    void record_count_readback(VkCommandBuffer cmd);
+
+    // Map the readback buffer and log per-plane cull counts.
+    // Call after the frame's timeline semaphore has been waited on (GPU done).
+    void log_diag_plane_counts();
+
     VkBuffer buffer()           const { return m_buffer;           }
     VkBuffer count_buffer()     const { return m_count_buffer;     }
     VkBuffer surviving_buffer() const { return m_surviving_buffer; }
@@ -64,10 +73,12 @@ private:
 
     VkBuffer      m_buffer           = VK_NULL_HANDLE; // DrawMeshTasksCommand[]
     VmaAllocation m_alloc            = nullptr;
-    VkBuffer      m_count_buffer     = VK_NULL_HANDLE; // u32 draw count
+    VkBuffer      m_count_buffer     = VK_NULL_HANDLE; // u32[6]: surviving + 5 plane counters
     VmaAllocation m_count_alloc      = nullptr;
     VkBuffer      m_surviving_buffer = VK_NULL_HANDLE; // u32[] surviving meshlet IDs
     VmaAllocation m_surviving_alloc  = nullptr;
+    VkBuffer      m_readback_buffer  = VK_NULL_HANDLE; // HOST_VISIBLE copy of count_buffer
+    VmaAllocation m_readback_alloc   = nullptr;
 
     u32    m_commands_slot  = 0;
     u32    m_count_slot     = 0;

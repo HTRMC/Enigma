@@ -68,6 +68,7 @@ void GpuSceneBuffer::upload(VkCommandBuffer cmd, u32 frameIndex) {
     ENIGMA_VK_CHECK(vmaMapMemory(m_allocator->handle(), m_staging_alloc[frameIndex], &mapped));
     std::memcpy(mapped, m_instances.data(), required);
     vmaUnmapMemory(m_allocator->handle(), m_staging_alloc[frameIndex]);
+    vmaFlushAllocation(m_allocator->handle(), m_staging_alloc[frameIndex], 0, required);
 
     // Copy staging -> GPU.
     VkBufferCopy region{};
@@ -82,7 +83,8 @@ void GpuSceneBuffer::upload(VkCommandBuffer cmd, u32 frameIndex) {
     barrier.srcStageMask  = VK_PIPELINE_STAGE_2_COPY_BIT;
     barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
     barrier.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
-                          | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
+                          | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT
+                          | VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT;
     barrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
     barrier.buffer        = m_gpu_buffer;
     barrier.offset        = 0;

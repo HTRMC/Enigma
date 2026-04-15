@@ -499,6 +499,7 @@ void Renderer::uploadCameraData() {
     // Inject previous frame's viewProj for motion vector computation.
     data.prevViewProj = m_prevViewProj;
     std::memcpy(cb.mapped, &data, sizeof(data));
+    vmaFlushAllocation(m_allocator->handle(), cb.allocation, 0, sizeof(data));
 
     // Save current viewProj so next frame can use it as prevViewProj.
     m_prevViewProj    = data.viewProj;
@@ -650,6 +651,7 @@ void Renderer::drawFrame() {
     // (The previous frame's submissions are guaranteed done by the timeline wait above.)
     if (frame.frameValue > 0) {
         m_lastGpuTimings = m_gpuProfiler->readback();
+        if (m_indirectBuffer) m_indirectBuffer->log_diag_plane_counts();
     }
 
     VkCommandBufferBeginInfo beginInfo{};
@@ -831,6 +833,8 @@ void Renderer::drawFrame() {
         if (m_gpuMeshlets->total_meshlet_count() > 0) {
             m_gpuCullPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
                                    *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot);
+
+            m_indirectBuffer->record_count_readback(frame.commandBuffer);
 
             // Compute (cull) → task shader barrier.
             // The task shader reads the count buffer and surviving IDs buffer
