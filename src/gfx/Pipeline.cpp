@@ -133,7 +133,7 @@ Pipeline::Pipeline(Device& device, const CreateInfo& info)
     // -------------------------------------------------------------------
     VkPipelineRasterizationStateCreateInfo rasterizer{};
     rasterizer.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-    rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+    rasterizer.polygonMode = info.polygonMode;
     rasterizer.cullMode    = info.cullMode;
     rasterizer.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rasterizer.lineWidth   = 1.0f;

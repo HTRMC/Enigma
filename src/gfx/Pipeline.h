@@ -82,6 +82,8 @@ public:
         // depth values are written. Default true (opaque passes write depth).
         // Set false for transparent passes that only depth-test, not depth-write.
         bool                  depthWriteEnable          = true;
+        // When fillModeNonSolid is enabled, set to VK_POLYGON_MODE_LINE for wireframe.
+        VkPolygonMode         polygonMode               = VK_POLYGON_MODE_FILL;
     };
 
     Pipeline(Device& device, const CreateInfo& info);

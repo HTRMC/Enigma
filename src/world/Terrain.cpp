@@ -84,6 +84,7 @@ Terrain::Terrain(gfx::Device& device,
 }
 
 Terrain::~Terrain() {
+    delete m_wireframePipeline;
     delete m_pipeline;
     if (m_chunkSSBO != VK_NULL_HANDLE) {
         vmaDestroyBuffer(m_allocator->handle(), m_chunkSSBO, m_chunkAlloc);
@@ -257,6 +258,81 @@ void Terrain::record(VkCommandBuffer cmd,
                        0, sizeof(pc), &pc);
 
     // 6 vertices per quad, N*N quads per chunk, `m_totalInstances` chunks.
+    const u32 vertsPerChunk = 6u * kQuadsPerChunk * kQuadsPerChunk;
+    vkCmdDraw(cmd, vertsPerChunk, m_totalInstances, 0, 0);
+}
+
+void Terrain::buildWireframePipeline(gfx::ShaderManager& shaderManager,
+                                      VkDescriptorSetLayout globalSetLayout,
+                                      VkFormat swapchainColorFormat) {
+    ENIGMA_ASSERT(m_pipeline != nullptr && "buildWireframePipeline called before buildPipeline");
+    ENIGMA_ASSERT(m_wireframePipeline == nullptr && "buildWireframePipeline called twice");
+
+    m_wireframeFragPath = Paths::shaderSourceDir() / "terrain_wireframe.frag.hlsl";
+
+    VkShaderModule vert = shaderManager.compile(m_shaderPath, gfx::ShaderManager::Stage::Vertex,   "VSMain");
+    VkShaderModule frag = shaderManager.compile(m_wireframeFragPath, gfx::ShaderManager::Stage::Fragment, "PSMain");
+
+    gfx::Pipeline::CreateInfo ci{};
+    ci.vertShader              = vert;
+    ci.vertEntryPoint          = "VSMain";
+    ci.fragShader              = frag;
+    ci.fragEntryPoint          = "PSMain";
+    ci.globalSetLayout         = globalSetLayout;
+    ci.colorAttachmentFormat   = swapchainColorFormat;
+    ci.depthAttachmentFormat   = VK_FORMAT_UNDEFINED; // no depth test — same as mesh wireframe
+    ci.pushConstantSize        = 32; // 16 bytes TerrainPushBlock + 16 bytes wire color
+    ci.cullMode                = VK_CULL_MODE_NONE;
+    ci.polygonMode             = VK_POLYGON_MODE_LINE;
+
+    m_wireframePipeline = new gfx::Pipeline(*m_device, ci);
+
+    vkDestroyShaderModule(m_device->logical(), vert, nullptr);
+    vkDestroyShaderModule(m_device->logical(), frag, nullptr);
+
+    ENIGMA_LOG_INFO("[terrain] wireframe pipeline built");
+}
+
+void Terrain::recordWireframe(VkCommandBuffer cmd,
+                               VkExtent2D      extent,
+                               VkDescriptorSet globalSet,
+                               u32             cameraSlot,
+                               vec3            wireColor) {
+    if (!m_wireframePipeline) return;
+    if (m_totalInstances == 0) return;
+
+    VkViewport viewport{};
+    viewport.width    = static_cast<float>(extent.width);
+    viewport.height   = static_cast<float>(extent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{};
+    scissor.extent = extent;
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_wireframePipeline->handle());
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            m_wireframePipeline->layout(), 0, 1, &globalSet, 0, nullptr);
+
+    // Push VS data — TerrainPushBlock at bytes 0-15.
+    TerrainPushBlock pc{};
+    pc.chunkSSBOSlot = m_chunkSlot;
+    pc.cameraSlot    = cameraSlot;
+    pc.quadsPerSide  = kQuadsPerChunk;
+    pc.pad           = 0.0f;
+    vkCmdPushConstants(cmd, m_wireframePipeline->layout(),
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(TerrainPushBlock), &pc);
+
+    // Push wire color for FS — at bytes 16-31.
+    struct WireColorPush { float r, g, b, _pad; };
+    WireColorPush wc{ wireColor.x, wireColor.y, wireColor.z, 0.0f };
+    vkCmdPushConstants(cmd, m_wireframePipeline->layout(),
+                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       16, sizeof(WireColorPush), &wc);
+
     const u32 vertsPerChunk = 6u * kQuadsPerChunk * kQuadsPerChunk;
     vkCmdDraw(cmd, vertsPerChunk, m_totalInstances, 0, 0);
 }

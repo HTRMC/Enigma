@@ -79,6 +79,23 @@ public:
                 VkDescriptorSet globalSet,
                 u32 cameraSlot);
 
+    // Build a wireframe pipeline (VK_POLYGON_MODE_LINE) targeting a single
+    // swapchain color attachment with no depth. Must be called after
+    // buildPipeline(). No-op if fillModeNonSolid is not supported.
+    void buildWireframePipeline(gfx::ShaderManager& shaderManager,
+                                VkDescriptorSetLayout globalSetLayout,
+                                VkFormat swapchainColorFormat);
+
+    bool hasWireframePipeline() const { return m_wireframePipeline != nullptr; }
+
+    // Draw terrain as wireframe lines. Must be called inside a render pass
+    // targeting the swapchain color attachment (no depth attachment).
+    void recordWireframe(VkCommandBuffer cmd,
+                         VkExtent2D extent,
+                         VkDescriptorSet globalSet,
+                         u32 cameraSlot,
+                         vec3 wireColor);
+
 private:
     void uploadChunkSSBO();
     void rebuildPipeline();
@@ -87,6 +104,8 @@ private:
     gfx::Allocator*           m_allocator           = nullptr;
     gfx::DescriptorAllocator* m_descriptorAllocator = nullptr;
     gfx::Pipeline*            m_pipeline            = nullptr;
+    gfx::Pipeline*            m_wireframePipeline = nullptr;
+    std::filesystem::path     m_wireframeFragPath;
 
     // GPU SSBO: array of TerrainChunkDesc (one per active chunk).
     VkBuffer      m_chunkSSBO  = VK_NULL_HANDLE;

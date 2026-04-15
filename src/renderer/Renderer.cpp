@@ -1358,12 +1358,42 @@ void Renderer::drawFrame() {
             wireDesc.clearColor   = {{0.0f, 0.0f, 0.0f, 1.0f}};
             wireDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
                 m_gpuProfiler->beginZone(cmd, "DebugWireframePass");
+                // Barrier: ensure MaterialEvalPass (compute) writes are visible
+                // to the task/mesh shaders that follow.
+                VkMemoryBarrier2 wfBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                wfBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+                wfBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                wfBarrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+                wfBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT
+                                        | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
+                wfBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+                VkDependencyInfo wfDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                wfDep.sType                = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+                wfDep.memoryBarrierCount   = 1;
+                wfDep.pMemoryBarriers      = &wfBarrier;
+                vkCmdPipelineBarrier2(cmd, &wfDep);
                 m_visibilityPass->recordWireframe(cmd, m_descriptorAllocator->globalSet(), ext,
                                                   *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
                                                   cameraSlot, m_wireframeColor);
                 m_gpuProfiler->endZone(cmd);
             };
             m_renderGraph->addRasterPass(std::move(wireDesc));
+
+            // Terrain wireframe overlay — LOAD preserves the mesh wireframe output.
+            if (m_terrain != nullptr && m_terrain->hasWireframePipeline()) {
+                gfx::RenderGraph::RasterPassDesc terrWireDesc{};
+                terrWireDesc.name        = "TerrainWireframePass";
+                terrWireDesc.colorTargets = {colorHandle};
+                terrWireDesc.colorLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+                terrWireDesc.execute     = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                    m_gpuProfiler->beginZone(cmd, "TerrainWireframePass");
+                    m_terrain->recordWireframe(cmd, ext,
+                                               m_descriptorAllocator->globalSet(),
+                                               cameraSlot, m_wireframeColor);
+                    m_gpuProfiler->endZone(cmd);
+                };
+                m_renderGraph->addRasterPass(std::move(terrWireDesc));
+            }
 
         } else if (m_debugMode == DebugMode::LitWireframe) {
             // === LIT WIREFRAME — lit scene (no post-proc) + wireframe overlay ===
@@ -1406,12 +1436,40 @@ void Renderer::drawFrame() {
             wireOverlayDesc.colorLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
             wireOverlayDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
                 m_gpuProfiler->beginZone(cmd, "DebugWireframeOverlayPass");
+                VkMemoryBarrier2 wfBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                wfBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+                wfBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                wfBarrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+                wfBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT
+                                        | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
+                wfBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+                VkDependencyInfo wfDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                wfDep.sType                = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+                wfDep.memoryBarrierCount   = 1;
+                wfDep.pMemoryBarriers      = &wfBarrier;
+                vkCmdPipelineBarrier2(cmd, &wfDep);
                 m_visibilityPass->recordWireframe(cmd, m_descriptorAllocator->globalSet(), ext,
                                                   *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
                                                   cameraSlot, m_wireframeColor);
                 m_gpuProfiler->endZone(cmd);
             };
             m_renderGraph->addRasterPass(std::move(wireOverlayDesc));
+
+            // Terrain wireframe overlay on lit wireframe.
+            if (m_terrain != nullptr && m_terrain->hasWireframePipeline()) {
+                gfx::RenderGraph::RasterPassDesc terrWireDesc{};
+                terrWireDesc.name         = "TerrainWireframePass";
+                terrWireDesc.colorTargets = {colorHandle};
+                terrWireDesc.colorLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
+                terrWireDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                    m_gpuProfiler->beginZone(cmd, "TerrainWireframePass");
+                    m_terrain->recordWireframe(cmd, ext,
+                                               m_descriptorAllocator->globalSet(),
+                                               cameraSlot, m_wireframeColor);
+                    m_gpuProfiler->endZone(cmd);
+                };
+                m_renderGraph->addRasterPass(std::move(terrWireDesc));
+            }
 
         } else if (m_debugMode == DebugMode::DetailLighting) {
             // === DETAIL LIGHTING — Cook-Torrance on white material ===
@@ -1575,6 +1633,16 @@ void Renderer::setScene(Scene* scene) {
     }
     if (m_scene != nullptr && m_gpuMeshlets) {
         uploadMeshlets();
+    }
+}
+
+void Renderer::setTerrain(Terrain* terrain) {
+    m_terrain = terrain;
+    // Build terrain wireframe pipeline if fillModeNonSolid is available.
+    if (m_terrain && m_device->fillModeNonSolidSupported()) {
+        m_terrain->buildWireframePipeline(*m_shaderManager,
+                                          m_descriptorAllocator->layout(),
+                                          m_swapchain->format());
     }
 }
 

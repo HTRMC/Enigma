@@ -100,7 +100,7 @@ public:
     // the same render pass as GBufferPass so it writes straight into
     // the deferred G-buffer and participates in lighting / RT effects.
     // Pass nullptr to detach.
-    void setTerrain(Terrain* terrain) { m_terrain = terrain; }
+    void setTerrain(Terrain* terrain);
 
 
     // Set the directional sun light. Takes effect on the next drawFrame().
