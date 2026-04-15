@@ -4,10 +4,10 @@
 // Renders alpha-blended primitives onto the HDR colour buffer.
 //
 // Lighting: single directional sun (no light grid). PBR Cook-Torrance
-// with the same material struct and bindless layout as gbuffer.hlsl.
+// with the same material struct and bindless layout as GBufferFormats.h.
 // Alpha is taken from baseColorFactor.a and the base colour texture.
 //
-// Vertex data layout: 3 float4 per vertex (identical to gbuffer.hlsl):
+// Vertex data layout: 3 float4 per vertex:
 //   [vid*3+0] = (position.x, position.y, position.z, normal.x)
 //   [vid*3+1] = (normal.y,   normal.z,   uv.x,       uv.y)
 //   [vid*3+2] = (tangent.x,  tangent.y,  tangent.z,  tangent.w)

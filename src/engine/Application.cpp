@@ -15,7 +15,7 @@
 #include "physics/PhysicsWorld.h"
 #include "physics/VehicleController.h"
 #include "platform/Window.h"
-#include "renderer/GBufferPass.h"
+#include "renderer/GBufferFormats.h"
 #include "renderer/Renderer.h"
 #include "scene/Camera.h"
 #include "scene/FollowCamera.h"
@@ -95,11 +95,11 @@ int Application::run(int argc, char** argv) {
                     renderer.descriptorAllocator());
     terrain.buildPipeline(renderer.shaderManager(),
                           renderer.descriptorAllocator().layout(),
-                          GBufferPass::kAlbedoFormat,
-                          GBufferPass::kDepthFormat,
-                          GBufferPass::kNormalFormat,
-                          GBufferPass::kMetalRoughFormat,
-                          GBufferPass::kMotionVecFormat);
+                          gbuf::kAlbedoFormat,
+                          gbuf::kDepthFormat,
+                          gbuf::kNormalFormat,
+                          gbuf::kMetalRoughFormat,
+                          gbuf::kMotionVecFormat);
     terrain.registerHotReload(renderer.shaderHotReload());
     renderer.setTerrain(&terrain);
 

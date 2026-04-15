@@ -15,7 +15,7 @@
 #include "gfx/Swapchain.h"
 #include "gfx/Validation.h"
 #include "platform/Window.h"
-#include "renderer/GBufferPass.h"
+#include "renderer/GBufferFormats.h"
 #include "renderer/LightingPass.h"
 #include "renderer/MeshPass.h"
 #include "renderer/RTReflectionPass.h"
@@ -112,36 +112,33 @@ Renderer::Renderer(Window& window)
                               m_swapchain->depthFormat());
     m_meshPass->registerHotReload(*m_shaderHotReload);
 
-    // Deferred G-buffer pass — allocate images at swapchain resolution.
-    m_gbufferPass = std::make_unique<GBufferPass>(*m_device, *m_allocator);
-    m_gbufferPass->allocate(m_swapchain->extent());
-    m_gbufferPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
-    m_gbufferPass->registerHotReload(*m_shaderHotReload);
+    // G-buffer images owned directly by Renderer.
+    createGBufferImages(m_swapchain->extent());
 
     // Register G-buffer textures as bindless sampled images (read path:
     // LightingPass, RT passes, Denoiser, atmosphere, post-process).
     m_gbufAlbedoSlot     = m_descriptorAllocator->registerSampledImage(
-        m_gbufferPass->albedoView(),     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        m_gbufAlbedo.view,     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     m_gbufNormalSlot     = m_descriptorAllocator->registerSampledImage(
-        m_gbufferPass->normalView(),     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        m_gbufNormal.view,     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     m_gbufMetalRoughSlot = m_descriptorAllocator->registerSampledImage(
-        m_gbufferPass->metalRoughView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        m_gbufMetalRough.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     m_gbufMotionVecSlot  = m_descriptorAllocator->registerSampledImage(
-        m_gbufferPass->motionVecView(),  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        m_gbufMotionVec.view,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     m_gbufDepthSlot      = m_descriptorAllocator->registerSampledImage(
-        m_gbufferPass->depthView(),      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        m_gbufDepth.view,      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     // Register G-buffer colour targets as bindless storage images (write path:
     // MaterialEvalPass compute shader writes PBR evaluation results via
     // imageStore()). Depth cannot be a storage image in Vulkan — no slot needed.
     m_gbufAlbedoStorageSlot     = m_descriptorAllocator->registerStorageImage(
-        m_gbufferPass->albedoView());
+        m_gbufAlbedo.view);
     m_gbufNormalStorageSlot     = m_descriptorAllocator->registerStorageImage(
-        m_gbufferPass->normalView());
+        m_gbufNormal.view);
     m_gbufMetalRoughStorageSlot = m_descriptorAllocator->registerStorageImage(
-        m_gbufferPass->metalRoughView());
+        m_gbufMetalRough.view);
     m_gbufMotionVecStorageSlot  = m_descriptorAllocator->registerStorageImage(
-        m_gbufferPass->motionVecView());
+        m_gbufMotionVec.view);
 
     // Nearest-neighbour sampler for G-buffer reads in the lighting pass.
     VkSamplerCreateInfo samplerCI{};
@@ -286,7 +283,7 @@ Renderer::Renderer(Window& window)
     m_gpuCullPass->registerHotReload(*m_shaderHotReload);
 
     m_visibilityPass = std::make_unique<VisibilityBufferPass>(*m_device, *m_allocator, *m_descriptorAllocator);
-    m_visibilityPass->allocate(m_swapchain->extent(), GBufferPass::kDepthFormat);
+    m_visibilityPass->allocate(m_swapchain->extent(), gbuf::kDepthFormat);
     m_visibilityPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
     m_visibilityPass->registerHotReload(*m_shaderHotReload);
 
@@ -309,9 +306,9 @@ Renderer::Renderer(Window& window)
     m_materialEvalPass->registerHotReload(*m_shaderHotReload);
     m_materialEvalPass->prepare(
         m_swapchain->extent(),
-        m_gbufferPass->albedoImage(),     m_gbufferPass->normalImage(),
-        m_gbufferPass->metalRoughImage(), m_gbufferPass->motionVecImage(),
-        m_gbufferPass->depthImage(),
+        m_gbufAlbedo.image,     m_gbufNormal.image,
+        m_gbufMetalRough.image, m_gbufMotionVec.image,
+        m_gbufDepth.image,
         m_gbufAlbedoStorageSlot,     m_gbufNormalStorageSlot,
         m_gbufMetalRoughStorageSlot, m_gbufMotionVecStorageSlot,
         m_gbufDepthSlot);
@@ -378,7 +375,7 @@ Renderer::Renderer(Window& window)
     dbgInfo.shaderManager       = m_shaderManager.get();
     dbgInfo.globalSetLayout     = m_descriptorAllocator->layout();
     dbgInfo.colorFormat         = VK_FORMAT_R16G16B16A16_SFLOAT;
-    dbgInfo.depthFormat         = GBufferPass::kDepthFormat;
+    dbgInfo.depthFormat         = gbuf::kDepthFormat;
     m_physicsDebugRenderer.init(dbgInfo);
 
     createHdrColor(m_swapchain->extent());
@@ -467,6 +464,7 @@ Renderer::~Renderer() {
 
     // HDR intermediate — destroyed before VMA teardown.
     destroyHdrColor();
+    destroyGBufferImages();
 
     // Physics debug renderer owns a VMA buffer — must be destroyed before VMA teardown.
     m_physicsDebugRenderer.destroy();
@@ -708,7 +706,7 @@ void Renderer::drawFrame() {
         m_visibilityPass && m_visibilityPass->hasWireframePipeline())
         m_debugMode = DebugMode::LitWireframe;
     if (ImGui::IsKeyPressed(ImGuiKey_F6)) m_debugMode = DebugMode::DetailLighting;
-    if (ImGui::IsKeyPressed(ImGuiKey_F7) && m_useVisibilityBuffer)
+    if (ImGui::IsKeyPressed(ImGuiKey_F7))
         m_debugMode = DebugMode::Clusters;
 
     // ImGui new frame -- must be called before any ImGui:: window calls this frame.
@@ -764,8 +762,6 @@ void Renderer::drawFrame() {
                 ImGui::SliderFloat("Wetness", &m_wetnessFactor, 0.f, 1.f);
             }
             if (ImGui::CollapsingHeader("Renderer")) {
-                ImGui::Checkbox("Visibility Buffer Pipeline", &m_useVisibilityBuffer);
-                ImGui::Separator();
                 ImGui::Checkbox("SMAA", &m_aaSettings.smaaEnabled);
                 ImGui::Separator();
             }
@@ -790,7 +786,7 @@ void Renderer::drawFrame() {
         // Debug Views panel.
         const bool wireAvail  = m_device->fillModeNonSolidSupported() &&
                                 m_visibilityPass && m_visibilityPass->hasWireframePipeline();
-        const bool clustAvail = m_useVisibilityBuffer;
+        const bool clustAvail = true;
 
         ImGui::SetNextWindowPos({620.f, 10.f}, ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize({280.f, 140.f}, ImGuiCond_FirstUseEver);
@@ -813,8 +809,6 @@ void Renderer::drawFrame() {
             ImGui::TextDisabled("F1=Lit F2=Unlit F3=Wire F4=LitWire F6=Detail F7=Cluster");
             if (!wireAvail)
                 ImGui::TextDisabled("Wireframe: requires mesh shaders + fillModeNonSolid");
-            if (!clustAvail)
-                ImGui::TextDisabled("Clusters: enable Visibility Buffer Pipeline");
         }
         ImGui::End();
     }
@@ -851,12 +845,12 @@ void Renderer::drawFrame() {
     const u32 cameraSlot = m_cameraBuffers[m_frameIndex].bindlessSlot;
 
     // ---- Visibility buffer pipeline (direct cmd recording, before render graph) ----
-    if (m_scene != nullptr && m_useVisibilityBuffer && m_visibilityPass && m_materialEvalPass) {
+    if (m_scene != nullptr && m_visibilityPass && m_materialEvalPass) {
         m_gpuScene->begin_frame();
         for (const auto& node : m_scene->nodes) {
             for (u32 primIdx : node.primitiveIndices) {
                 const auto& prim = m_scene->primitives[primIdx];
-                if (prim.meshletOffset == UINT32_MAX) continue;
+                if (prim.meshletOffset == UINT32_MAX) { ENIGMA_ASSERT(false && "primitive missing meshlet data — asset pipeline bug"); continue; }
                 GpuInstance inst{};
                 inst.transform          = node.worldTransform;
                 inst.meshlet_offset     = prim.meshletOffset;
@@ -920,7 +914,7 @@ void Renderer::drawFrame() {
 
             m_visibilityPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
                                       extent,
-                                      m_gbufferPass->depthView(), m_gbufferPass->depthImage(),
+                                      m_gbufDepth.view, m_gbufDepth.image,
                                       *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot);
 
             // MaterialEvalPass reads vis buffer + depth, writes G-buffer to SHADER_READ_ONLY_OPTIMAL.
@@ -932,77 +926,37 @@ void Renderer::drawFrame() {
     }
 
     if (m_scene != nullptr) {
-        // ---- Geometry pass: visibility buffer or legacy deferred ----
-        // vbRendered is true only when the VB pipeline actually executed (meshlets present).
-        // When VB is enabled but no meshlets exist yet (Phase 3 TODO), fall back to
-        // GBufferPass so existing scene geometry remains visible.
-        const bool vbRendered = m_useVisibilityBuffer && m_visibilityPass && m_materialEvalPass
-                                && m_gpuMeshlets && m_gpuMeshlets->total_meshlet_count() > 0;
-
-        // In VB mode the G-buffer images are already in SHADER_READ_ONLY_OPTIMAL
-        // from MaterialEvalPass; in legacy mode they start as UNDEFINED.
-        const VkImageLayout gbufInitLayout = vbRendered
-            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-            : VK_IMAGE_LAYOUT_UNDEFINED;
-        (void)gbufInitLayout; // used in importImage calls below
+        // G-buffer images are in SHADER_READ_ONLY_OPTIMAL from MaterialEvalPass.
         const auto gbufAlbedo = m_renderGraph->importImage(
-            "gbuf_albedo", m_gbufferPass->albedoImage(), m_gbufferPass->albedoView(),
-            GBufferPass::kAlbedoFormat,
-            gbufInitLayout, VK_IMAGE_LAYOUT_UNDEFINED,
+            "gbuf_albedo", m_gbufAlbedo.image, m_gbufAlbedo.view,
+            gbuf::kAlbedoFormat,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_ASPECT_COLOR_BIT);
         const auto gbufNormal = m_renderGraph->importImage(
-            "gbuf_normal", m_gbufferPass->normalImage(), m_gbufferPass->normalView(),
-            GBufferPass::kNormalFormat,
-            gbufInitLayout, VK_IMAGE_LAYOUT_UNDEFINED,
+            "gbuf_normal", m_gbufNormal.image, m_gbufNormal.view,
+            gbuf::kNormalFormat,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_ASPECT_COLOR_BIT);
         const auto gbufMetalRough = m_renderGraph->importImage(
-            "gbuf_metalrough", m_gbufferPass->metalRoughImage(), m_gbufferPass->metalRoughView(),
-            GBufferPass::kMetalRoughFormat,
-            gbufInitLayout, VK_IMAGE_LAYOUT_UNDEFINED,
+            "gbuf_metalrough", m_gbufMetalRough.image, m_gbufMetalRough.view,
+            gbuf::kMetalRoughFormat,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_ASPECT_COLOR_BIT);
         const auto gbufMotionVec = m_renderGraph->importImage(
-            "gbuf_motionvec", m_gbufferPass->motionVecImage(), m_gbufferPass->motionVecView(),
-            GBufferPass::kMotionVecFormat,
-            gbufInitLayout, VK_IMAGE_LAYOUT_UNDEFINED,
+            "gbuf_motionvec", m_gbufMotionVec.image, m_gbufMotionVec.view,
+            gbuf::kMotionVecFormat,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_ASPECT_COLOR_BIT);
-        const VkImageLayout depthInitLayout = vbRendered
-            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
-            : VK_IMAGE_LAYOUT_UNDEFINED;
         const auto gbufDepth = m_renderGraph->importImage(
-            "gbuf_depth", m_gbufferPass->depthImage(), m_gbufferPass->depthView(),
-            GBufferPass::kDepthFormat,
-            depthInitLayout, VK_IMAGE_LAYOUT_UNDEFINED,
+            "gbuf_depth", m_gbufDepth.image, m_gbufDepth.view,
+            gbuf::kDepthFormat,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_ASPECT_DEPTH_BIT);
 
-        if (!vbRendered) {
-            gfx::RenderGraph::RasterPassDesc gbufPassDesc{};
-            gbufPassDesc.name         = "GBufferPass";
-            gbufPassDesc.colorTargets = {gbufAlbedo, gbufNormal, gbufMetalRough, gbufMotionVec};
-            gbufPassDesc.depthTarget  = gbufDepth;
-            gbufPassDesc.clearColor   = {{0.0f, 0.0f, 0.0f, 0.0f}};
-            gbufPassDesc.clearDepth   = {0.0f, 0}; // reverse-Z: far = 0
-            gbufPassDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
-                m_gpuProfiler->beginZone(cmd, "GBufferPass");
-                m_gbufferPass->record(cmd, m_descriptorAllocator->globalSet(),
-                                       ext, *m_scene, cameraSlot);
-                // Terrain shares the same render pass so it writes directly
-                // into the G-buffer MRT attachments and participates in all
-                // downstream lighting and RT effects.
-                if (m_terrain != nullptr) {
-                    m_terrain->record(cmd, ext,
-                                       m_descriptorAllocator->globalSet(), cameraSlot);
-                }
-                m_gpuProfiler->endZone(cmd);
-            };
-            m_renderGraph->addRasterPass(std::move(gbufPassDesc));
-        }
-
-        // When the VB pipeline rendered opaque scene geometry, terrain still needs
-        // to be drawn. It uses GPU-driven clipmap (procedural SV_VertexID vertices)
-        // and is meshlet-incompatible, so it always runs as a separate raster pass.
+        // Terrain is always drawn as a separate raster pass (meshlet-incompatible).
         // LOAD ops preserve the VB G-buffer output; depth test/write works correctly
         // against the reverse-Z depth filled by VisibilityBufferPass.
-        if (vbRendered && m_terrain != nullptr) {
+        if (m_terrain != nullptr) {
             gfx::RenderGraph::RasterPassDesc terrainPassDesc{};
             terrainPassDesc.name         = "TerrainPass";
             terrainPassDesc.colorTargets = {gbufAlbedo, gbufNormal, gbufMetalRough, gbufMotionVec};
@@ -1472,7 +1426,7 @@ void Renderer::drawFrame() {
             dbgDesc.clearColor    = {{0.02f, 0.02f, 0.05f, 1.0f}};
             dbgDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
                 m_gpuProfiler->beginZone(cmd, "DebugClustersPass");
-                if (m_useVisibilityBuffer && m_visibilityPass)
+                if (m_visibilityPass)
                     m_debugVisPass->recordClusters(cmd, m_descriptorAllocator->globalSet(), ext,
                                                    m_visibilityPass->vis_buffer_slot(),
                                                    m_gbufferSamplerSlot);
@@ -1526,7 +1480,7 @@ void Renderer::drawFrame() {
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                              depthView,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                             m_gbufferPass->motionVecView(),
+                             m_gbufMotionVec.view,
                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                              m_swapchain->view(imageIndex),
                              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
@@ -1788,21 +1742,20 @@ void Renderer::setUpscalerSettings(const UpscalerSettings& s) {
 }
 
 void Renderer::resizeGBuffer(VkExtent2D extent) {
-    // GBufferPass::allocate() calls vkDeviceWaitIdle internally before
-    // destroying existing images, so no explicit idle needed here.
-    m_gbufferPass->allocate(extent);
+    // createGBufferImages calls vkDeviceWaitIdle before destroying in-use images.
+    createGBufferImages(extent);
 
     // Re-write the bindless descriptor slots to point at the new image views.
     m_descriptorAllocator->updateSampledImage(
-        m_gbufAlbedoSlot,     m_gbufferPass->albedoView(),     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        m_gbufAlbedoSlot,     m_gbufAlbedo.view,     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     m_descriptorAllocator->updateSampledImage(
-        m_gbufNormalSlot,     m_gbufferPass->normalView(),     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        m_gbufNormalSlot,     m_gbufNormal.view,     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     m_descriptorAllocator->updateSampledImage(
-        m_gbufMetalRoughSlot, m_gbufferPass->metalRoughView(), VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        m_gbufMetalRoughSlot, m_gbufMetalRough.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     m_descriptorAllocator->updateSampledImage(
-        m_gbufMotionVecSlot,  m_gbufferPass->motionVecView(),  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        m_gbufMotionVecSlot,  m_gbufMotionVec.view,  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     m_descriptorAllocator->updateSampledImage(
-        m_gbufDepthSlot,      m_gbufferPass->depthView(),      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        m_gbufDepthSlot,      m_gbufDepth.view,      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
     // Re-allocate RT pass images on resize.
     m_rtReflectionPass->allocate(extent);
@@ -1827,20 +1780,20 @@ void Renderer::resizeGBuffer(VkExtent2D extent) {
     m_descriptorAllocator->updateStorageImage(m_reflDenoiseSlot, m_reflectionDenoiser->outputView());
 
     // Update storage image slots to point at the new G-buffer views.
-    m_descriptorAllocator->updateStorageImage(m_gbufAlbedoStorageSlot,     m_gbufferPass->albedoView());
-    m_descriptorAllocator->updateStorageImage(m_gbufNormalStorageSlot,     m_gbufferPass->normalView());
-    m_descriptorAllocator->updateStorageImage(m_gbufMetalRoughStorageSlot, m_gbufferPass->metalRoughView());
-    m_descriptorAllocator->updateStorageImage(m_gbufMotionVecStorageSlot,  m_gbufferPass->motionVecView());
+    m_descriptorAllocator->updateStorageImage(m_gbufAlbedoStorageSlot,     m_gbufAlbedo.view);
+    m_descriptorAllocator->updateStorageImage(m_gbufNormalStorageSlot,     m_gbufNormal.view);
+    m_descriptorAllocator->updateStorageImage(m_gbufMetalRoughStorageSlot, m_gbufMetalRough.view);
+    m_descriptorAllocator->updateStorageImage(m_gbufMotionVecStorageSlot,  m_gbufMotionVec.view);
 
     // VB pipeline resize.
     if (m_hizPass)        m_hizPass->allocate(extent);
-    if (m_visibilityPass) m_visibilityPass->allocate(extent, GBufferPass::kDepthFormat);
+    if (m_visibilityPass) m_visibilityPass->allocate(extent, gbuf::kDepthFormat);
     if (m_materialEvalPass) {
         m_materialEvalPass->prepare(
             extent,
-            m_gbufferPass->albedoImage(),     m_gbufferPass->normalImage(),
-            m_gbufferPass->metalRoughImage(), m_gbufferPass->motionVecImage(),
-            m_gbufferPass->depthImage(),
+            m_gbufAlbedo.image,     m_gbufNormal.image,
+            m_gbufMetalRough.image, m_gbufMotionVec.image,
+            m_gbufDepth.image,
             m_gbufAlbedoStorageSlot,     m_gbufNormalStorageSlot,
             m_gbufMetalRoughStorageSlot, m_gbufMotionVecStorageSlot,
             m_gbufDepthSlot);
@@ -1857,6 +1810,79 @@ void Renderer::resizeGBuffer(VkExtent2D extent) {
         }
         m_smaaPass->allocate(extent, *m_descriptorAllocator);
     }
+}
+
+void Renderer::createGBufferImage(VkFormat format, VkImageUsageFlags usage,
+                                   VkImageAspectFlags aspect, VkExtent2D extent, GBufferImage& out) {
+    VkImageCreateInfo imageCI{};
+    imageCI.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageCI.imageType     = VK_IMAGE_TYPE_2D;
+    imageCI.format        = format;
+    imageCI.extent        = {extent.width, extent.height, 1};
+    imageCI.mipLevels     = 1;
+    imageCI.arrayLayers   = 1;
+    imageCI.samples       = VK_SAMPLE_COUNT_1_BIT;
+    imageCI.tiling        = VK_IMAGE_TILING_OPTIMAL;
+    imageCI.usage         = usage;
+    imageCI.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    imageCI.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
+
+    VmaAllocationCreateInfo allocCI{};
+    allocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+    allocCI.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+
+    ENIGMA_VK_CHECK(vmaCreateImage(m_allocator->handle(), &imageCI, &allocCI,
+                                   &out.image, &out.allocation, nullptr));
+
+    VkImageViewCreateInfo viewCI{};
+    viewCI.sType                           = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewCI.image                           = out.image;
+    viewCI.viewType                        = VK_IMAGE_VIEW_TYPE_2D;
+    viewCI.format                          = format;
+    viewCI.subresourceRange.aspectMask     = aspect;
+    viewCI.subresourceRange.baseMipLevel   = 0;
+    viewCI.subresourceRange.levelCount     = 1;
+    viewCI.subresourceRange.baseArrayLayer = 0;
+    viewCI.subresourceRange.layerCount     = 1;
+
+    ENIGMA_VK_CHECK(vkCreateImageView(m_device->logical(), &viewCI, nullptr, &out.view));
+}
+
+void Renderer::destroyGBufferImage(GBufferImage& img) {
+    if (img.view != VK_NULL_HANDLE) {
+        vkDestroyImageView(m_device->logical(), img.view, nullptr);
+        img.view = VK_NULL_HANDLE;
+    }
+    if (img.image != VK_NULL_HANDLE) {
+        vmaDestroyImage(m_allocator->handle(), img.image, img.allocation);
+        img.image      = VK_NULL_HANDLE;
+        img.allocation = nullptr;
+    }
+}
+
+void Renderer::createGBufferImages(VkExtent2D extent) {
+    if (m_gbufAlbedo.image != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(m_device->logical());
+        destroyGBufferImages();
+    }
+    constexpr VkImageUsageFlags kColorUsage =
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+    createGBufferImage(gbuf::kAlbedoFormat,     kColorUsage, VK_IMAGE_ASPECT_COLOR_BIT, extent, m_gbufAlbedo);
+    createGBufferImage(gbuf::kNormalFormat,     kColorUsage, VK_IMAGE_ASPECT_COLOR_BIT, extent, m_gbufNormal);
+    createGBufferImage(gbuf::kMetalRoughFormat, kColorUsage, VK_IMAGE_ASPECT_COLOR_BIT, extent, m_gbufMetalRough);
+    createGBufferImage(gbuf::kMotionVecFormat,  kColorUsage, VK_IMAGE_ASPECT_COLOR_BIT, extent, m_gbufMotionVec);
+    createGBufferImage(gbuf::kDepthFormat,
+                       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                       VK_IMAGE_ASPECT_DEPTH_BIT, extent, m_gbufDepth);
+    ENIGMA_LOG_INFO("[renderer] G-buffer allocated {}x{}", extent.width, extent.height);
+}
+
+void Renderer::destroyGBufferImages() {
+    destroyGBufferImage(m_gbufAlbedo);
+    destroyGBufferImage(m_gbufNormal);
+    destroyGBufferImage(m_gbufMetalRough);
+    destroyGBufferImage(m_gbufMotionVec);
+    destroyGBufferImage(m_gbufDepth);
 }
 
 void Renderer::createHdrColor(VkExtent2D extent) {

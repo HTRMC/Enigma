@@ -824,7 +824,7 @@ void VisibilityBufferPass::record(VkCommandBuffer           cmd,
     //   depth buffer DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
     // Both are needed by MaterialEvalPass (compute) and other downstream
     // passes that sample them. Depth must also be declared correctly in the
-    // Renderer render-graph when vbRendered=true.
+    // Renderer render-graph importImage calls.
     // -------------------------------------------------------------------
     const VkImageMemoryBarrier2 postBarriers[2] = {
         {

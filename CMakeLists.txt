@@ -52,7 +52,6 @@ target_sources(Enigma PRIVATE
     src/asset/GltfLoader.cpp
     src/renderer/Renderer.cpp
     src/renderer/MeshPass.cpp
-    src/renderer/GBufferPass.cpp
     src/renderer/LightingPass.cpp
     src/gfx/Instance.cpp
     src/gfx/Validation.cpp

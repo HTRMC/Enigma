@@ -5,7 +5,7 @@
 // triangles. The pixel shader writes a packed instance+triangle ID to the
 // R32_UINT visibility buffer.
 //
-// Vertex data layout: 3 float4 per vertex (same as mesh.hlsl / gbuffer.hlsl):
+// Vertex data layout: 3 float4 per vertex (same as mesh.hlsl):
 //   [vid*3+0] = (position.x, position.y, position.z, normal.x)
 //   [vid*3+1] = (normal.y,   normal.z,   uv.x,       uv.y)
 //   [vid*3+2] = (tangent.x,  tangent.y,  tangent.z,  tangent.w)

@@ -47,7 +47,7 @@ public:
     MaterialEvalPass& operator=(const MaterialEvalPass&) = delete;
 
     // Store G-buffer image handles (for layout transitions) and pre-registered
-    // slot IDs (owned by Renderer). Call after GBufferPass::allocate() and
+    // slot IDs (owned by Renderer). Call after createGBufferImages() and
     // after every resize. No Vulkan resource allocation happens here.
     void prepare(VkExtent2D extent,
                  VkImage albedoImage,     VkImage normalImage,

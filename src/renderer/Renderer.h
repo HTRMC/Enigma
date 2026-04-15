@@ -13,7 +13,7 @@
 #include "gfx/ShaderHotReload.h"
 #include "gfx/ShaderManager.h"
 #include "gfx/Swapchain.h"
-#include "renderer/GBufferPass.h"
+#include "renderer/GBufferFormats.h"
 #include "renderer/LightingPass.h"
 #include "renderer/MeshPass.h"
 #include "renderer/RTReflectionPass.h"
@@ -97,8 +97,8 @@ public:
     void setScene(Scene* scene);
 
     // Attach a GPU-driven clipmap terrain. The terrain is drawn inside
-    // the same render pass as GBufferPass so it writes straight into
-    // the deferred G-buffer and participates in lighting / RT effects.
+    // the G-buffer render pass so it writes straight into the deferred
+    // G-buffer targets and participates in lighting / RT effects.
     // Pass nullptr to detach.
     void setTerrain(Terrain* terrain);
 
@@ -146,6 +146,17 @@ private:
     // Destroy SMAA LDR intermediate. Does not idle the device.
     void destroySmaaLdr();
 
+    struct GBufferImage {
+        VkImage       image      = VK_NULL_HANDLE;
+        VkImageView   view       = VK_NULL_HANDLE;
+        VmaAllocation allocation = nullptr;
+    };
+    void createGBufferImage(VkFormat format, VkImageUsageFlags usage,
+                            VkImageAspectFlags aspect, VkExtent2D extent, GBufferImage& out);
+    void destroyGBufferImage(GBufferImage& img);
+    void createGBufferImages(VkExtent2D extent);
+    void destroyGBufferImages();
+
     Window& m_window;
 
     std::unique_ptr<gfx::Instance>             m_instance;
@@ -161,7 +172,6 @@ private:
     std::unique_ptr<gfx::ImGuiLayer>           m_imguiLayer;
     std::unique_ptr<TrianglePass>              m_trianglePass;
     std::unique_ptr<MeshPass>                  m_meshPass;
-    std::unique_ptr<GBufferPass>              m_gbufferPass;
     std::unique_ptr<LightingPass>             m_lightingPass;
     std::unique_ptr<AtmospherePass>           m_atmospherePass;
     std::unique_ptr<SkyBackgroundPass>        m_skyPass;
@@ -187,7 +197,7 @@ private:
     VmaAllocation m_smaaLdrAlloc      = nullptr;
     u32           m_smaaLdrSampledSlot = UINT32_MAX;
 
-    // Visibility buffer pipeline (replaces deferred GBufferPass when active).
+    // Visibility buffer pipeline.
     std::unique_ptr<GpuSceneBuffer>          m_gpuScene;
     std::unique_ptr<GpuMeshletBuffer>        m_gpuMeshlets;
     std::unique_ptr<IndirectDrawBuffer>      m_indirectBuffer;
@@ -195,9 +205,6 @@ private:
     std::unique_ptr<GpuCullPass>             m_gpuCullPass;
     std::unique_ptr<VisibilityBufferPass>    m_visibilityPass;
     std::unique_ptr<MaterialEvalPass>        m_materialEvalPass;
-
-    // Toggle: true = visibility buffer pipeline, false = legacy deferred.
-    bool m_useVisibilityBuffer = false;
 
     std::unique_ptr<IUpscaler>               m_upscaler;
     UpscalerSettings                         m_upscalerSettings{};
@@ -314,6 +321,12 @@ private:
     VmaAllocation m_hdrColorAlloc        = nullptr;
     u32           m_hdrColorSampledSlot  = UINT32_MAX;
     u32           m_hdrColorStorageSlot  = UINT32_MAX;
+
+    GBufferImage m_gbufAlbedo{};
+    GBufferImage m_gbufNormal{};
+    GBufferImage m_gbufMetalRough{};
+    GBufferImage m_gbufMotionVec{};
+    GBufferImage m_gbufDepth{};
 
     // Per-frame camera SSBOs (one per frame-in-flight, double-buffered).
     struct CameraBuffer {

@@ -5,7 +5,7 @@
 // the triangle's clip-space positions, evaluates PBR materials, and writes
 // to G-buffer storage images.
 //
-// G-buffer outputs (same layout as gbuffer.hlsl):
+// G-buffer outputs (layout defined in GBufferFormats.h):
 //   albedo      rgba8  — rgb=baseColor, a=ambient occlusion
 //   normal      rgba16 — rgb=world normal packed to [0,1], a=unused
 //   metalRough  rg8    — r=metallic, g=roughness (perceptual)
@@ -122,7 +122,7 @@ Meshlet loadMeshlet(uint idx) {
     return m;
 }
 
-// --- Material struct (mirrors GpuMaterial in gbuffer.hlsl) ---
+// --- Material struct (mirrors GpuMaterial in GBufferFormats.h) ---
 struct GpuMaterial {
     float4 baseColorFactor;
     float4 emissiveFactor;    // .w = alphaCutoff

@@ -5,7 +5,7 @@
 // SV_InstanceID. No vertex buffers bound, no UVs stored, no XZ
 // positions stored.
 //
-// Output targets (must match GBufferPass MRT layout):
+// Output targets (must match G-buffer layout in GBufferFormats.h):
 //   SV_Target0  albedo      R8G8B8A8_UNORM
 //   SV_Target1  normal      A2B10G10R10_UNORM_PACK32
 //   SV_Target2  metalRough  R8G8_UNORM
@@ -106,7 +106,7 @@ VSOut VSMain(uint vid : SV_VertexID, uint iid : SV_InstanceID) {
     return o;
 }
 
-// --- G-buffer output (matches gbuffer.hlsl) ---
+// --- G-buffer output (matches GBufferFormats.h) ---
 struct GBufferOut {
     float4 albedo     : SV_Target0; // rgb=baseColor, a=occlusion
     float4 normal     : SV_Target1; // rgb=world normal packed to [0,1]
