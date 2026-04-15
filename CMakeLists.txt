@@ -85,6 +85,7 @@ target_sources(Enigma PRIVATE
     src/renderer/HiZPass.cpp
     src/renderer/GpuCullPass.cpp
     src/renderer/VisibilityBufferPass.cpp
+    src/renderer/DebugVisualizationPass.cpp
     src/renderer/MaterialEvalPass.cpp
     src/renderer/ClusteredForwardPass.cpp
     src/renderer/SMAAPass.cpp

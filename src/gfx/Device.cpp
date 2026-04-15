@@ -276,6 +276,13 @@ Device::Device(Instance& instance) {
         }
     }
 
+    // Query and conditionally enable fillModeNonSolid (required for VK_POLYGON_MODE_LINE).
+    if (have.features2.features.fillModeNonSolid == VK_TRUE) {
+        want.features2.features.fillModeNonSolid = VK_TRUE;
+        m_fillModeNonSolidSupported = true;
+        ENIGMA_LOG_INFO("[gfx] enabling fillModeNonSolid (wireframe debug modes available)");
+    }
+
     // Discover optional async compute and dedicated transfer queue families.
     // Compute-only: VK_QUEUE_COMPUTE_BIT set, VK_QUEUE_GRAPHICS_BIT clear.
     // Transfer-only: VK_QUEUE_TRANSFER_BIT set, GRAPHICS and COMPUTE both clear.

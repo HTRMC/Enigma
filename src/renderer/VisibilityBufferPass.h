@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/Math.h"
 #include "core/Types.h"
 
 #include <volk.h>
@@ -56,6 +57,28 @@ public:
                        VkDescriptorSetLayout globalSetLayout);
 
     void registerHotReload(gfx::ShaderHotReload& reloader);
+
+    // Build the wireframe pipeline variant (VK_POLYGON_MODE_LINE).
+    // Only call when device.fillModeNonSolidSupported() == true.
+    // swapchainFormat: the target color attachment format for wireframe output.
+    void buildWireframePipeline(gfx::ShaderManager& shaderManager,
+                                 VkDescriptorSetLayout globalSetLayout,
+                                 VkFormat swapchainFormat);
+
+    // Record wireframe mesh draw. Must be called inside a render graph raster
+    // pass execute lambda (render graph owns vkCmdBeginRendering/EndRendering).
+    // wireColor: RGB line color pushed as fragment stage push constants.
+    void recordWireframe(VkCommandBuffer cmd,
+                         VkDescriptorSet globalSet,
+                         VkExtent2D extent,
+                         const GpuSceneBuffer& scene,
+                         const GpuMeshletBuffer& meshlets,
+                         const IndirectDrawBuffer& indirect,
+                         u32 cameraSlot,
+                         vec3 wireColor);
+
+    // True after buildWireframePipeline() succeeds.
+    bool hasWireframePipeline() const { return m_wireframePipeline != VK_NULL_HANDLE; }
 
     // Generate the VS-fallback indirect draw buffer from CPU-side scene/meshlet data.
     // Call after scene load on Min-tier GPUs (device.supportsMeshShaders() == false).
@@ -115,6 +138,10 @@ private:
     VmaAllocation m_vsFallbackDrawAlloc  = nullptr;
     u32          m_vsFallbackDrawCount   = 0;
     std::filesystem::path m_vsShaderPath;
+
+    VkPipelineLayout m_wireframePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline       m_wireframePipeline       = VK_NULL_HANDLE;
+    std::filesystem::path m_wireFragShaderPath;
 };
 
 } // namespace enigma

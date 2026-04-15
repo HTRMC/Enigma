@@ -29,6 +29,7 @@
 #include "renderer/HiZPass.h"
 #include "renderer/IndirectDrawBuffer.h"
 #include "renderer/MaterialEvalPass.h"
+#include "renderer/DebugVisualizationPass.h"
 #include "renderer/VisibilityBufferPass.h"
 #include "renderer/AtmosphereSettings.h"
 #include "renderer/ClusteredForwardPass.h"
@@ -56,6 +57,17 @@ namespace enigma {
 class Camera;
 class Window;
 struct Scene;
+
+// Debug visualization mode — controls the active debug view.
+// All non-Lit modes bypass post-processing and write directly to the swapchain.
+enum class DebugMode {
+    Lit,           // Normal PBR rendering (default)
+    Unlit,         // Raw G-buffer albedo
+    Wireframe,     // Hardware line rasterization on black background
+    LitWireframe,  // Lit scene with wireframe overlay
+    DetailLighting,// Full PBR on white material (isolates lighting shape)
+    Clusters,      // Meshlet colors (requires visibility buffer pipeline)
+};
 
 // Configurable directional sun light. Direction need not be normalized —
 // the shader normalizes it. Intensity scales lightColor in the PBR evaluation.
@@ -287,6 +299,11 @@ private:
     bool                 m_deformationPending = false;
 
     PhysicsDebugRenderer m_physicsDebugRenderer;
+
+    // Debug visualization.
+    std::unique_ptr<DebugVisualizationPass> m_debugVisPass;
+    DebugMode m_debugMode     = DebugMode::Lit;
+    vec3      m_wireframeColor{1.0f, 1.0f, 1.0f};
 
     // HDR linear intermediate — R16G16B16A16_SFLOAT, render-extent sized.
     // All deferred passes (lighting, physics debug, sky, post-process) target

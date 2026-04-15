@@ -32,6 +32,7 @@
 #include "renderer/MaterialEvalPass.h"
 #include "renderer/TrianglePass.h"
 #include "renderer/UpscalerFactory.h"
+#include "renderer/DebugVisualizationPass.h"
 #include "renderer/VisibilityBufferPass.h"
 #include "scene/Camera.h"
 #include "scene/Scene.h"
@@ -288,6 +289,20 @@ Renderer::Renderer(Window& window)
     m_visibilityPass->allocate(m_swapchain->extent(), GBufferPass::kDepthFormat);
     m_visibilityPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
     m_visibilityPass->registerHotReload(*m_shaderHotReload);
+
+    // Wireframe pipeline (conditional on fillModeNonSolid support).
+    if (m_device->fillModeNonSolidSupported() && m_visibilityPass) {
+        m_visibilityPass->buildWireframePipeline(*m_shaderManager,
+                                                  m_descriptorAllocator->layout(),
+                                                  m_swapchain->format());
+    }
+
+    // Debug visualization pass — fullscreen debug modes.
+    m_debugVisPass = std::make_unique<DebugVisualizationPass>(*m_device);
+    m_debugVisPass->buildPipelines(*m_shaderManager,
+                                    m_descriptorAllocator->layout(),
+                                    m_swapchain->format());
+    m_debugVisPass->registerHotReload(*m_shaderHotReload);
 
     m_materialEvalPass = std::make_unique<MaterialEvalPass>(*m_device);
     m_materialEvalPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
@@ -680,6 +695,22 @@ void Renderer::drawFrame() {
             m_gbufferSamplerSlot);
     }
 
+    // Debug mode hotkeys (F1-F6).
+    // ImGui::IsKeyPressed works even outside ImGui window scope.
+    if (ImGui::IsKeyPressed(ImGuiKey_F1)) m_debugMode = DebugMode::Lit;
+    if (ImGui::IsKeyPressed(ImGuiKey_F2)) m_debugMode = DebugMode::Unlit;
+    if (ImGui::IsKeyPressed(ImGuiKey_F3) &&
+        m_device->fillModeNonSolidSupported() &&
+        m_visibilityPass && m_visibilityPass->hasWireframePipeline())
+        m_debugMode = DebugMode::Wireframe;
+    if (ImGui::IsKeyPressed(ImGuiKey_F4) &&
+        m_device->fillModeNonSolidSupported() &&
+        m_visibilityPass && m_visibilityPass->hasWireframePipeline())
+        m_debugMode = DebugMode::LitWireframe;
+    if (ImGui::IsKeyPressed(ImGuiKey_F6)) m_debugMode = DebugMode::DetailLighting;
+    if (ImGui::IsKeyPressed(ImGuiKey_F7) && m_useVisibilityBuffer)
+        m_debugMode = DebugMode::Clusters;
+
     // ImGui new frame -- must be called before any ImGui:: window calls this frame.
     if (m_imguiLayer) {
         m_imguiLayer->newFrame();
@@ -755,6 +786,37 @@ void Renderer::drawFrame() {
             }
         }
         ImGui::End();
+
+        // Debug Views panel.
+        const bool wireAvail  = m_device->fillModeNonSolidSupported() &&
+                                m_visibilityPass && m_visibilityPass->hasWireframePipeline();
+        const bool clustAvail = m_useVisibilityBuffer;
+
+        ImGui::SetNextWindowPos({620.f, 10.f}, ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize({280.f, 140.f}, ImGuiCond_FirstUseEver);
+        if (ImGui::Begin("Debug Views")) {
+            static const char* kModeNames[] = {
+                "Lit", "Unlit", "Wireframe", "Lit Wireframe", "Detail Lighting", "Clusters"
+            };
+            int modeInt = static_cast<int>(m_debugMode);
+            if (ImGui::Combo("Mode", &modeInt, kModeNames, 6)) {
+                DebugMode selected = static_cast<DebugMode>(modeInt);
+                if (!wireAvail && (selected == DebugMode::Wireframe || selected == DebugMode::LitWireframe))
+                    selected = DebugMode::Lit;
+                if (!clustAvail && selected == DebugMode::Clusters)
+                    selected = DebugMode::Lit;
+                m_debugMode = selected;
+            }
+            if (m_debugMode == DebugMode::Wireframe || m_debugMode == DebugMode::LitWireframe)
+                ImGui::ColorEdit3("Wire Color", &m_wireframeColor.x);
+            ImGui::Separator();
+            ImGui::TextDisabled("F1=Lit F2=Unlit F3=Wire F4=LitWire F6=Detail F7=Cluster");
+            if (!wireAvail)
+                ImGui::TextDisabled("Wireframe: requires mesh shaders + fillModeNonSolid");
+            if (!clustAvail)
+                ImGui::TextDisabled("Clusters: enable Visibility Buffer Pipeline");
+        }
+        ImGui::End();
     }
 
     VkImage     targetImage = m_swapchain->image(imageIndex);
@@ -774,13 +836,17 @@ void Renderer::drawFrame() {
         VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, // must end ready for present
         VK_IMAGE_ASPECT_COLOR_BIT);
 
-    // HDR intermediate — all deferred passes write here; upscaler reads from it.
-    const auto hdrColorHandle = m_renderGraph->importImage(
-        "hdr_color",
-        m_hdrColor, m_hdrColorView, VK_FORMAT_R16G16B16A16_SFLOAT,
-        VK_IMAGE_LAYOUT_UNDEFINED,                  // re-written every frame
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   // upscaler reads as SRV
-        VK_IMAGE_ASPECT_COLOR_BIT);
+    // HDR intermediate — only needed for Lit and LitWireframe modes.
+    const bool needsHdr = (m_debugMode == DebugMode::Lit || m_debugMode == DebugMode::LitWireframe);
+    gfx::RGImageHandle hdrColorHandle{};
+    if (needsHdr) {
+        hdrColorHandle = m_renderGraph->importImage(
+            "hdr_color",
+            m_hdrColor, m_hdrColorView, VK_FORMAT_R16G16B16A16_SFLOAT,
+            VK_IMAGE_LAYOUT_UNDEFINED,                  // re-written every frame
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,   // upscaler reads as SRV
+            VK_IMAGE_ASPECT_COLOR_BIT);
+    }
 
     const u32 cameraSlot = m_cameraBuffers[m_frameIndex].bindlessSlot;
 
@@ -950,6 +1016,9 @@ void Renderer::drawFrame() {
             };
             m_renderGraph->addRasterPass(std::move(terrainPassDesc));
         }
+
+        // ---- Mode-dependent render graph passes ----
+        if (m_debugMode == DebugMode::Lit) {
 
         // RT reflection pass — runs between G-buffer and lighting.
         // On RT hardware: dispatches vkCmdTraceRaysKHR.
@@ -1263,6 +1332,121 @@ void Renderer::drawFrame() {
                 m_gpuProfiler->endZone(cmd);
             };
             m_renderGraph->addRasterPass(std::move(ppDesc));
+        }
+
+        } else if (m_debugMode == DebugMode::Unlit) {
+            // === UNLIT — read albedo G-buffer, skip lighting ===
+            gfx::RenderGraph::RasterPassDesc dbgDesc{};
+            dbgDesc.name          = "DebugUnlitPass";
+            dbgDesc.colorTargets  = {colorHandle};
+            dbgDesc.sampledInputs = {gbufAlbedo, gbufDepth};
+            dbgDesc.clearColor    = {{0.02f, 0.02f, 0.05f, 1.0f}};
+            dbgDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "DebugUnlitPass");
+                m_debugVisPass->recordUnlit(cmd, m_descriptorAllocator->globalSet(), ext,
+                                            m_gbufAlbedoSlot, m_gbufDepthSlot,
+                                            m_gbufferSamplerSlot);
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(dbgDesc));
+
+        } else if (m_debugMode == DebugMode::Wireframe) {
+            // === WIREFRAME — hardware line rasterization on black background ===
+            gfx::RenderGraph::RasterPassDesc wireDesc{};
+            wireDesc.name         = "DebugWireframePass";
+            wireDesc.colorTargets = {colorHandle};
+            wireDesc.clearColor   = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            wireDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "DebugWireframePass");
+                m_visibilityPass->recordWireframe(cmd, m_descriptorAllocator->globalSet(), ext,
+                                                  *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
+                                                  cameraSlot, m_wireframeColor);
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(wireDesc));
+
+        } else if (m_debugMode == DebugMode::LitWireframe) {
+            // === LIT WIREFRAME — lit scene (no post-proc) + wireframe overlay ===
+            // Phase 1: lighting -> hdrColorHandle
+            gfx::RenderGraph::RasterPassDesc lightPassDesc{};
+            lightPassDesc.name          = "LightingPass";
+            lightPassDesc.colorTargets  = {hdrColorHandle};
+            lightPassDesc.sampledInputs = {gbufAlbedo, gbufNormal, gbufMetalRough, gbufDepth};
+            lightPassDesc.clearColor    = {{0.02f, 0.02f, 0.05f, 1.0f}};
+            lightPassDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "LightingPass");
+                m_lightingPass->record(cmd, m_descriptorAllocator->globalSet(), ext,
+                                       m_gbufAlbedoSlot, m_gbufNormalSlot,
+                                       m_gbufMetalRoughSlot, m_gbufDepthSlot,
+                                       cameraSlot, m_gbufferSamplerSlot,
+                                       vec4{m_sunWorldDir, m_atmosphereSettings.sunIntensity},
+                                       vec4{m_light.color, 0.0f});
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(lightPassDesc));
+
+            // Phase 2: blit hdr -> swapchain with Reinhard tonemap
+            gfx::RenderGraph::RasterPassDesc blitDesc{};
+            blitDesc.name          = "DebugBlitPass";
+            blitDesc.colorTargets  = {colorHandle};
+            blitDesc.sampledInputs = {hdrColorHandle};
+            blitDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            blitDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "DebugBlitPass");
+                m_debugVisPass->recordBlit(cmd, m_descriptorAllocator->globalSet(), ext,
+                                           m_hdrColorSampledSlot, m_gbufferSamplerSlot);
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(blitDesc));
+
+            // Phase 3: wireframe overlay -> swapchain (LOAD preserves lit base)
+            gfx::RenderGraph::RasterPassDesc wireOverlayDesc{};
+            wireOverlayDesc.name         = "DebugWireframeOverlayPass";
+            wireOverlayDesc.colorTargets = {colorHandle};
+            wireOverlayDesc.colorLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
+            wireOverlayDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "DebugWireframeOverlayPass");
+                m_visibilityPass->recordWireframe(cmd, m_descriptorAllocator->globalSet(), ext,
+                                                  *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
+                                                  cameraSlot, m_wireframeColor);
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(wireOverlayDesc));
+
+        } else if (m_debugMode == DebugMode::DetailLighting) {
+            // === DETAIL LIGHTING — Cook-Torrance on white material ===
+            gfx::RenderGraph::RasterPassDesc dbgDesc{};
+            dbgDesc.name          = "DebugDetailLightingPass";
+            dbgDesc.colorTargets  = {colorHandle};
+            dbgDesc.sampledInputs = {gbufAlbedo, gbufNormal, gbufMetalRough, gbufDepth};
+            dbgDesc.clearColor    = {{0.02f, 0.02f, 0.05f, 1.0f}};
+            dbgDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "DebugDetailLightingPass");
+                m_debugVisPass->recordDetailLighting(cmd, m_descriptorAllocator->globalSet(), ext,
+                                                     m_gbufAlbedoSlot, m_gbufNormalSlot,
+                                                     m_gbufMetalRoughSlot, m_gbufDepthSlot,
+                                                     cameraSlot, m_gbufferSamplerSlot,
+                                                     vec4{m_sunWorldDir, m_atmosphereSettings.sunIntensity},
+                                                     vec4{m_light.color, 0.0f});
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(dbgDesc));
+
+        } else if (m_debugMode == DebugMode::Clusters) {
+            // === CLUSTERS — meshlet color visualization ===
+            gfx::RenderGraph::RasterPassDesc dbgDesc{};
+            dbgDesc.name          = "DebugClustersPass";
+            dbgDesc.colorTargets  = {colorHandle};
+            dbgDesc.clearColor    = {{0.02f, 0.02f, 0.05f, 1.0f}};
+            dbgDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "DebugClustersPass");
+                if (m_useVisibilityBuffer && m_visibilityPass)
+                    m_debugVisPass->recordClusters(cmd, m_descriptorAllocator->globalSet(), ext,
+                                                   m_visibilityPass->vis_buffer_slot(),
+                                                   m_gbufferSamplerSlot);
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(dbgDesc));
         }
 
     } else {

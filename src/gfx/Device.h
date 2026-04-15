@@ -70,6 +70,9 @@ public:
     // True only when VK_EXT_mesh_shader was found and enabled at device creation.
     bool supportsMeshShaders() const { return m_meshShadersEnabled; }
 
+    // True when VkPhysicalDeviceFeatures::fillModeNonSolid was enabled (wireframe debug).
+    bool fillModeNonSolidSupported() const { return m_fillModeNonSolidSupported; }
+
     const VkPhysicalDeviceProperties& properties() const { return m_properties; }
 
 private:
@@ -86,6 +89,7 @@ private:
     std::optional<u32>          m_transferQueueFamily;
     GpuTier                     m_gpuTier             = GpuTier::Min;
     bool                        m_meshShadersEnabled  = false;
+    bool                        m_fillModeNonSolidSupported = false;
     VkPhysicalDeviceProperties  m_properties{};
 };
 
