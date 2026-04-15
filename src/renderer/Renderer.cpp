@@ -1358,20 +1358,6 @@ void Renderer::drawFrame() {
             wireDesc.clearColor   = {{0.0f, 0.0f, 0.0f, 1.0f}};
             wireDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
                 m_gpuProfiler->beginZone(cmd, "DebugWireframePass");
-                // Barrier: ensure MaterialEvalPass (compute) writes are visible
-                // to the task/mesh shaders that follow.
-                VkMemoryBarrier2 wfBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-                wfBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-                wfBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-                wfBarrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
-                wfBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT
-                                        | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
-                wfBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
-                VkDependencyInfo wfDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-                wfDep.sType                = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-                wfDep.memoryBarrierCount   = 1;
-                wfDep.pMemoryBarriers      = &wfBarrier;
-                vkCmdPipelineBarrier2(cmd, &wfDep);
                 m_visibilityPass->recordWireframe(cmd, m_descriptorAllocator->globalSet(), ext,
                                                   *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
                                                   cameraSlot, m_wireframeColor);
@@ -1436,18 +1422,6 @@ void Renderer::drawFrame() {
             wireOverlayDesc.colorLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
             wireOverlayDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
                 m_gpuProfiler->beginZone(cmd, "DebugWireframeOverlayPass");
-                VkMemoryBarrier2 wfBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-                wfBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-                wfBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-                wfBarrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
-                wfBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT
-                                        | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
-                wfBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
-                VkDependencyInfo wfDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-                wfDep.sType                = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-                wfDep.memoryBarrierCount   = 1;
-                wfDep.pMemoryBarriers      = &wfBarrier;
-                vkCmdPipelineBarrier2(cmd, &wfDep);
                 m_visibilityPass->recordWireframe(cmd, m_descriptorAllocator->globalSet(), ext,
                                                   *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
                                                   cameraSlot, m_wireframeColor);
