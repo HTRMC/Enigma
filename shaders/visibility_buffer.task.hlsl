@@ -87,6 +87,13 @@ void ASMain(
         s_payload.instance_ids[laneIndex]    = instanceId;
     }
 
+    // Ensure all payload writes are visible before mesh shader reads them.
+    // Required by the EXT_mesh_shader spec: "The last write to any component
+    // of the task payload variable must be completed before the call to
+    // OpEmitMeshTasksEXT." On NVIDIA warp=32=TASK_GROUP_SIZE this is a no-op
+    // but is required for correctness on other hardware and future drivers.
+    GroupMemoryBarrierWithGroupSync();
+
     // All invocations MUST call DispatchMesh exactly once (EXT_mesh_shader spec).
     // Calling it conditionally (only when laneCount > 0) is undefined behavior.
     // When laneCount == 0, DispatchMesh(0,...) dispatches no mesh groups on a

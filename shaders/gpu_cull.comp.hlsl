@@ -102,48 +102,7 @@ CameraData loadCamera(uint slot) {
     return cam;
 }
 
-// --- Frustum plane extraction from viewProj (Gribb-Hartmann method) ---
-// Each plane stored as float4(A, B, C, D) where Ax+By+Cz+D >= 0 means inside.
-struct Frustum {
-    float4 planes[6];
-};
-
-Frustum extractFrustum(float4x4 vp) {
-    // Gribb-Hartmann frustum extraction.
-    // DXC compiles with -Zpc (column-major), so vp[col][row] — i.e. vp[i][j] = VP_{row=j, col=i}.
-    // clip = vp * world  →  clip.x = row0·world, clip.w = row3·world.
-    // Left plane:   clip.w + clip.x ≥ 0  →  (row3 + row0)·world ≥ 0
-    //   A = VP_{3,0} + VP_{0,0} = vp[0][3] + vp[0][0], etc.
-    Frustum f;
-    f.planes[0] = float4(vp[0][3]+vp[0][0], vp[1][3]+vp[1][0], vp[2][3]+vp[2][0], vp[3][3]+vp[3][0]); // Left
-    f.planes[1] = float4(vp[0][3]-vp[0][0], vp[1][3]-vp[1][0], vp[2][3]-vp[2][0], vp[3][3]-vp[3][0]); // Right
-    f.planes[2] = float4(vp[0][3]+vp[0][1], vp[1][3]+vp[1][1], vp[2][3]+vp[2][1], vp[3][3]+vp[3][1]); // Bottom
-    f.planes[3] = float4(vp[0][3]-vp[0][1], vp[1][3]-vp[1][1], vp[2][3]-vp[2][1], vp[3][3]-vp[3][1]); // Top
-    f.planes[4] = float4(vp[0][3]-vp[0][2], vp[1][3]-vp[1][2], vp[2][3]-vp[2][2], vp[3][3]-vp[3][2]); // Near
-    f.planes[5] = float4(vp[0][2],           vp[1][2],           vp[2][2],           vp[3][2]);          // Far
-
-    // Skip plane[5] (far) — for reverse-Z infinite projection, row2 of VP is
-    // (0, 0, 0, near), so planes[5].xyz = 0 and normalization would divide by
-    // zero.  Nothing is ever beyond an infinite far plane, so the test always
-    // passes and we simply omit it.
-    [unroll]
-    for (int i = 0; i < 5; ++i) {
-        float len = length(f.planes[i].xyz);
-        f.planes[i] /= len;
-    }
-    return f;
-}
-
-// Sphere-vs-frustum test. Returns true if the sphere is at least partially inside.
-bool sphereInsideFrustum(Frustum frust, float3 center, float radius) {
-    [unroll]
-    for (int i = 0; i < 5; ++i) { // plane[5] (far) skipped — infinite projection, always passes
-        float dist = dot(frust.planes[i].xyz, center) + frust.planes[i].w;
-        if (dist < -radius)
-            return false;
-    }
-    return true;
-}
+// (Gribb-Hartmann frustum extraction removed — see view-space test in CSMain.)
 
 // --- Find which instance a global meshlet index belongs to ---
 // Uses meshlet_offset + meshlet_count directly from each instance — correct
@@ -196,12 +155,73 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
     float maxScale = max(length(col0), max(length(col1), length(col2)));
     float worldRadius = meshlet.radius * maxScale;
 
-    // Frustum cull.
-    CameraData cam = loadCamera(pc.cameraSlot);
-    Frustum frustum = extractFrustum(cam.viewProj);
+    // Frustum cull — view-space approach.
+    //
+    // The previous Gribb-Hartmann approach extracted world-space planes by
+    // indexing vp[col][row] into the transposed VP matrix.  Under DXC -Zpc
+    // targeting SPIR-V the float4x4 constructor treats its arguments as
+    // COLUMN vectors, so after transpose() the indexing gives VP_math[col][row]
+    // instead of the required VP_math[row][col], silently producing wrong plane
+    // normals that fail in a rotation-dependent way.
+    //
+    // This approach avoids that entirely:
+    //   • mul(cam.view, ...) — same transpose-load pattern as the mesh shader,
+    //     proven correct (objects render at right screen positions).
+    //   • cam.proj[0][0] / cam.proj[1][1] — diagonal elements, identical under
+    //     row-major or column-major constructor interpretation.
+    //
+    // DISABLE_FRUSTUM_CULL: set to 1 to bypass the test entirely.
+    // DIAG_PER_PLANE_CULL:  set to 1 to count per-plane culls into
+    //   countBuffer offsets 4,8,12,16,20.  Plane order: L, R, Bot, Top, Near.
+#define DISABLE_FRUSTUM_CULL 0
+#define DIAG_PER_PLANE_CULL  0
 
-    if (!sphereInsideFrustum(frustum, worldCenter, worldRadius))
-        return;
+    CameraData cam = loadCamera(pc.cameraSlot);
+
+#if DISABLE_FRUSTUM_CULL == 0
+    {
+        // Transform bounding sphere centre to view space.
+        float4 viewPos4  = mul(cam.view, float4(worldCenter, 1.0));
+        float  vx        = viewPos4.x;
+        float  vy        = viewPos4.y;
+        float  depth     = -viewPos4.z;  // positive = in front (right-handed -Z forward)
+
+        // Frustum half-extents at this depth.
+        // proj[0][0] = f/aspect,  proj[1][1] = -f  (Vulkan +Y-down flip applied in proj).
+        float fPerAspect = cam.proj[0][0];           // > 0
+        float hw         = depth / fPerAspect;        // half-width  of frustum at depth
+        float hh         = depth / (-cam.proj[1][1]); // half-height of frustum at depth
+
+        // Signed distances (positive = inside that half-space):
+        //   [0] left    [1] right   [2] bottom   [3] top   [4] near / behind-camera
+        float dists[5];
+        dists[0] =  vx + hw;  // inside left  boundary: vx >= -hw
+        dists[1] =  hw - vx;  // inside right boundary: vx <=  hw
+        dists[2] =  vy + hh;  // inside bottom:         vy >= -hh
+        dists[3] =  hh - vy;  // inside top:            vy <=  hh
+        dists[4] =  depth;    // not behind camera:      depth >= 0
+
+  #if DIAG_PER_PLANE_CULL
+        {
+            RWByteAddressBuffer diagBuf = g_rwBuffers[NonUniformResourceIndex(pc.countBufferSlot)];
+            [unroll]
+            for (int pi = 0; pi < 5; ++pi) {
+                if (dists[pi] < -worldRadius) {
+                    uint dummy;
+                    diagBuf.InterlockedAdd((pi + 1) * 4, 1u, dummy); // offsets 4,8,12,16,20
+                    return;
+                }
+            }
+        }
+  #else
+        [unroll]
+        for (int pi = 0; pi < 5; ++pi) {
+            if (dists[pi] < -worldRadius)
+                return;
+        }
+  #endif
+    }
+#endif
 
     // Meshlet survived — append to output.
     RWByteAddressBuffer countBuf      = g_rwBuffers[NonUniformResourceIndex(pc.countBufferSlot)];

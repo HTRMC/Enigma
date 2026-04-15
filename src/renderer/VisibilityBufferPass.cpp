@@ -187,7 +187,7 @@ void VisibilityBufferPass::buildPipeline(gfx::ShaderManager& shaderManager,
 
     VkPipelineRasterizationStateCreateInfo rasterizer{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
     rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-    rasterizer.cullMode    = VK_CULL_MODE_BACK_BIT;
+    rasterizer.cullMode    = VK_CULL_MODE_NONE; // depth test handles occlusion; Y-flip reverses winding
     rasterizer.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rasterizer.lineWidth   = 1.0f;
 
@@ -278,7 +278,7 @@ void VisibilityBufferPass::rebuildPipeline() {
     viewportState.viewportCount = 1; viewportState.scissorCount = 1;
 
     VkPipelineRasterizationStateCreateInfo rasterizer{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
-    rasterizer.polygonMode = VK_POLYGON_MODE_FILL; rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL; rasterizer.cullMode = VK_CULL_MODE_NONE;
     rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rasterizer.lineWidth = 1.0f;
 
     VkPipelineMultisampleStateCreateInfo multisample{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
@@ -356,7 +356,7 @@ void VisibilityBufferPass::buildVsFallbackPipeline() {
     viewportState.viewportCount = 1; viewportState.scissorCount = 1;
 
     VkPipelineRasterizationStateCreateInfo rasterizer{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
-    rasterizer.polygonMode = VK_POLYGON_MODE_FILL; rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL; rasterizer.cullMode = VK_CULL_MODE_NONE;
     rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rasterizer.lineWidth = 1.0f;
 
     VkPipelineMultisampleStateCreateInfo multisample{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
@@ -659,22 +659,36 @@ void VisibilityBufferPass::record(VkCommandBuffer           cmd,
     vkCmdEndRendering(cmd);
 
     // -------------------------------------------------------------------
-    // Transition vis buffer COLOR_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY
-    // for MaterialEvalPass to sample it as Texture2D.
+    // Post-pass transitions:
+    //   vis buffer  COLOR_ATTACHMENT_OPTIMAL  → SHADER_READ_ONLY_OPTIMAL
+    //   depth buffer DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL
+    // Both are needed by MaterialEvalPass (compute) and other downstream
+    // passes that sample them. Depth must also be declared correctly in the
+    // Renderer render-graph when vbRendered=true.
     // -------------------------------------------------------------------
-    VkImageMemoryBarrier2 postBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2 };
-    postBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-    postBarrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-    postBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-    postBarrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-    postBarrier.oldLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    postBarrier.newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    postBarrier.image         = m_vis_image;
-    postBarrier.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 };
+    const VkImageMemoryBarrier2 postBarriers[2] = {
+        {
+            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+            m_vis_image, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+        },
+        {
+            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
+            VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+            depthImage, { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 }
+        },
+    };
 
     VkDependencyInfo postDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-    postDep.imageMemoryBarrierCount = 1;
-    postDep.pImageMemoryBarriers    = &postBarrier;
+    postDep.imageMemoryBarrierCount = 2;
+    postDep.pImageMemoryBarriers    = postBarriers;
     vkCmdPipelineBarrier2(cmd, &postDep);
 }
 
