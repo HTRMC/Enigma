@@ -25,8 +25,13 @@
 
 #include <GLFW/glfw3.h>
 
+#include <algorithm>
 #include <filesystem>
+#include <fstream>
+#include <map>
+#include <numeric>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace enigma {
@@ -51,10 +56,19 @@ int Application::run(int argc, char** argv) {
     renderer.setCamera(&camera);
     FollowCamera followCam(camera, /*armLength=*/8.0f, /*heightOffset=*/2.5f);
 
+    // Parse optional flags. --profile N: run N frames, dump GPU timing CSV, exit.
+    u32 profileFrames = 0;
+    for (int i = 1; i < argc - 1; ++i) {
+        if (argv[i] && std::string_view(argv[i]) == "--profile" && argv[i + 1]) {
+            profileFrames = static_cast<u32>(std::stoul(argv[i + 1]));
+            ENIGMA_LOG_INFO("[app] profile mode: {} capture frames (30 warmup)", profileFrames);
+        }
+    }
+
     // glTF scene loading: command-line path, BMW M4 GT3, or bundled default.
     std::optional<Scene> scene;
     std::filesystem::path modelPath;
-    if (argc > 1 && argv[1] != nullptr) {
+    if (argc > 1 && argv[1] != nullptr && std::string_view(argv[1]) != "--profile") {
         modelPath = argv[1];
     } else {
         const auto bmwPath =
@@ -162,14 +176,63 @@ int Application::run(int argc, char** argv) {
     });
 
     // -------------------------------------------------------------------------
-    // Frame loop (AC 3.2: body < 30 lines).
+    // Frame loop.
     // -------------------------------------------------------------------------
+    constexpr u32 kProfileWarmup = 30; // frames to skip before collecting
+    u32 totalFrames = 0;
+    std::map<std::string, std::vector<f32>> profileData;
+
     while (!window.shouldClose()) {
         window.pollEvents();
         const f32 dt = static_cast<f32>(clock.tick());
         input.update();
         world.run_systems(dt);
         renderer.drawFrame();
+        ++totalFrames;
+
+        // GPU timing collection (profile mode only).
+        if (profileFrames > 0 && totalFrames > kProfileWarmup) {
+            for (const auto& r : renderer.gpuTimings())
+                profileData[r.name].push_back(r.durationMs);
+
+            const u32 collected = totalFrames - kProfileWarmup;
+            if (collected >= profileFrames) {
+                // Print table to stdout.
+                const std::string sep(60, '-');
+                printf("\n%s\n", sep.c_str());
+                printf("  GPU Profile  |  %u frames captured  |  30 warmup\n", profileFrames);
+                printf("%s\n", sep.c_str());
+                printf("  %-28s  %7s  %7s  %7s\n", "Pass", "Min ms", "Max ms", "Avg ms");
+                printf("  %-28s  %7s  %7s  %7s\n",
+                       std::string(28,'-').c_str(), "-------", "-------", "-------");
+
+                const auto csvPath =
+                    Paths::executablePath().parent_path() / "enigma_profile.csv";
+                std::ofstream csv(csvPath);
+                csv << "Pass,MinMs,MaxMs,AvgMs,P95Ms\n";
+
+                f32 gpuTotal = 0.f;
+                for (auto& [name, samples] : profileData) {
+                    std::sort(samples.begin(), samples.end());
+                    const f32 minMs  = samples.front();
+                    const f32 maxMs  = samples.back();
+                    const f32 avgMs  = std::accumulate(samples.begin(), samples.end(), 0.f)
+                                     / static_cast<f32>(samples.size());
+                    const f32 p95Ms  = samples[static_cast<size_t>(samples.size() * 0.95f)];
+                    printf("  %-28s  %7.3f  %7.3f  %7.3f\n",
+                           name.c_str(), minMs, maxMs, avgMs);
+                    csv << name << "," << minMs << "," << maxMs << ","
+                        << avgMs << "," << p95Ms << "\n";
+                    gpuTotal += avgMs;
+                }
+
+                printf("%s\n", sep.c_str());
+                printf("  %-28s  %7s  %7s  %7.3f\n", "GPU TOTAL (avg)", "", "", gpuTotal);
+                printf("%s\n\n", sep.c_str());
+                printf("  CSV written to: %s\n\n", csvPath.string().c_str());
+                break;
+            }
+        }
     }
 
     // Clean up scene before renderer teardown. CDLOD terrain is owned by the

@@ -957,16 +957,18 @@ void Renderer::drawFrame() {
                 && m_debugMode != DebugMode::Wireframe)
             {
                 // Initial reset_count + transfer barrier above already ran.
+                m_gpuProfiler->beginZone(frame.commandBuffer, "CullTerrain");
                 m_gpuCullPass->record(frame.commandBuffer,
                                        m_descriptorAllocator->globalSet(),
                                        *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
                                        cameraSlot,
                                        sceneInstanceCount, terrainInstanceCount,
                                        sceneMeshletCount,  terrainMeshletCount);
-
                 emitCullToTaskBarrier();
+                m_gpuProfiler->endZone(frame.commandBuffer);
 
                 const auto terrainTopo = m_terrain->sharedTopologyHandle();
+                m_gpuProfiler->beginZone(frame.commandBuffer, "DrawTerrainVB");
                 m_visibilityPass->recordTerrain(
                     frame.commandBuffer, m_descriptorAllocator->globalSet(), extent,
                     m_gbufDepth.view, m_gbufDepth.image,
@@ -974,6 +976,7 @@ void Renderer::drawFrame() {
                     terrainTopo.topologyVerticesSlot,
                     terrainTopo.topologyTrianglesSlot,
                     terrainMeshletCount);
+                m_gpuProfiler->endZone(frame.commandBuffer);
 
                 terrainRan = true;
             }
@@ -1015,6 +1018,7 @@ void Renderer::drawFrame() {
                     vkCmdPipelineBarrier2(frame.commandBuffer, &resetDep);
                 }
 
+                m_gpuProfiler->beginZone(frame.commandBuffer, "CullScene");
                 m_gpuCullPass->record(frame.commandBuffer,
                                        m_descriptorAllocator->globalSet(),
                                        *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
@@ -1025,12 +1029,15 @@ void Renderer::drawFrame() {
                 m_indirectBuffer->record_count_readback(frame.commandBuffer);
 
                 emitCullToTaskBarrier();
+                m_gpuProfiler->endZone(frame.commandBuffer);
 
+                m_gpuProfiler->beginZone(frame.commandBuffer, "DrawSceneVB");
                 m_visibilityPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
                                           extent,
                                           m_gbufDepth.view, m_gbufDepth.image,
                                           *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot,
                                           /*clearFirst=*/!terrainRan);
+                m_gpuProfiler->endZone(frame.commandBuffer);
             }
 
             // --- Terrain wireframe cull (Wireframe + LitWireframe debug modes) ---
@@ -1055,6 +1062,7 @@ void Renderer::drawFrame() {
                 wireResetDep.pMemoryBarriers    = &wireResetBarrier;
                 vkCmdPipelineBarrier2(frame.commandBuffer, &wireResetDep);
 
+                m_gpuProfiler->beginZone(frame.commandBuffer, "CullTerrainWire");
                 m_gpuCullPass->record(frame.commandBuffer,
                                        m_descriptorAllocator->globalSet(),
                                        *m_gpuScene, *m_gpuMeshlets, *m_terrainWireIndirectBuffer,
@@ -1063,13 +1071,16 @@ void Renderer::drawFrame() {
                                        sceneMeshletCount,  terrainMeshletCount);
 
                 emitCullToTaskBarrier();
+                m_gpuProfiler->endZone(frame.commandBuffer);
             }
 
             // MaterialEvalPass reads vis buffer + depth, writes G-buffer to SHADER_READ_ONLY_OPTIMAL.
+            m_gpuProfiler->beginZone(frame.commandBuffer, "MaterialEval");
             m_materialEvalPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
                                         extent, m_visibilityPass->vis_buffer_slot(),
                                         *m_gpuScene, *m_gpuMeshlets,
                                         m_scene->materialBufferSlot, cameraSlot);
+            m_gpuProfiler->endZone(frame.commandBuffer);
         }
     }
 
