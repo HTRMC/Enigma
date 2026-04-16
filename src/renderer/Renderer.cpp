@@ -272,6 +272,8 @@ Renderer::Renderer(Window& window)
     m_gpuMeshlets    = std::make_unique<GpuMeshletBuffer>(*m_device, *m_allocator, *m_descriptorAllocator);
     m_indirectBuffer = std::make_unique<IndirectDrawBuffer>(*m_device, *m_allocator, *m_descriptorAllocator);
     m_indirectBuffer->resize(65536); // reserve for up to 64K meshlets
+    m_terrainWireIndirectBuffer = std::make_unique<IndirectDrawBuffer>(*m_device, *m_allocator, *m_descriptorAllocator);
+    m_terrainWireIndirectBuffer->resize(65536);
 
     m_hizPass = std::make_unique<HiZPass>(*m_device, *m_allocator, *m_descriptorAllocator);
     m_hizPass->allocate(m_swapchain->extent());
@@ -293,6 +295,9 @@ Renderer::Renderer(Window& window)
         m_visibilityPass->buildWireframePipeline(*m_shaderManager,
                                                   m_descriptorAllocator->layout(),
                                                   m_swapchain->format());
+        m_visibilityPass->buildTerrainWireframePipeline(*m_shaderManager,
+                                                         m_descriptorAllocator->layout(),
+                                                         m_swapchain->format());
     }
 
     // Debug visualization pass — fullscreen debug modes.
@@ -1028,6 +1033,38 @@ void Renderer::drawFrame() {
                                           /*clearFirst=*/!terrainRan);
             }
 
+            // --- Terrain wireframe cull (Wireframe + LitWireframe debug modes) ---
+            // Culls terrain meshlets into m_terrainWireIndirectBuffer so the wireframe
+            // overlay pass can draw terrain lines independently of m_indirectBuffer
+            // (which at this point holds scene survivors only).
+            if ((m_debugMode == DebugMode::Wireframe || m_debugMode == DebugMode::LitWireframe)
+                && m_terrain != nullptr && m_terrain->isEnabled()
+                && terrainMeshletCount > 0 && terrainInstanceCount > 0
+                && m_visibilityPass->hasTerrainWireframePipeline()
+                && m_terrainWireIndirectBuffer)
+            {
+                m_terrainWireIndirectBuffer->reset_count(frame.commandBuffer);
+
+                VkMemoryBarrier2 wireResetBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                wireResetBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+                wireResetBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+                wireResetBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                wireResetBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+                VkDependencyInfo wireResetDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                wireResetDep.memoryBarrierCount = 1;
+                wireResetDep.pMemoryBarriers    = &wireResetBarrier;
+                vkCmdPipelineBarrier2(frame.commandBuffer, &wireResetDep);
+
+                m_gpuCullPass->record(frame.commandBuffer,
+                                       m_descriptorAllocator->globalSet(),
+                                       *m_gpuScene, *m_gpuMeshlets, *m_terrainWireIndirectBuffer,
+                                       cameraSlot,
+                                       sceneInstanceCount, terrainInstanceCount,
+                                       sceneMeshletCount,  terrainMeshletCount);
+
+                emitCullToTaskBarrier();
+            }
+
             // MaterialEvalPass reads vis buffer + depth, writes G-buffer to SHADER_READ_ONLY_OPTIMAL.
             m_materialEvalPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
                                         extent, m_visibilityPass->vis_buffer_slot(),
@@ -1409,6 +1446,17 @@ void Renderer::drawFrame() {
             wireDesc.clearColor   = {{0.0f, 0.0f, 0.0f, 1.0f}};
             wireDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
                 m_gpuProfiler->beginZone(cmd, "DebugWireframePass");
+                if (m_terrain && m_terrain->isEnabled() && m_terrainWireIndirectBuffer
+                    && m_visibilityPass->hasTerrainWireframePipeline()) {
+                    const u32 tmc  = m_gpuMeshlets->total_meshlet_count() - m_gpuMeshlets->scene_meshlet_count();
+                    const auto topo = m_terrain->sharedTopologyHandle();
+                    m_visibilityPass->recordTerrainWireframe(cmd, m_descriptorAllocator->globalSet(), ext,
+                                                              *m_gpuScene, *m_gpuMeshlets, *m_terrainWireIndirectBuffer,
+                                                              cameraSlot,
+                                                              topo.topologyVerticesSlot,
+                                                              topo.topologyTrianglesSlot,
+                                                              tmc, m_wireframeColor);
+                }
                 m_visibilityPass->recordWireframe(cmd, m_descriptorAllocator->globalSet(), ext,
                                                   *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
                                                   cameraSlot, m_wireframeColor);
@@ -1457,6 +1505,17 @@ void Renderer::drawFrame() {
             wireOverlayDesc.colorLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
             wireOverlayDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
                 m_gpuProfiler->beginZone(cmd, "DebugWireframeOverlayPass");
+                if (m_terrain && m_terrain->isEnabled() && m_terrainWireIndirectBuffer
+                    && m_visibilityPass->hasTerrainWireframePipeline()) {
+                    const u32 tmc  = m_gpuMeshlets->total_meshlet_count() - m_gpuMeshlets->scene_meshlet_count();
+                    const auto topo = m_terrain->sharedTopologyHandle();
+                    m_visibilityPass->recordTerrainWireframe(cmd, m_descriptorAllocator->globalSet(), ext,
+                                                              *m_gpuScene, *m_gpuMeshlets, *m_terrainWireIndirectBuffer,
+                                                              cameraSlot,
+                                                              topo.topologyVerticesSlot,
+                                                              topo.topologyTrianglesSlot,
+                                                              tmc, m_wireframeColor);
+                }
                 m_visibilityPass->recordWireframe(cmd, m_descriptorAllocator->globalSet(), ext,
                                                   *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
                                                   cameraSlot, m_wireframeColor);

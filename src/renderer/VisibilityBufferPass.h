@@ -87,6 +87,30 @@ public:
     // True after buildWireframePipeline() succeeds.
     bool hasWireframePipeline() const { return m_wireframePipeline != VK_NULL_HANDLE; }
 
+    // Build the terrain wireframe pipeline variant (VK_POLYGON_MODE_LINE, terrain shaders).
+    // Must be called after buildTerrainPipeline() (reuses m_terrainTaskShaderPath /
+    // m_terrainMeshShaderPath) and after buildWireframePipeline() (reuses m_wireFragShaderPath).
+    void buildTerrainWireframePipeline(gfx::ShaderManager& shaderManager,
+                                        VkDescriptorSetLayout globalSetLayout,
+                                        VkFormat swapchainFormat);
+
+    // Record terrain wireframe draw inside an active render pass targeting swapchainFormat.
+    // terrainIndirect: the IndirectDrawBuffer filled by the terrain-wireframe cull pass.
+    // terrainMeshletCount: upper bound on terrain meshlets (dispatch ceiling).
+    void recordTerrainWireframe(VkCommandBuffer           cmd,
+                                 VkDescriptorSet           globalSet,
+                                 VkExtent2D                extent,
+                                 const GpuSceneBuffer&     scene,
+                                 const GpuMeshletBuffer&   meshlets,
+                                 const IndirectDrawBuffer& terrainIndirect,
+                                 u32                       cameraSlot,
+                                 u32                       topologyVerticesSlot,
+                                 u32                       topologyTrianglesSlot,
+                                 u32                       terrainMeshletCount,
+                                 vec3                      wireColor);
+
+    bool hasTerrainWireframePipeline() const { return m_terrainWireframePipeline != VK_NULL_HANDLE; }
+
     // Generate the VS-fallback indirect draw buffer from CPU-side scene/meshlet data.
     // Call after scene load on Min-tier GPUs (device.supportsMeshShaders() == false).
     // Must be called before the first record() on a non-mesh-shader device.
@@ -188,6 +212,11 @@ private:
     VkPipeline       m_terrainPipeline       = VK_NULL_HANDLE;
     std::filesystem::path m_terrainTaskShaderPath;
     std::filesystem::path m_terrainMeshShaderPath;
+
+    // Terrain wireframe pipeline: same task/mesh shaders as terrain, debug_wireframe.frag,
+    // VK_POLYGON_MODE_LINE, push-constant ranges [0..40) task+mesh [40..56) fragment.
+    VkPipelineLayout m_terrainWireframePipelineLayout = VK_NULL_HANDLE;
+    VkPipeline       m_terrainWireframePipeline       = VK_NULL_HANDLE;
 };
 
 } // namespace enigma

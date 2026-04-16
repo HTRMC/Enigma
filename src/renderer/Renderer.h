@@ -201,6 +201,7 @@ private:
     std::unique_ptr<GpuSceneBuffer>          m_gpuScene;
     std::unique_ptr<GpuMeshletBuffer>        m_gpuMeshlets;
     std::unique_ptr<IndirectDrawBuffer>      m_indirectBuffer;
+    std::unique_ptr<IndirectDrawBuffer>      m_terrainWireIndirectBuffer;
     std::unique_ptr<HiZPass>                 m_hizPass;
     std::unique_ptr<GpuCullPass>             m_gpuCullPass;
     std::unique_ptr<VisibilityBufferPass>    m_visibilityPass;

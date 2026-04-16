@@ -73,6 +73,8 @@ VisibilityBufferPass::VisibilityBufferPass(gfx::Device& device,
 VisibilityBufferPass::~VisibilityBufferPass() {
     if (m_wireframePipeline       != VK_NULL_HANDLE) vkDestroyPipeline(m_device->logical(), m_wireframePipeline, nullptr);
     if (m_wireframePipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_device->logical(), m_wireframePipelineLayout, nullptr);
+    if (m_terrainWireframePipeline       != VK_NULL_HANDLE) vkDestroyPipeline(m_device->logical(), m_terrainWireframePipeline, nullptr);
+    if (m_terrainWireframePipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_device->logical(), m_terrainWireframePipelineLayout, nullptr);
     if (m_terrainPipeline       != VK_NULL_HANDLE) vkDestroyPipeline(m_device->logical(), m_terrainPipeline, nullptr);
     if (m_terrainPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_device->logical(), m_terrainPipelineLayout, nullptr);
     if (m_vsFallbackPipeline != VK_NULL_HANDLE)
@@ -1148,6 +1150,172 @@ void VisibilityBufferPass::recordTerrain(VkCommandBuffer           cmd,
     postDep.imageMemoryBarrierCount = 2;
     postDep.pImageMemoryBarriers    = postBarriers;
     vkCmdPipelineBarrier2(cmd, &postDep);
+}
+
+// ---------------------------------------------------------------------------
+// buildTerrainWireframePipeline / recordTerrainWireframe
+// ---------------------------------------------------------------------------
+
+void VisibilityBufferPass::buildTerrainWireframePipeline(gfx::ShaderManager& shaderManager,
+                                                          VkDescriptorSetLayout globalSetLayout,
+                                                          VkFormat swapchainFormat) {
+    if (!m_useMeshShaders) {
+        ENIGMA_LOG_INFO("[visibility_buffer] terrain wireframe skipped (no mesh shader support)");
+        return;
+    }
+    // Requires buildTerrainPipeline() and buildWireframePipeline() to have run first.
+    if (m_terrainTaskShaderPath.empty() || m_wireFragShaderPath.empty()) {
+        ENIGMA_LOG_WARN("[visibility_buffer] buildTerrainWireframePipeline: call buildTerrainPipeline and buildWireframePipeline first");
+        return;
+    }
+
+    VkShaderModule taskMod = shaderManager.compile(m_terrainTaskShaderPath, gfx::ShaderManager::Stage::Task, "ASMain");
+    VkShaderModule meshMod = shaderManager.compile(m_terrainMeshShaderPath, gfx::ShaderManager::Stage::Mesh, "MSMain");
+    VkShaderModule fragMod = shaderManager.compile(m_wireFragShaderPath,    gfx::ShaderManager::Stage::Fragment, "PSMain");
+
+    // Two push constant ranges:
+    //   Range 0: task+mesh — VBTerrainPushBlock (40 bytes at offset 0)
+    //   Range 1: fragment  — wireColor float3 + pad (16 bytes at offset 40)
+    const VkPushConstantRange ranges[2] = {
+        { VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT, 0, 40 },
+        { VK_SHADER_STAGE_FRAGMENT_BIT, 40, 16 },
+    };
+
+    VkPipelineLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    layoutInfo.setLayoutCount         = 1;
+    layoutInfo.pSetLayouts            = &globalSetLayout;
+    layoutInfo.pushConstantRangeCount = 2;
+    layoutInfo.pPushConstantRanges    = ranges;
+
+    ENIGMA_VK_CHECK(vkCreatePipelineLayout(m_device->logical(), &layoutInfo, nullptr,
+                                           &m_terrainWireframePipelineLayout));
+
+    const std::array<VkPipelineShaderStageCreateInfo, 3> stages = {{
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+          VK_SHADER_STAGE_TASK_BIT_EXT, taskMod, "ASMain", nullptr },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+          VK_SHADER_STAGE_MESH_BIT_EXT, meshMod, "MSMain", nullptr },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+          VK_SHADER_STAGE_FRAGMENT_BIT, fragMod, "PSMain", nullptr },
+    }};
+
+    const std::array<VkDynamicState, 2> dynamicStates = {{
+        VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
+    }};
+    VkPipelineDynamicStateCreateInfo dynamicState{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dynamicState.dynamicStateCount = 2;
+    dynamicState.pDynamicStates    = dynamicStates.data();
+
+    VkPipelineViewportStateCreateInfo viewportState{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    viewportState.viewportCount = 1;
+    viewportState.scissorCount  = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rasterizer.polygonMode = VK_POLYGON_MODE_LINE;
+    rasterizer.cullMode    = VK_CULL_MODE_NONE;
+    rasterizer.frontFace   = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rasterizer.lineWidth   = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo multisample{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState blendAttachment{};
+    blendAttachment.blendEnable         = VK_TRUE;
+    blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blendAttachment.colorBlendOp        = VK_BLEND_OP_ADD;
+    blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+    blendAttachment.alphaBlendOp        = VK_BLEND_OP_ADD;
+    blendAttachment.colorWriteMask      = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT
+                                        | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+    VkPipelineColorBlendStateCreateInfo colorBlend{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    colorBlend.attachmentCount = 1;
+    colorBlend.pAttachments    = &blendAttachment;
+
+    VkPipelineRenderingCreateInfo renderingInfo{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+    renderingInfo.colorAttachmentCount    = 1;
+    renderingInfo.pColorAttachmentFormats = &swapchainFormat;
+    renderingInfo.depthAttachmentFormat   = VK_FORMAT_UNDEFINED;
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    pipelineInfo.pNext               = &renderingInfo;
+    pipelineInfo.stageCount          = static_cast<u32>(stages.size());
+    pipelineInfo.pStages             = stages.data();
+    pipelineInfo.pVertexInputState   = nullptr;
+    pipelineInfo.pInputAssemblyState = nullptr;
+    pipelineInfo.pViewportState      = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState   = &multisample;
+    pipelineInfo.pDepthStencilState  = nullptr;
+    pipelineInfo.pColorBlendState    = &colorBlend;
+    pipelineInfo.pDynamicState       = &dynamicState;
+    pipelineInfo.layout              = m_terrainWireframePipelineLayout;
+
+    ENIGMA_VK_CHECK(vkCreateGraphicsPipelines(m_device->logical(), VK_NULL_HANDLE,
+                                              1, &pipelineInfo, nullptr, &m_terrainWireframePipeline));
+
+    vkDestroyShaderModule(m_device->logical(), taskMod, nullptr);
+    vkDestroyShaderModule(m_device->logical(), meshMod, nullptr);
+    vkDestroyShaderModule(m_device->logical(), fragMod, nullptr);
+
+    ENIGMA_LOG_INFO("[visibility_buffer] terrain wireframe pipeline built (VK_POLYGON_MODE_LINE)");
+}
+
+void VisibilityBufferPass::recordTerrainWireframe(VkCommandBuffer           cmd,
+                                                   VkDescriptorSet           globalSet,
+                                                   VkExtent2D                extent,
+                                                   const GpuSceneBuffer&     scene,
+                                                   const GpuMeshletBuffer&   meshlets,
+                                                   const IndirectDrawBuffer& terrainIndirect,
+                                                   u32                       cameraSlot,
+                                                   u32                       topologyVerticesSlot,
+                                                   u32                       topologyTrianglesSlot,
+                                                   u32                       terrainMeshletCount,
+                                                   vec3                      wireColor) {
+    if (m_terrainWireframePipeline == VK_NULL_HANDLE) return;
+    if (!m_useMeshShaders)                             return;
+    if (terrainMeshletCount == 0)                      return;
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_terrainWireframePipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            m_terrainWireframePipelineLayout, 0, 1, &globalSet, 0, nullptr);
+
+    VBTerrainPushBlock pc{};
+    pc.instanceBufferSlot    = scene.slot();
+    pc.meshletBufferSlot     = meshlets.meshlets_slot();
+    pc.survivingIdsSlot      = terrainIndirect.surviving_slot();
+    pc.meshletVerticesSlot   = meshlets.vertices_slot();
+    pc.meshletTrianglesSlot  = meshlets.triangles_slot();
+    pc.cameraSlot            = cameraSlot;
+    pc.countBufferSlot       = terrainIndirect.count_slot();
+    pc.instanceCount         = static_cast<u32>(scene.instance_count());
+    pc.topologyVerticesSlot  = topologyVerticesSlot;
+    pc.topologyTrianglesSlot = topologyTrianglesSlot;
+
+    vkCmdPushConstants(cmd, m_terrainWireframePipelineLayout,
+                       VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT,
+                       0, sizeof(pc), &pc);
+
+    struct WireColorPush { float r, g, b, _pad; };
+    WireColorPush wcPush{ wireColor.x, wireColor.y, wireColor.z, 1.0f };
+    vkCmdPushConstants(cmd, m_terrainWireframePipelineLayout,
+                       VK_SHADER_STAGE_FRAGMENT_BIT,
+                       40, sizeof(wcPush), &wcPush);
+
+    VkViewport viewport{};
+    viewport.width    = static_cast<float>(extent.width);
+    viewport.height   = static_cast<float>(extent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{ {0, 0}, extent };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    const u32 taskGroups = (terrainMeshletCount + TASK_GROUP_SIZE - 1) / TASK_GROUP_SIZE;
+    vkCmdDrawMeshTasksEXT(cmd, taskGroups, 1, 1);
 }
 
 } // namespace enigma
