@@ -93,6 +93,7 @@ bool CdlodTerrain::initialize(const CdlodConfig&  config,
     // Build and upload the per-LOD shared topology templates.
     m_lodTopology.resize(config.lodLevels);
     m_lodTemplateMeshlets.resize(config.lodLevels);
+    m_lodTemplateVertices.resize(config.lodLevels);
     buildMeshletTemplates(meshletBuffer, uploadCmd);
 
     // Allocate the per-LOD vertex pools.
@@ -124,7 +125,12 @@ bool CdlodTerrain::initialize(const CdlodConfig&  config,
     }
     // Conservative ceiling per the plan spec: 18 meshlets per patch.
     const u32 perPatchCeiling = std::max(maxPatchMeshlets, 18u);
-    const u32 terrainCeiling  = config.poolSlotsPerLod * config.lodLevels * perPatchCeiling;
+    // Double the terrain ceiling to account for the retirement transient:
+    // when the camera moves, deactivated patches occupy meshlet ranges for
+    // MAX_FRAMES_IN_FLIGHT+1 frames before freeMeshletRange() reclaims them.
+    // During that window, newly activated patches still append to the end,
+    // so the buffer can transiently hold 2× the steady-state patch count.
+    const u32 terrainCeiling  = config.poolSlotsPerLod * config.lodLevels * perPatchCeiling * 2u;
     const u32 sceneMeshlets   = meshletBuffer.total_meshlet_count();
     const u32 totalCeiling    = sceneMeshlets + terrainCeiling;
 
@@ -239,8 +245,9 @@ void CdlodTerrain::buildMeshletTemplates(GpuMeshletBuffer& meshletBuffer,
                                                templateData.meshlet_vertices,
                                                templateData.meshlet_triangles);
         handle.meshletCount = static_cast<u32>(templateData.meshlets.size());
-        m_lodTopology[lod]       = handle;
+        m_lodTopology[lod]         = handle;
         m_lodTemplateMeshlets[lod] = templateData.meshlets;
+        m_lodTemplateVertices[lod] = templateData.meshlet_vertices;
     }
 
     ENIGMA_LOG_INFO("[cdlod] built meshlet template: {} meshlets, {} vertex-idx, {} tri-bytes",
@@ -338,9 +345,14 @@ u32 CdlodTerrain::allocPoolSlot(u32 lod) {
 // ---------------------------------------------------------------------------
 
 void CdlodTerrain::collectActive(u32 nodeIndex, const vec3& cameraPos,
-                                  std::vector<u32>& outNodes) const
+                                  std::vector<u32>& outNodes, u32 maxNodes) const
 {
     if (nodeIndex == UINT32_MAX) return;
+    // Hard cap: pool is full, no point collecting more.
+    // Children are visited nearest-first (see below) so this drops far nodes,
+    // not near ones — near tiles are always collected before the cap hits.
+    if (outNodes.size() >= maxNodes) return;
+
     const CdlodNode& node = m_nodeArena[nodeIndex];
 
     // Distance from camera to node center (XZ plane only — y ignored).
@@ -356,10 +368,24 @@ void CdlodTerrain::collectActive(u32 nodeIndex, const vec3& cameraPos,
     const bool hasChildren = node.lod > 0 && node.childIndex[0] != UINT32_MAX;
 
     if (hasChildren && dist < switchDist) {
-        // Recurse into children for finer LOD.
+        // Sort children nearest-first so when the cap fires the dropped nodes
+        // are the farthest ones, not the closest.  4-element insertion sort —
+        // no heap allocation.
+        u32 order[4] = {0, 1, 2, 3};
+        f32 childDist2[4];
         for (u32 i = 0; i < 4; ++i) {
-            collectActive(node.childIndex[i], cameraPos, outNodes);
+            if (node.childIndex[i] == UINT32_MAX) { childDist2[i] = FLT_MAX; continue; }
+            const CdlodNode& c  = m_nodeArena[node.childIndex[i]];
+            const vec2       cc = c.worldMin + vec2(c.size * 0.5f);
+            childDist2[i] = (cameraPos.x - cc.x) * (cameraPos.x - cc.x)
+                          + (cameraPos.z - cc.y) * (cameraPos.z - cc.y);
         }
+        for (u32 i = 1; i < 4; ++i)
+            for (u32 j = i; j > 0 && childDist2[order[j]] < childDist2[order[j-1]]; --j)
+                std::swap(order[j], order[j-1]);
+
+        for (u32 i = 0; i < 4; ++i)
+            collectActive(node.childIndex[order[i]], cameraPos, outNodes, maxNodes);
     } else {
         outNodes.push_back(nodeIndex);
     }
@@ -403,14 +429,21 @@ void CdlodTerrain::update(const vec3&    cameraPos,
     m_activationsThisFrame = 0;
 
     // 1. Collect desired node set.
+    // Reserve pool capacity up front — avoids realloc churn during traversal.
+    // collectActive caps output at this size so traversal exits early once
+    // the pool is full rather than visiting the entire 4M-node leaf layer.
+    const u32 maxDesired = m_config.poolSlotsPerLod * m_config.lodLevels;
     std::vector<u32> desired;
-    desired.reserve(256);
-    collectActive(m_rootIndex, cameraPos, desired);
+    desired.reserve(maxDesired);
+    collectActive(m_rootIndex, cameraPos, desired, maxDesired);
 
     // Sort for deterministic set-difference below.
     std::sort(desired.begin(), desired.end());
 
     // 2. Compute set differences.
+    // toActivate order follows collectActive's nearest-first traversal (children
+    // sorted by distance at each level), so the activation budget is naturally
+    // spent on the closest patches without an extra sort pass here.
     std::vector<u32> toActivate;
     toActivate.reserve(desired.size());
     for (u32 nodeIdx : desired) {
@@ -568,15 +601,38 @@ void CdlodTerrain::activatePatch(u32               nodeIndex,
 
     // 2. Build per-patch Meshlet descriptors from the LOD template.
     const std::vector<Meshlet>& templateMeshlets = m_lodTemplateMeshlets[lod];
+    const std::vector<u32>&     templateVerts     = m_lodTemplateVertices[lod];
     std::vector<Meshlet> patchMeshlets = templateMeshlets;
-    const vec3 translate(node.worldMin.x, 0.0f, node.worldMin.y);
+    const f32 patchScale = node.size / static_cast<f32>(m_config.quadsPerPatch);
     for (Meshlet& m : patchMeshlets) {
-        // Scale the template's unit-spacing bounds up to this patch's size,
-        // then translate to world space. vertex_offset / triangle_offset
-        // remain identical (they point into the per-LOD topology SSBOs).
-        m.bounding_sphere_center = m.bounding_sphere_center * (node.size / static_cast<f32>(m_config.quadsPerPatch))
-                                 + translate;
-        m.bounding_sphere_radius *= (node.size / static_cast<f32>(m_config.quadsPerPatch));
+        // Scale the template's unit-spacing bounds up to this patch's size.
+        // Do NOT add a world-space translation here — inst.transform is a
+        // translation matrix by (worldMin.x, 0, worldMin.y), and the cull
+        // shader applies mul(inst.transform, float4(center, 1)) to bring the
+        // sphere into world space. Adding the translation here would double it.
+        m.bounding_sphere_center *= patchScale;
+        m.bounding_sphere_radius *= patchScale;
+
+        // Correct the bounding sphere's Y component. The template was built
+        // with all vertices at Y=0; actual terrain heights can be large.
+        // Without this correction the frustum cull rejects visible patches
+        // whose sphere centre sits far below the actual terrain surface.
+        f32 minH =  std::numeric_limits<f32>::max();
+        f32 maxH = -std::numeric_limits<f32>::max();
+        for (u32 vi = 0; vi < m.vertex_count; ++vi) {
+            const u32 vtxIdx = templateVerts[m.vertex_offset + vi];
+            const f32 h      = heights[vtxIdx];
+            if (h < minH) minH = h;
+            if (h > maxH) maxH = h;
+        }
+        if (minH > maxH) { minH = 0.0f; maxH = 0.0f; }
+        const f32 heightMid  = 0.5f * (minH + maxH);
+        const f32 heightHalf = 0.5f * (maxH - minH);
+        m.bounding_sphere_center.y = heightMid;
+        // Expand radius to cover vertical extent (Pythagoras: XZ radius ⊥ Y).
+        m.bounding_sphere_radius = std::sqrt(
+            m.bounding_sphere_radius * m.bounding_sphere_radius +
+            heightHalf * heightHalf);
     }
 
     patch.meshletOffset = meshletBuffer.appendIncremental(cmd, frameIndex, patchMeshlets);

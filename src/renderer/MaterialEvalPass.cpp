@@ -146,14 +146,17 @@ void MaterialEvalPass::record(VkCommandBuffer         cmd,
     preBarriers[2].image = m_metalRough_image;
     preBarriers[3].image = m_motionVec_image;
 
-    // Depth: transition from DEPTH_ATTACHMENT_OPTIMAL (written by VB pass)
-    // to SHADER_READ_ONLY_OPTIMAL so the compute shader can sample it.
+    // Depth: already in SHADER_READ_ONLY_OPTIMAL — VisibilityBufferPass::record()
+    // and recordTerrain() both emit a post-pass barrier that transitions depth
+    // from DEPTH_ATTACHMENT_OPTIMAL → SHADER_READ_ONLY_OPTIMAL before returning.
+    // This barrier is a layout-identical no-op that satisfies validation; the
+    // real memory visibility was established by the VB post-pass barrier.
     preBarriers[4].sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     preBarriers[4].srcStageMask     = VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
     preBarriers[4].srcAccessMask    = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
     preBarriers[4].dstStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
     preBarriers[4].dstAccessMask    = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-    preBarriers[4].oldLayout        = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    preBarriers[4].oldLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     preBarriers[4].newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     preBarriers[4].image            = m_depth_image;
     preBarriers[4].subresourceRange = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 };

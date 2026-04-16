@@ -88,10 +88,12 @@ void IndirectDrawBuffer::resize(size_t max_meshlets) {
     // Count buffer: u32[0] = surviving meshlet count; u32[1..5] = per-plane cull
     // counters for DIAG_PER_PLANE_CULL in gpu_cull.comp.hlsl (offsets 4,8,12,16,20).
     // 6 u32s total = 24 bytes. Extra slots are unused when diagnostics are off.
+    // Needs TRANSFER_SRC in addition to the shared usage flags because
+    // record_count_readback() copies FROM this buffer to the HOST_VISIBLE readback buffer.
     {
         const VkDeviceSize size = sizeof(u32) * 6;
         VkBufferCreateInfo bufCI{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-        bufCI.size = size; bufCI.usage = usage; bufCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        bufCI.size = size; bufCI.usage = usage | VK_BUFFER_USAGE_TRANSFER_SRC_BIT; bufCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ENIGMA_VK_CHECK(vmaCreateBuffer(m_allocator->handle(), &bufCI, &allocCI,
                                         &m_count_buffer, &m_count_alloc, nullptr));
         m_count_slot = m_descriptors->registerUavBuffer(m_count_buffer, size);
