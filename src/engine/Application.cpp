@@ -181,6 +181,7 @@ int Application::run(int argc, char** argv) {
     constexpr u32 kProfileWarmup = 30; // frames to skip before collecting
     u32 totalFrames = 0;
     std::map<std::string, std::vector<f32>> profileData;
+    std::vector<f32> cpuFrameTimes;
 
     while (!window.shouldClose()) {
         window.pollEvents();
@@ -190,8 +191,9 @@ int Application::run(int argc, char** argv) {
         renderer.drawFrame();
         ++totalFrames;
 
-        // GPU timing collection (profile mode only).
+        // GPU + CPU timing collection (profile mode only).
         if (profileFrames > 0 && totalFrames > kProfileWarmup) {
+            cpuFrameTimes.push_back(dt * 1000.f); // dt is seconds → ms
             for (const auto& r : renderer.gpuTimings())
                 profileData[r.name].push_back(r.durationMs);
 
@@ -210,6 +212,19 @@ int Application::run(int argc, char** argv) {
                     Paths::executablePath().parent_path() / "enigma_profile.csv";
                 std::ofstream csv(csvPath);
                 csv << "Pass,MinMs,MaxMs,AvgMs,P95Ms\n";
+
+                // CPU frame time summary.
+                if (!cpuFrameTimes.empty()) {
+                    std::sort(cpuFrameTimes.begin(), cpuFrameTimes.end());
+                    const f32 cpuMin = cpuFrameTimes.front();
+                    const f32 cpuMax = cpuFrameTimes.back();
+                    const f32 cpuAvg = std::accumulate(cpuFrameTimes.begin(), cpuFrameTimes.end(), 0.f)
+                                     / static_cast<f32>(cpuFrameTimes.size());
+                    const f32 cpuP95 = cpuFrameTimes[static_cast<size_t>(cpuFrameTimes.size() * 0.95f)];
+                    printf("  %-28s  %7.3f  %7.3f  %7.3f   (p95=%.3fms, ~%.0f fps)\n",
+                           "CPU FrameTime", cpuMin, cpuMax, cpuAvg, cpuP95, 1000.f / cpuAvg);
+                    csv << "CPU FrameTime," << cpuMin << "," << cpuMax << "," << cpuAvg << "," << cpuP95 << "\n";
+                }
 
                 f32 gpuTotal = 0.f;
                 for (auto& [name, samples] : profileData) {

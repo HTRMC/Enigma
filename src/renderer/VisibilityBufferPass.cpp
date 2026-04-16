@@ -1163,15 +1163,19 @@ void VisibilityBufferPass::buildTerrainWireframePipeline(gfx::ShaderManager& sha
         ENIGMA_LOG_INFO("[visibility_buffer] terrain wireframe skipped (no mesh shader support)");
         return;
     }
-    // Requires buildTerrainPipeline() and buildWireframePipeline() to have run first.
-    if (m_terrainTaskShaderPath.empty() || m_wireFragShaderPath.empty()) {
-        ENIGMA_LOG_WARN("[visibility_buffer] buildTerrainWireframePipeline: call buildTerrainPipeline and buildWireframePipeline first");
+    // Requires buildTerrainPipeline() to have run first (sets terrain shader paths).
+    if (m_terrainTaskShaderPath.empty()) {
+        ENIGMA_LOG_WARN("[visibility_buffer] buildTerrainWireframePipeline: call buildTerrainPipeline first");
         return;
     }
 
+    // Terrain wireframe uses a dedicated frag shader with [[vk::offset(40)]] so
+    // the color push constant aligns with VBTerrainPushBlock (40 bytes).
+    const auto terrainWireFragPath = Paths::shaderSourceDir() / "debug_wireframe_terrain.frag.hlsl";
+
     VkShaderModule taskMod = shaderManager.compile(m_terrainTaskShaderPath, gfx::ShaderManager::Stage::Task, "ASMain");
     VkShaderModule meshMod = shaderManager.compile(m_terrainMeshShaderPath, gfx::ShaderManager::Stage::Mesh, "MSMain");
-    VkShaderModule fragMod = shaderManager.compile(m_wireFragShaderPath,    gfx::ShaderManager::Stage::Fragment, "PSMain");
+    VkShaderModule fragMod = shaderManager.compile(terrainWireFragPath,     gfx::ShaderManager::Stage::Fragment, "PSMain");
 
     // Two push constant ranges:
     //   Range 0: task+mesh — VBTerrainPushBlock (40 bytes at offset 0)
