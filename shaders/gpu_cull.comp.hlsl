@@ -140,8 +140,11 @@ void findInstanceAndLocal(uint globalMeshletIdx,
             return;
         }
     }
-    // Should not reach here if meshletOffset/meshletCount match the instance range.
-    instanceId      = 0;
+    // No instance owns this meshlet — it is an orphaned range (e.g. a terrain
+    // patch retired-but-pending-reclamation whose GpuInstance is no longer in
+    // the scene buffer). Signal "not found" with UINT32_MAX so CSMain can
+    // discard the thread rather than falling back to instance 0 (the car).
+    instanceId      = 0xFFFFFFFFu;
     localMeshletIdx = 0;
 }
 
@@ -158,6 +161,11 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
     // Determine which instance and local meshlet this global ID maps to.
     uint instanceId, localMeshletId;
     findInstanceAndLocal(globalId, instanceId, localMeshletId);
+
+    // Orphaned meshlet (retired-but-pending-reclamation terrain range with no
+    // current GpuInstance). Discard rather than falling back to instance 0.
+    if (instanceId == 0xFFFFFFFFu)
+        return;
 
     GpuInstance inst = loadInstance(instanceId);
     Meshlet meshlet  = loadMeshlet(inst.meshlet_offset + localMeshletId);
@@ -234,11 +242,18 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
             }
         }
   #else
+        // Screen-edge planes (left/right/bottom/top): add a 1m world-space guard band
+        // so terrain meshlets near the screen boundary aren't popped by exact-boundary
+        // cull. Small-radius meshlets (LOD 0, ~0.18m) would otherwise flicker at edges.
+        static const float kEdgeGuard = 1.0f;
         [unroll]
-        for (int pi = 0; pi < 5; ++pi) {
-            if (dists[pi] < -worldRadius)
+        for (int pi = 0; pi < 4; ++pi) {
+            if (dists[pi] < -(worldRadius + kEdgeGuard))
                 return;
         }
+        // Near / behind-camera plane: no guard band — discard anything behind camera.
+        if (dists[4] < -worldRadius)
+            return;
   #endif
     }
 #endif

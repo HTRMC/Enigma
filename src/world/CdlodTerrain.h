@@ -36,7 +36,7 @@ struct CdlodConfig {
     u32 lodLevels          = 12;
     u32 quadsPerPatch      = 32;
     f32 leafPatchSize      = 1.0f;    // world-space size of LOD 0 patch
-    f32 lodDistanceBase    = 32.0f;   // LOD 0 visible within this distance
+    f32 lodDistanceBase    = 8.0f;    // LOD switch dist at LOD 0 (≈4× leaf patch size for 4096m world/12 LODs)
     f32 lodDistanceGrow    = 2.0f;    // each level multiplies distance
     u32 terrainMaterialIdx = 0;       // set during initialize()
     u32 poolSlotsPerLod    = 96;      // vertex pool capacity per LOD
@@ -139,7 +139,7 @@ private:
     void allocLodPool(u32 lod);
     u32  allocPoolSlot(u32 lod);
     void collectActive(u32 nodeIndex, const vec3& cameraPos,
-                       std::vector<u32>& outNodes) const;
+                       std::vector<u32>& outNodes, u32 maxNodes) const;
     void activatePatch(u32               nodeIndex,
                        GpuMeshletBuffer& meshletBuffer,
                        VkCommandBuffer   cmd,
@@ -184,6 +184,10 @@ private:
     // Per-LOD meshlet templates (CPU-side, used to fan out Meshlet records
     // for each activated patch). Indexed by LOD level.
     std::vector<std::vector<Meshlet>> m_lodTemplateMeshlets;
+    // Per-LOD meshlet vertex-index arrays (CPU-side, parallel to
+    // m_lodTemplateMeshlets). Used in activatePatch to compute per-meshlet
+    // height min/max for bounding sphere Y correction.
+    std::vector<std::vector<u32>> m_lodTemplateVertices;
 
     // Key: nodeIndex -> runtime patch record.
     std::unordered_map<u32, TerrainPatch> m_patches;
