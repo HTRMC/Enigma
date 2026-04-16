@@ -242,15 +242,28 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
             }
         }
   #else
-        // Screen-edge planes (left/right/bottom/top): add a 1m world-space guard band
-        // so terrain meshlets near the screen boundary aren't popped by exact-boundary
-        // cull. Small-radius meshlets (LOD 0, ~0.18m) would otherwise flicker at edges.
+        // Screen-edge planes (left/right/bottom/top): the frustum plane normals in this
+        // linearised test are UNNORMALISED.  The left/right plane normal has length
+        // sec(halfFovX) = sqrt(1 + tan²(halfFovX)), and the top/bottom plane normal has
+        // length sec(halfFovY).  Comparing worldRadius against the raw `dists` values
+        // effectively shrinks the sphere by cos(halfFov), causing over-aggressive culling
+        // for meshlets near the screen edge (partially-visible quads get popped).
+        //
+        // Fix: scale worldRadius by the plane-normal length before the comparison so
+        // the test is equivalent to a true signed-distance sphere-plane check.
+        // For the near plane the normal IS (0,0,1) with unit length — no correction needed.
+        float tanHFovX   = 1.0f / fPerAspect;                   // tan(halfFovX)
+        float tanHFovY   = 1.0f / (-cam.proj[1][1]);            // tan(halfFovY)
+        float worldRadiusLR = worldRadius * sqrt(1.0f + tanHFovX * tanHFovX); // worldRadius * sec(halfFovX)
+        float worldRadiusTB = worldRadius * sqrt(1.0f + tanHFovY * tanHFovY); // worldRadius * sec(halfFovY)
+
+        // 1m world-space guard band on top of the corrected radius so meshlets that
+        // graze the screen edge don't flicker due to sub-texel sphere inaccuracies.
         static const float kEdgeGuard = 1.0f;
-        [unroll]
-        for (int pi = 0; pi < 4; ++pi) {
-            if (dists[pi] < -(worldRadius + kEdgeGuard))
-                return;
-        }
+        if (dists[0] < -(worldRadiusLR + kEdgeGuard)) return;  // left
+        if (dists[1] < -(worldRadiusLR + kEdgeGuard)) return;  // right
+        if (dists[2] < -(worldRadiusTB + kEdgeGuard)) return;  // bottom
+        if (dists[3] < -(worldRadiusTB + kEdgeGuard)) return;  // top
         // Near / behind-camera plane: no guard band — discard anything behind camera.
         if (dists[4] < -worldRadius)
             return;

@@ -437,13 +437,11 @@ void CdlodTerrain::update(const vec3&    cameraPos,
     desired.reserve(maxDesired);
     collectActive(m_rootIndex, cameraPos, desired, maxDesired);
 
-    // Sort for deterministic set-difference below.
-    std::sort(desired.begin(), desired.end());
-
     // 2. Compute set differences.
-    // toActivate order follows collectActive's nearest-first traversal (children
-    // sorted by distance at each level), so the activation budget is naturally
-    // spent on the closest patches without an extra sort pass here.
+    // Build toActivate BEFORE sorting desired so that collectActive's nearest-first
+    // traversal order is preserved.  Sorting desired first was destroying this order
+    // and causing the activation budget to be spent on arbitrary (node-index ordered)
+    // patches instead of the closest ones, leaving near terrain holes for several frames.
     std::vector<u32> toActivate;
     toActivate.reserve(desired.size());
     for (u32 nodeIdx : desired) {
@@ -451,6 +449,10 @@ void CdlodTerrain::update(const vec3&    cameraPos,
             toActivate.push_back(nodeIdx);
         }
     }
+
+    // Sort desired now (only needed for the binary_search in toDeactivate computation
+    // and in the deactivation child-readiness check below).
+    std::sort(desired.begin(), desired.end());
 
     std::vector<u32> toDeactivate;
     toDeactivate.reserve(m_patches.size());
@@ -472,8 +474,32 @@ void CdlodTerrain::update(const vec3&    cameraPos,
     }
 
     // 4. Retire patches no longer needed (frame-counter-gated reclamation).
+    // Guard: do NOT deactivate a patch whose direct children are in the desired set
+    // but not yet active.  The activation budget (step 3) may have left some children
+    // unloaded for this frame.  Deactivating the parent before its children are ready
+    // creates terrain holes that persist until the budget catches up — typically several
+    // frames at the default activationBudget of 16.  Keeping the parent alive as a
+    // coarser fallback eliminates the hole at the cost of one extra frame of the old LOD.
     for (u32 nodeIdx : toDeactivate) {
-        deactivatePatch(nodeIdx);
+        const CdlodNode& node = m_nodeArena[nodeIdx];
+        bool childrenReady = true;
+        if (node.lod > 0) {
+            for (u32 ci = 0; ci < 4; ++ci) {
+                const u32 childIdx = node.childIndex[ci];
+                if (childIdx == UINT32_MAX) continue;
+                // Child is wanted by the desired set but has not been activated yet
+                // (activation budget was exhausted this frame).
+                if (std::binary_search(desired.begin(), desired.end(), childIdx) &&
+                    m_patches.find(childIdx) == m_patches.end()) {
+                    childrenReady = false;
+                    break;
+                }
+            }
+        }
+        if (childrenReady) {
+            deactivatePatch(nodeIdx);
+        }
+        // else: keep parent alive for this frame; child activation continues next frame.
     }
 
     // 5. Emit ONE terminal barrier covering:
