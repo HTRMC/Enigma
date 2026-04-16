@@ -106,9 +106,16 @@ public:
     // Returns the meshlet range to the free-list for later reuse.
     void freeMeshletRange(MeshletRange range);
 
-    // Total number of meshlets across all appended meshes.
-    // Remains valid after upload() — CPU vector is not cleared.
+    // Total number of meshlets across all appended meshes (grows as terrain
+    // patches are activated via appendIncremental).
     u32 total_meshlet_count() const { return static_cast<u32>(m_meshlets.size()); }
+
+    // Number of scene (non-terrain) meshlets — frozen at the point
+    // reserveCapacity() or upload() is called. Use this in the renderer to
+    // determine the scene-pass meshlet range; total_meshlet_count() grows as
+    // terrain patches activate and would otherwise expand the scene range
+    // into terrain-meshlet indices, corrupting the scene draw pass.
+    u32 scene_meshlet_count() const { return m_sceneMeshletCount; }
 
     // CPU-side meshlet array for VS fallback draw command generation.
     // Valid after append(), including after upload().
@@ -164,7 +171,12 @@ private:
 
     // Pre-allocated capacity for the CDLOD incremental-append path. Set by
     // reserveCapacity(); 0 means the legacy upload() path is in use.
-    u32 m_reservedCapacity = 0;
+    u32 m_reservedCapacity   = 0;
+
+    // Frozen scene-meshlet count — set once in upload() / reserveCapacity()
+    // so the renderer's scene-pass range stays fixed even as appendIncremental()
+    // grows m_meshlets with terrain-patch descriptors.
+    u32 m_sceneMeshletCount  = 0;
 
     // Ring-buffer staging for appendIncremental (MAX_FRAMES_IN_FLIGHT entries).
     // Each slot holds the maximum per-frame activation payload.

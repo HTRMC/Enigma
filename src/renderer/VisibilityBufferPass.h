@@ -96,6 +96,11 @@ public:
     // Record the visibility buffer draw call.
     // depthView:  borrowed VkImageView for the GBuffer depth (D32_SFLOAT).
     // depthImage: the underlying VkImage (for layout transitions).
+    // clearFirst=true  (default): UNDEFINED→COLOR pre-barrier + CLEAR load ops.
+    //   Use when record() is the first VB draw this frame (no terrain pass).
+    // clearFirst=false: SHADER_READ_ONLY→COLOR pre-barrier + LOAD load ops.
+    //   Use when recordTerrain() ran first — terrain already cleared and drew;
+    //   scene fragments override terrain where the car is in front.
     void record(VkCommandBuffer           cmd,
                 VkDescriptorSet           globalSet,
                 VkExtent2D                extent,
@@ -104,7 +109,8 @@ public:
                 const GpuSceneBuffer&     scene,
                 const GpuMeshletBuffer&   meshlets,
                 const IndirectDrawBuffer& indirect,
-                u32                       cameraSlot);
+                u32                       cameraSlot,
+                bool                      clearFirst = true);
 
     // Record the CDLOD terrain visibility-buffer draw. Must be called between
     // vkCmdBeginRendering / vkCmdEndRendering targeting the SAME vis + depth

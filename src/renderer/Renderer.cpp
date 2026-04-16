@@ -874,7 +874,11 @@ void Renderer::drawFrame() {
         // meshlets go through visibility_buffer.mesh.hlsl and terrain meshlets
         // go through terrain_cdlod.mesh.hlsl.
         const u32 sceneInstanceCount  = static_cast<u32>(m_gpuScene->instance_count());
-        const u32 sceneMeshletCount   = m_gpuMeshlets->total_meshlet_count();
+        // Use scene_meshlet_count() — frozen at upload()/reserveCapacity() time —
+        // not total_meshlet_count(), which grows as terrain patches activate and
+        // would pull terrain-meshlet indices into the scene cull range, causing
+        // findInstanceAndLocal to fall through to instanceId=0 → corruption.
+        const u32 sceneMeshletCount   = m_gpuMeshlets->scene_meshlet_count();
 
         // Per-frame CDLOD terrain traversal — activates/deactivates patches,
         // emits a GpuInstance per active patch into the scene buffer, and
@@ -935,68 +939,19 @@ void Renderer::drawFrame() {
                 vkCmdPipelineBarrier2(frame.commandBuffer, &cullDep);
             };
 
-            // ---------- Pass A: Scene meshlets ----------
-            // Cull scene instances/meshlets and draw via the scene VB pipeline.
-            // When there are zero scene meshlets (pure-terrain scene), skip
-            // entirely so the VB record() doesn't clear with no content.
-            if (sceneMeshletCount > 0 && sceneInstanceCount > 0) {
-                m_gpuCullPass->record(frame.commandBuffer,
-                                       m_descriptorAllocator->globalSet(),
-                                       *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
-                                       cameraSlot,
-                                       /*instanceOffset*/ 0, sceneInstanceCount,
-                                       /*meshletOffset*/  0, sceneMeshletCount);
+            bool terrainRan = false;
 
-                m_indirectBuffer->record_count_readback(frame.commandBuffer);
-
-                emitCullToTaskBarrier();
-
-                m_visibilityPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
-                                          extent,
-                                          m_gbufDepth.view, m_gbufDepth.image,
-                                          *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot);
-            }
-
-            // ---------- Pass B: Terrain meshlets ----------
-            // Route terrain through terrain_cdlod.mesh.hlsl. Requires a
-            // separate cull pass (different instance + meshlet ranges) with a
-            // fresh surviving-IDs buffer — reset_count() wipes the counter
-            // and, transitively, the surviving slot [0..N) overwrite.
+            // ---------- Pass B: Terrain meshlets (runs FIRST — clears vis+depth) ----------
+            // Terrain is drawn before scene so the scene pass (LOAD) renders on top
+            // and always wins at coplanar depth. recordTerrain() CLEARs both images.
+            // Skip in pure Wireframe mode so scene survivors remain in the indirect
+            // buffer for the wireframe overlay.
             if (m_terrain != nullptr && m_terrain->isEnabled()
                 && terrainMeshletCount > 0 && terrainInstanceCount > 0
-                && m_visibilityPass->hasTerrainPipeline())
+                && m_visibilityPass->hasTerrainPipeline()
+                && m_debugMode != DebugMode::Wireframe)
             {
-                // Barrier: previous task-shader reads on count/surviving →
-                // compute writes for this pass. Skip if scene pass didn't run.
-                if (sceneMeshletCount > 0) {
-                    VkMemoryBarrier2 readToWrite{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-                    readToWrite.srcStageMask  = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT
-                                              | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
-                    readToWrite.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
-                    readToWrite.dstStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT
-                                              | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-                    readToWrite.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT
-                                              | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-                    VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-                    dep.memoryBarrierCount = 1;
-                    dep.pMemoryBarriers    = &readToWrite;
-                    vkCmdPipelineBarrier2(frame.commandBuffer, &dep);
-                }
-
-                m_indirectBuffer->reset_count(frame.commandBuffer);
-
-                // Transfer → compute barrier for the reset.
-                VkMemoryBarrier2 resetBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-                resetBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
-                resetBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
-                resetBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-                resetBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT
-                                           | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
-                VkDependencyInfo resetDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-                resetDep.memoryBarrierCount = 1;
-                resetDep.pMemoryBarriers    = &resetBarrier;
-                vkCmdPipelineBarrier2(frame.commandBuffer, &resetDep);
-
+                // Initial reset_count + transfer barrier above already ran.
                 m_gpuCullPass->record(frame.commandBuffer,
                                        m_descriptorAllocator->globalSet(),
                                        *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
@@ -1014,6 +969,63 @@ void Renderer::drawFrame() {
                     terrainTopo.topologyVerticesSlot,
                     terrainTopo.topologyTrianglesSlot,
                     terrainMeshletCount);
+
+                terrainRan = true;
+            }
+
+            // ---------- Pass A: Scene meshlets (runs SECOND — LOADs vis+depth) ----------
+            // When terrainRan==true the images are in SHADER_READ_ONLY_OPTIMAL after
+            // recordTerrain()'s post-barriers; record(clearFirst=false) transitions
+            // them back to COLOR_ATTACHMENT with LOAD so scene fragments overwrite
+            // terrain at equal or greater depth (GREATER_OR_EQUAL, reverse-Z).
+            // When terrainRan==false (Wireframe or no terrain), clearFirst=true
+            // initialises both images from UNDEFINED with CLEAR.
+            if (sceneMeshletCount > 0 && sceneInstanceCount > 0) {
+                if (terrainRan) {
+                    // Terrain task/mesh reads → transfer+compute writes for the reset.
+                    VkMemoryBarrier2 readToWrite{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                    readToWrite.srcStageMask  = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT
+                                              | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
+                    readToWrite.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+                    readToWrite.dstStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT
+                                              | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                    readToWrite.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT
+                                              | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+                    VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                    dep.memoryBarrierCount = 1;
+                    dep.pMemoryBarriers    = &readToWrite;
+                    vkCmdPipelineBarrier2(frame.commandBuffer, &dep);
+
+                    m_indirectBuffer->reset_count(frame.commandBuffer);
+
+                    VkMemoryBarrier2 resetBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                    resetBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+                    resetBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+                    resetBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                    resetBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+                                               | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+                    VkDependencyInfo resetDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                    resetDep.memoryBarrierCount = 1;
+                    resetDep.pMemoryBarriers    = &resetBarrier;
+                    vkCmdPipelineBarrier2(frame.commandBuffer, &resetDep);
+                }
+
+                m_gpuCullPass->record(frame.commandBuffer,
+                                       m_descriptorAllocator->globalSet(),
+                                       *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
+                                       cameraSlot,
+                                       /*instanceOffset*/ 0, sceneInstanceCount,
+                                       /*meshletOffset*/  0, sceneMeshletCount);
+
+                m_indirectBuffer->record_count_readback(frame.commandBuffer);
+
+                emitCullToTaskBarrier();
+
+                m_visibilityPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
+                                          extent,
+                                          m_gbufDepth.view, m_gbufDepth.image,
+                                          *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot,
+                                          /*clearFirst=*/!terrainRan);
             }
 
             // MaterialEvalPass reads vis buffer + depth, writes G-buffer to SHADER_READ_ONLY_OPTIMAL.

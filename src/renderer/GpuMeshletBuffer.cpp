@@ -18,7 +18,7 @@ namespace enigma {
 // Staging ring-buffer ceiling for incremental meshlet appends. Budget is
 // 16 patches/frame × 18 meshlets/patch — comfortably covers the default
 // CdlodConfig::activationBudget with headroom for burst activations.
-static constexpr u32 kStagingRingMeshletsPerSlot = 16u * 18u;
+static constexpr u32 kStagingRingMeshletsPerSlot = 16u * 40u; // 16 activations/frame × 40 meshlets/patch (32×32 grid → 34 + headroom)
 
 GpuMeshletBuffer::GpuMeshletBuffer(gfx::Device& device, gfx::Allocator& allocator,
                                    gfx::DescriptorAllocator& descriptors)
@@ -198,6 +198,10 @@ void GpuMeshletBuffer::upload(VkCommandBuffer cmd) {
     m_vertices_slot  = m_descriptors->registerStorageBuffer(m_vertices_buf,  vertices_size);
     m_triangles_slot = m_descriptors->registerUavBuffer(m_triangles_buf, triangles_size);
 
+    // Freeze the scene-only meshlet count so scene_meshlet_count() stays
+    // correct even if appendIncremental() later grows m_meshlets.
+    m_sceneMeshletCount = static_cast<u32>(m_meshlets.size());
+
     ENIGMA_LOG_INFO("[meshlet_buffer] uploaded {} meshlets / {} verts / {} tri-bytes "
                     "(slots: meshlets={} verts={} tris={})",
                     m_meshlets.size(), m_vertices.size(), m_triangles.size(),
@@ -282,26 +286,66 @@ void GpuMeshletBuffer::reserveCapacity(VkCommandBuffer cmd, u32 totalMeshlets) {
         vkCmdCopyBuffer(cmd, m_staging_meshlets, m_meshlets_buf, 1, &region);
     }
 
-    // Barrier: transfer write -> shader read for the initial seed.
-    if (initialBytes > 0) {
-        VkBufferMemoryBarrier2 barrier{
-            VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2, nullptr,
-            VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
-            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT
-            | VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT,
-            VK_ACCESS_2_SHADER_STORAGE_READ_BIT,
-            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
-            m_meshlets_buf, 0, VK_WHOLE_SIZE
-        };
-        VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-        dep.bufferMemoryBarrierCount = 1;
-        dep.pBufferMemoryBarriers    = &barrier;
-        vkCmdPipelineBarrier2(cmd, &dep);
+    // Upload vertices and triangles (static — built by append() calls before init).
+    // reserveCapacity() replaces upload() in the CDLOD path, so it must also
+    // seed the vertex-remapping and triangle-index buffers. Without this,
+    // m_vertices_slot and m_triangles_slot stay at 0 and the mesh shader
+    // reads vertex indices and triangle data from bindless slot 0 (a wrong buffer).
+    const VkDeviceSize vertices_size  = m_vertices.size()  * sizeof(u32);
+    const VkDeviceSize triangles_size = m_triangles.size() * sizeof(u8);
+
+    if (vertices_size > 0) {
+        create_and_upload(cmd, m_vertices.data(), vertices_size,
+                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                          m_vertices_buf, m_vertices_alloc,
+                          m_staging_vertices, m_staging_vertices_alloc);
+    }
+    if (triangles_size > 0) {
+        create_and_upload(cmd, m_triangles.data(), triangles_size,
+                          VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                          m_triangles_buf, m_triangles_alloc,
+                          m_staging_triangles, m_staging_triangles_alloc);
     }
 
-    // Register the bindless slot — stable for program lifetime.
-    m_meshlets_slot   = m_descriptors->registerStorageBuffer(m_meshlets_buf, bufferSize);
-    m_reservedCapacity = totalMeshlets;
+    // Combined barrier: transfer writes → shader reads for all seeded buffers.
+    {
+        VkBufferMemoryBarrier2 barriers[3];
+        u32 n = 0;
+        auto makeBarrier = [](VkBuffer buf) -> VkBufferMemoryBarrier2 {
+            VkBufferMemoryBarrier2 b{ VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2 };
+            b.srcStageMask        = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            b.srcAccessMask       = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            b.dstStageMask        = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT
+                                  | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT
+                                  | VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT;
+            b.dstAccessMask       = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+            b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            b.buffer              = buf;
+            b.offset              = 0;
+            b.size                = VK_WHOLE_SIZE;
+            return b;
+        };
+        if (initialBytes   > 0) barriers[n++] = makeBarrier(m_meshlets_buf);
+        if (vertices_size  > 0) barriers[n++] = makeBarrier(m_vertices_buf);
+        if (triangles_size > 0) barriers[n++] = makeBarrier(m_triangles_buf);
+        if (n > 0) {
+            VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+            dep.bufferMemoryBarrierCount = n;
+            dep.pBufferMemoryBarriers    = barriers;
+            vkCmdPipelineBarrier2(cmd, &dep);
+        }
+    }
+
+    // Register bindless slots — stable for program lifetime.
+    m_meshlets_slot  = m_descriptors->registerStorageBuffer(m_meshlets_buf, bufferSize);
+    if (m_vertices_buf  != VK_NULL_HANDLE)
+        m_vertices_slot  = m_descriptors->registerStorageBuffer(m_vertices_buf,  vertices_size);
+    if (m_triangles_buf != VK_NULL_HANDLE)
+        m_triangles_slot = m_descriptors->registerUavBuffer(m_triangles_buf, triangles_size);
+    m_reservedCapacity  = totalMeshlets;
+    // Freeze the scene-only count before any terrain appendIncremental() calls.
+    m_sceneMeshletCount = static_cast<u32>(m_meshlets.size());
 
     // Pre-allocate the per-frame staging ring. Each slot is sized to the
     // conservative ceiling (16 patches × 18 meshlets per patch).
@@ -324,9 +368,10 @@ void GpuMeshletBuffer::reserveCapacity(VkCommandBuffer cmd, u32 totalMeshlets) {
                                         &m_stagingRingBuf[i], &m_stagingRingAlloc[i], nullptr));
     }
 
-    ENIGMA_LOG_INFO("[meshlet_buffer] reserved capacity for {} meshlets ({} bytes, slot {}), "
-                    "staging ring {}x{} bytes",
-                    totalMeshlets, static_cast<u64>(bufferSize), m_meshlets_slot,
+    ENIGMA_LOG_INFO("[meshlet_buffer] reserved capacity for {} meshlets ({} bytes), "
+                    "slots: meshlets={} verts={} tris={}, staging ring {}x{} bytes",
+                    totalMeshlets, static_cast<u64>(bufferSize),
+                    m_meshlets_slot, m_vertices_slot, m_triangles_slot,
                     gfx::MAX_FRAMES_IN_FLIGHT, static_cast<u64>(slotSize));
 }
 

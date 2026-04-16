@@ -720,7 +720,8 @@ void VisibilityBufferPass::record(VkCommandBuffer           cmd,
                                    const GpuSceneBuffer&     scene,
                                    const GpuMeshletBuffer&   meshlets,
                                    const IndirectDrawBuffer& indirect,
-                                   u32                       cameraSlot) {
+                                   u32                       cameraSlot,
+                                   bool                      clearFirst) {
     const bool usingMeshShaders = m_useMeshShaders;
     ENIGMA_ASSERT((usingMeshShaders ? m_pipeline != VK_NULL_HANDLE
                                     : m_vsFallbackPipeline != VK_NULL_HANDLE)
@@ -728,34 +729,67 @@ void VisibilityBufferPass::record(VkCommandBuffer           cmd,
     ENIGMA_ASSERT(m_vis_image != VK_NULL_HANDLE && "VisibilityBufferPass::record before allocate");
 
     // -------------------------------------------------------------------
-    // Transition vis buffer UNDEFINED → COLOR_ATTACHMENT_OPTIMAL,
-    // depth buffer → DEPTH_ATTACHMENT_OPTIMAL.
+    // Pre-pass image layout transitions.
+    //   clearFirst=true : UNDEFINED → COLOR/DEPTH  (no prior data this frame)
+    //   clearFirst=false: SHADER_READ_ONLY → COLOR/DEPTH  (terrain drew first;
+    //     its post-barrier left both images in SHADER_READ_ONLY_OPTIMAL)
     // -------------------------------------------------------------------
-    const VkImageMemoryBarrier2 preBarriers[2] = {
-        {
-            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
-            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
-            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
-            m_vis_image, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
-        },
-        {
-            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
-            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
-            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
-            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
-            | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
-            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
-            depthImage, { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 }
-        },
-    };
-    VkDependencyInfo preDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-    preDep.imageMemoryBarrierCount = 2;
-    preDep.pImageMemoryBarriers    = preBarriers;
-    vkCmdPipelineBarrier2(cmd, &preDep);
+    if (clearFirst) {
+        const VkImageMemoryBarrier2 preBarriers[2] = {
+            {
+                VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
+                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
+                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+                m_vis_image, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+            },
+            {
+                VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
+                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT
+                | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+                VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+                depthImage, { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 }
+            },
+        };
+        VkDependencyInfo preDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        preDep.imageMemoryBarrierCount = 2;
+        preDep.pImageMemoryBarriers    = preBarriers;
+        vkCmdPipelineBarrier2(cmd, &preDep);
+    } else {
+        // Terrain's post-barrier left both images in SHADER_READ_ONLY_OPTIMAL.
+        const VkImageMemoryBarrier2 preBarriers[2] = {
+            {
+                VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+                m_vis_image, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+            },
+            {
+                VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+                | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+                depthImage, { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 }
+            },
+        };
+        VkDependencyInfo preDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+        preDep.imageMemoryBarrierCount = 2;
+        preDep.pImageMemoryBarriers    = preBarriers;
+        vkCmdPipelineBarrier2(cmd, &preDep);
+    }
 
     // -------------------------------------------------------------------
     // Begin dynamic rendering.
@@ -769,16 +803,16 @@ void VisibilityBufferPass::record(VkCommandBuffer           cmd,
     VkRenderingAttachmentInfo visAttachment{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
     visAttachment.imageView   = m_vis_view;
     visAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    visAttachment.loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    visAttachment.loadOp      = clearFirst ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
     visAttachment.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
-    visAttachment.clearValue  = visClear;
+    visAttachment.clearValue  = visClear; // only used when loadOp=CLEAR
 
     VkRenderingAttachmentInfo depthAttachment{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
     depthAttachment.imageView   = depthView;
     depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    depthAttachment.loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    depthAttachment.loadOp      = clearFirst ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
     depthAttachment.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
-    depthAttachment.clearValue  = depthClear;
+    depthAttachment.clearValue  = depthClear; // only used when loadOp=CLEAR
 
     VkRenderingInfo renderingInfo{ VK_STRUCTURE_TYPE_RENDERING_INFO };
     renderingInfo.renderArea           = { {0, 0}, extent };
@@ -942,7 +976,7 @@ void VisibilityBufferPass::buildTerrainPipeline(gfx::ShaderManager& shaderManage
 
     VkPipelineDepthStencilStateCreateInfo depthStencil{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
     depthStencil.depthTestEnable = VK_TRUE; depthStencil.depthWriteEnable = VK_TRUE;
-    depthStencil.depthCompareOp  = VK_COMPARE_OP_GREATER_OR_EQUAL; // reverse-Z, matches record() pipeline
+    depthStencil.depthCompareOp  = VK_COMPARE_OP_GREATER_OR_EQUAL; // reverse-Z: scene now runs after terrain so GREATER_OR_EQUAL is correct
 
     const VkFormat visFormat = VK_FORMAT_R32_UINT;
     VkPipelineRenderingCreateInfo renderingInfo{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
@@ -990,29 +1024,27 @@ void VisibilityBufferPass::recordTerrain(VkCommandBuffer           cmd,
     if (survivingMeshletCount == 0)          return;
     ENIGMA_ASSERT(m_vis_image != VK_NULL_HANDLE && "recordTerrain before allocate");
 
-    // --------- Pre-pass: SHADER_READ → COLOR/DEPTH_ATTACHMENT_OPTIMAL ---------
-    // record() exits with both images in SHADER_READ_ONLY_OPTIMAL. Transition
-    // them back so we can append a LOAD_OP_LOAD draw that preserves the scene
-    // meshlet output and writes terrain on top.
+    // --------- Pre-pass: UNDEFINED → COLOR/DEPTH_ATTACHMENT_OPTIMAL -----------
+    // recordTerrain() now runs FIRST this frame (terrain drawn before scene so
+    // the scene pass renders on top and always wins coplanar depth fights).
+    // UNDEFINED old-layout discards prior contents — fine because we CLEAR.
     const VkImageMemoryBarrier2 preBarriers[2] = {
         {
             VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
             VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
-            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
             VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
             m_vis_image, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
         },
         {
             VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
-            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
-            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE,
             VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT
             | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
             VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
             depthImage, { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 }
         },
@@ -1022,18 +1054,25 @@ void VisibilityBufferPass::recordTerrain(VkCommandBuffer           cmd,
     preDep.pImageMemoryBarriers    = preBarriers;
     vkCmdPipelineBarrier2(cmd, &preDep);
 
-    // --------- Begin dynamic rendering — LOAD_OP_LOAD preserves scene draws ---
+    // --------- Begin dynamic rendering — CLEAR initialises vis + depth ------
+    VkClearValue visClear{};
+    visClear.color.uint32[0] = 0xFFFFFFFFu;
+    VkClearValue depthClear{};
+    depthClear.depthStencil.depth = 0.0f;
+
     VkRenderingAttachmentInfo visAttachment{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
     visAttachment.imageView   = m_vis_view;
     visAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    visAttachment.loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD;
+    visAttachment.loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR;
     visAttachment.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
+    visAttachment.clearValue  = visClear;
 
     VkRenderingAttachmentInfo depthAttachment{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
     depthAttachment.imageView   = depthView;
     depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
-    depthAttachment.loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD;
+    depthAttachment.loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR;
     depthAttachment.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
+    depthAttachment.clearValue  = depthClear;
 
     VkRenderingInfo renderingInfo{ VK_STRUCTURE_TYPE_RENDERING_INFO };
     renderingInfo.renderArea           = { {0, 0}, extent };
