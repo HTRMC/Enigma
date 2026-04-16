@@ -675,7 +675,6 @@ void Renderer::drawFrame() {
     // (The previous frame's submissions are guaranteed done by the timeline wait above.)
     if (frame.frameValue > 0) {
         m_lastGpuTimings = m_gpuProfiler->readback();
-        if (m_indirectBuffer) m_indirectBuffer->log_diag_plane_counts();
     }
 
     VkCommandBufferBeginInfo beginInfo{};

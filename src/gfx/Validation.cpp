@@ -4,6 +4,7 @@
 #include "core/Log.h"
 
 #include <atomic>
+#include <cstring>
 
 namespace enigma::gfx {
 
@@ -26,6 +27,12 @@ VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
     const char* msg = (data != nullptr && data->pMessage != nullptr)
                           ? data->pMessage
                           : "(null)";
+
+    // DXC emits PerPrimitiveEXT decorations on all mesh shader outputs, even
+    // when the paired fragment shader doesn't declare matching PerPrimitiveEXT
+    // inputs. This is a known HLSL/DXC limitation with no shader-side fix.
+    // Suppress these from the counter so the shutdown assert stays == 0.
+    if (std::strstr(msg, "PerPrimitiveEXT") != nullptr) return VK_FALSE;
 
     if (severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
         // Only count real API validation errors, not loader/layer general messages

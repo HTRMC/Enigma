@@ -87,6 +87,15 @@ bool CdlodTerrain::initialize(const CdlodConfig&  config,
     m_heightmap     = &heightmap;
     m_meshletBuffer = &meshletBuffer;
 
+    // Precompute squared LOD switch distances once. collectActive() uses these
+    // to avoid std::pow + std::sqrt on every node visit in the hot traversal.
+    m_lodSwitchDistSq.resize(config.lodLevels);
+    for (u32 lod = 0; lod < config.lodLevels; ++lod) {
+        const f32 d = config.lodDistanceBase
+                    * std::pow(config.lodDistanceGrow, static_cast<f32>(lod));
+        m_lodSwitchDistSq[lod] = d * d;
+    }
+
     // Build the static quad-tree covering the entire heightmap footprint.
     buildQuadTree();
 
@@ -355,19 +364,17 @@ void CdlodTerrain::collectActive(u32 nodeIndex, const vec3& cameraPos,
 
     const CdlodNode& node = m_nodeArena[nodeIndex];
 
-    // Distance from camera to node center (XZ plane only — y ignored).
+    // Squared distance from camera to node center (XZ plane only — y ignored).
+    // Use dist² throughout so we never call std::sqrt. The LOD switch threshold
+    // is also stored squared (m_lodSwitchDistSq), precomputed in initialize().
     const vec2 center = node.worldMin + vec2(node.size * 0.5f);
     const f32  dx     = cameraPos.x - center.x;
     const f32  dz     = cameraPos.z - center.y;
-    const f32  dist   = std::sqrt(dx * dx + dz * dz);
-
-    // LOD switch distance for this node.
-    const f32 switchDist = m_config.lodDistanceBase
-                         * std::pow(m_config.lodDistanceGrow, static_cast<f32>(node.lod));
+    const f32  dist2  = dx * dx + dz * dz;
 
     const bool hasChildren = node.lod > 0 && node.childIndex[0] != UINT32_MAX;
 
-    if (hasChildren && dist < switchDist) {
+    if (hasChildren && dist2 < m_lodSwitchDistSq[node.lod]) {
         // Sort children nearest-first so when the cap fires the dropped nodes
         // are the farthest ones, not the closest.  4-element insertion sort —
         // no heap allocation.

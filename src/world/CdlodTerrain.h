@@ -177,6 +177,9 @@ private:
 
     std::vector<CdlodNode> m_nodeArena;
     u32                    m_rootIndex = UINT32_MAX;
+    // Precomputed per-LOD squared switch distances. Populated in initialize()
+    // so collectActive() avoids std::pow + std::sqrt on every node visit.
+    std::vector<f32>       m_lodSwitchDistSq;
 
     std::vector<LodPool> m_lodPools;
     std::vector<GpuMeshletBuffer::SharedTopologyHandle> m_lodTopology;

@@ -1179,10 +1179,12 @@ void VisibilityBufferPass::buildTerrainWireframePipeline(gfx::ShaderManager& sha
 
     // Two push constant ranges:
     //   Range 0: task+mesh — VBTerrainPushBlock (40 bytes at offset 0)
-    //   Range 1: fragment  — wireColor float3 + pad (16 bytes at offset 40)
+    //   Range 1: fragment  — wireColor float4 (16 bytes at offset 48, 16-byte aligned)
+    // Offset 48 is used (not 40) because std430/SPIR-V forbids vec types straddling
+    // a 16-byte boundary, and 40 % 16 == 8 would cause a straddle for any vec type.
     const VkPushConstantRange ranges[2] = {
         { VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT, 0, 40 },
-        { VK_SHADER_STAGE_FRAGMENT_BIT, 40, 16 },
+        { VK_SHADER_STAGE_FRAGMENT_BIT, 48, 16 },
     };
 
     VkPipelineLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
@@ -1306,7 +1308,7 @@ void VisibilityBufferPass::recordTerrainWireframe(VkCommandBuffer           cmd,
     WireColorPush wcPush{ wireColor.x, wireColor.y, wireColor.z, 1.0f };
     vkCmdPushConstants(cmd, m_terrainWireframePipelineLayout,
                        VK_SHADER_STAGE_FRAGMENT_BIT,
-                       40, sizeof(wcPush), &wcPush);
+                       48, sizeof(wcPush), &wcPush);
 
     VkViewport viewport{};
     viewport.width    = static_cast<float>(extent.width);
