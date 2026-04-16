@@ -56,6 +56,13 @@ public:
     void buildPipeline(gfx::ShaderManager& shaderManager,
                        VkDescriptorSetLayout globalSetLayout);
 
+    // Build the CDLOD-terrain variant: same pipeline layout (augmented with a
+    // larger push-constant range), different task/mesh shaders that read
+    // per-patch vertices from a per-LOD pool keyed by GpuInstance.vertex_buffer_slot.
+    // Must be called after buildPipeline() (reuses several pipeline parameters).
+    void buildTerrainPipeline(gfx::ShaderManager& shaderManager,
+                              VkDescriptorSetLayout globalSetLayout);
+
     void registerHotReload(gfx::ShaderHotReload& reloader);
 
     // Build the wireframe pipeline variant (VK_POLYGON_MODE_LINE).
@@ -98,6 +105,32 @@ public:
                 const GpuMeshletBuffer&   meshlets,
                 const IndirectDrawBuffer& indirect,
                 u32                       cameraSlot);
+
+    // Record the CDLOD terrain visibility-buffer draw. Must be called between
+    // vkCmdBeginRendering / vkCmdEndRendering targeting the SAME vis + depth
+    // attachments used by record() (i.e. inside the same render graph raster
+    // pass OR immediately after record() without an intervening end+begin —
+    // see Renderer.cpp for the ordering contract).
+    //
+    // topologyVerticesSlot / topologyTrianglesSlot come from
+    // CdlodTerrain::sharedTopologyHandle().  survivingMeshletCount is the
+    // number of terrain meshlets that survived the second cull pass — used to
+    // compute the task-group dispatch count.
+    void recordTerrain(VkCommandBuffer           cmd,
+                       VkDescriptorSet           globalSet,
+                       VkExtent2D                extent,
+                       VkImageView               depthView,
+                       VkImage                   depthImage,
+                       const GpuSceneBuffer&     scene,
+                       const GpuMeshletBuffer&   meshlets,
+                       const IndirectDrawBuffer& indirect,
+                       u32                       cameraSlot,
+                       u32                       topologyVerticesSlot,
+                       u32                       topologyTrianglesSlot,
+                       u32                       survivingMeshletCount);
+
+    // True after buildTerrainPipeline() succeeds.
+    bool hasTerrainPipeline() const { return m_terrainPipeline != VK_NULL_HANDLE; }
 
     // Bindless sampled-image slot for the vis buffer (read by MaterialEvalPass).
     u32       vis_buffer_slot() const { return m_vis_slot; }
@@ -142,6 +175,13 @@ private:
     VkPipelineLayout m_wireframePipelineLayout = VK_NULL_HANDLE;
     VkPipeline       m_wireframePipeline       = VK_NULL_HANDLE;
     std::filesystem::path m_wireFragShaderPath;
+
+    // CDLOD terrain pipeline (separate task+mesh shaders, larger push block
+    // carrying the two extra shared-topology SSBO slots).
+    VkPipelineLayout m_terrainPipelineLayout = VK_NULL_HANDLE;
+    VkPipeline       m_terrainPipeline       = VK_NULL_HANDLE;
+    std::filesystem::path m_terrainTaskShaderPath;
+    std::filesystem::path m_terrainMeshShaderPath;
 };
 
 } // namespace enigma

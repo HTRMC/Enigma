@@ -26,7 +26,7 @@ struct DebugPC {
 };
 [[vk::push_constant]] DebugPC pc;
 
-// Load camera the same way terrain_clipmap.hlsl does.
+// Load camera via the shared bindless camera SSBO pattern.
 // HLSL float4x4 is column-major; the SSBO stores row vectors, so transpose.
 CameraData loadCamera(uint slot) {
     StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(slot)];

@@ -48,7 +48,8 @@ target_sources(Enigma PRIVATE
     src/scene/CameraController.cpp
     src/scene/FollowCamera.cpp
     src/scene/Scene.cpp
-    src/world/Terrain.cpp
+    src/world/HeightmapLoader.cpp
+    src/world/CdlodTerrain.cpp
     src/asset/GltfLoader.cpp
     src/renderer/Renderer.cpp
     src/renderer/MeshPass.cpp

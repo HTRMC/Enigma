@@ -46,18 +46,23 @@ struct GpuInstance {
     uint     meshlet_count;
     uint     material_index;
     uint     vertex_buffer_slot;
+    uint     vertex_base_offset;
+    uint     _pad;
 };
 
 GpuInstance loadInstance(uint idx) {
     StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.instanceBufferSlot)];
-    const uint base = idx * 5;
+    const uint base = idx * 6;
     GpuInstance inst;
     inst.transform = transpose(float4x4(buf[base + 0], buf[base + 1], buf[base + 2], buf[base + 3]));
-    uint4 packed   = asuint(buf[base + 4]);
-    inst.meshlet_offset    = packed.x;
-    inst.meshlet_count     = packed.y;
-    inst.material_index    = packed.z;
-    inst.vertex_buffer_slot = packed.w;
+    uint4 pack0    = asuint(buf[base + 4]);
+    inst.meshlet_offset     = pack0.x;
+    inst.meshlet_count      = pack0.y;
+    inst.material_index     = pack0.z;
+    inst.vertex_buffer_slot = pack0.w;
+    uint4 pack1             = asuint(buf[base + 5]);
+    inst.vertex_base_offset = pack1.x;
+    inst._pad               = pack1.y;
     return inst;
 }
 

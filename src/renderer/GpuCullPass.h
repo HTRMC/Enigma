@@ -43,12 +43,23 @@ public:
 
     // Record the cull dispatch. Caller must have called IndirectDrawBuffer::reset_count()
     // beforehand. After this call, insert a compute->draw-indirect barrier.
+    //
+    // Two-pass CDLOD support: instanceOffset/instanceCount constrain
+    // `findInstanceAndLocal` to a contiguous range of GpuInstance entries, and
+    // meshletOffset/meshletCount control which meshlets in the global meshlet
+    // buffer this dispatch processes. Pass (0, scene.instance_count(), 0,
+    // meshlets.total_meshlet_count()) for a single-batch cull covering the
+    // whole scene.
     void record(VkCommandBuffer       cmd,
                 VkDescriptorSet       globalSet,
                 const GpuSceneBuffer& scene,
                 const GpuMeshletBuffer& meshlets,
                 const IndirectDrawBuffer& indirect,
-                u32 cameraSlot);
+                u32 cameraSlot,
+                u32 instanceOffset,
+                u32 instanceCount,
+                u32 meshletOffset,
+                u32 meshletCount);
 
 private:
     void rebuildPipeline();

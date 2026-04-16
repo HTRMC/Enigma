@@ -54,8 +54,9 @@ struct PushBlock {
 [[vk::push_constant]] PushBlock pc;
 
 // --- Constants ---
-static const uint INVALID_VIS = 0xFFFFFFFFu;
-static const uint INVALID_TEX = 0xFFFFFFFFu;
+static const uint INVALID_VIS           = 0xFFFFFFFFu;
+static const uint INVALID_TEX           = 0xFFFFFFFFu;
+static const uint MATERIAL_FLAG_TERRAIN = 0x4u; // bit 2 — must match Scene.h kFlagTerrain
 
 // --- Camera load (column-major GLM -> HLSL row-major) ---
 CameraData loadCamera(uint slot) {
@@ -77,18 +78,23 @@ struct GpuInstance {
     uint     meshlet_count;
     uint     material_index;
     uint     vertex_buffer_slot;
+    uint     vertex_base_offset;
+    uint     _pad;
 };
 
 GpuInstance loadInstance(uint idx) {
     StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.instanceBufferSlot)];
-    const uint base = idx * 5;
+    const uint base = idx * 6;
     GpuInstance inst;
     inst.transform = transpose(float4x4(buf[base + 0], buf[base + 1], buf[base + 2], buf[base + 3]));
-    uint4 packed   = asuint(buf[base + 4]);
-    inst.meshlet_offset    = packed.x;
-    inst.meshlet_count     = packed.y;
-    inst.material_index    = packed.z;
-    inst.vertex_buffer_slot = packed.w;
+    uint4 pack0    = asuint(buf[base + 4]);
+    inst.meshlet_offset     = pack0.x;
+    inst.meshlet_count      = pack0.y;
+    inst.material_index     = pack0.z;
+    inst.vertex_buffer_slot = pack0.w;
+    uint4 pack1             = asuint(buf[base + 5]);
+    inst.vertex_base_offset = pack1.x;
+    inst._pad               = pack1.y;
     return inst;
 }
 
@@ -357,52 +363,72 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
 
     // Load material and evaluate PBR.
     GpuMaterial mat  = loadMaterial(pc.materialBufferSlot, inst.material_index);
-    SamplerState samp = g_samplers[NonUniformResourceIndex(mat.samplerSlot)];
 
-    // Base color.
-    float4 baseColor = mat.baseColorFactor;
-    if (mat.baseColorTexIdx != INVALID_TEX) {
-        baseColor *= g_textures[NonUniformResourceIndex(mat.baseColorTexIdx)].SampleLevel(samp, uv, 0);
+    // Declare G-buffer output variables.
+    float4 albedo;
+    float3 normal;
+    float2 metalRough;
+    float2 motionVec;
+
+    if (mat.flags & MATERIAL_FLAG_TERRAIN) {
+        // TODO Phase 4 complete: reconstruct normal from heightmap gradient
+        // For now: flat grey albedo, up-normal, zero metalRough, zero motionVec
+        albedo     = float4(0.45, 0.45, 0.45, 1.0);
+        normal     = float3(0.0, 1.0, 0.0);
+        metalRough = float2(0.0, 0.9);
+        motionVec  = float2(0.0, 0.0);
+    } else {
+        SamplerState samp = g_samplers[NonUniformResourceIndex(mat.samplerSlot)];
+
+        // Base color.
+        float4 baseColor = mat.baseColorFactor;
+        if (mat.baseColorTexIdx != INVALID_TEX) {
+            baseColor *= g_textures[NonUniformResourceIndex(mat.baseColorTexIdx)].SampleLevel(samp, uv, 0);
+        }
+
+        // Metallic + roughness (glTF: G=roughness, B=metallic).
+        float metallic  = mat.metallicFactor;
+        float roughness = mat.roughnessFactor;
+        if (mat.metalRoughTexIdx != INVALID_TEX) {
+            float4 mr = g_textures[NonUniformResourceIndex(mat.metalRoughTexIdx)].SampleLevel(samp, uv, 0);
+            roughness *= mr.g;
+            metallic  *= mr.b;
+        }
+
+        // Normal mapping via TBN.
+        if (mat.normalTexIdx != INVALID_TEX) {
+            float3 B = normalize(cross(N, T) * bitSign);
+            float3x3 TBN = float3x3(T, B, N);
+
+            float4 normalSample = g_textures[NonUniformResourceIndex(mat.normalTexIdx)].SampleLevel(samp, uv, 0);
+            float3 tn = normalSample.xyz * 2.0 - 1.0;
+            tn.xy    *= mat.normalScale;
+            tn.y      = -tn.y; // glTF +Y flip for DX/Vulkan NDC
+            N = normalize(mul(tn, TBN));
+        }
+
+        // Ambient occlusion.
+        float occlusion = 1.0;
+        if (mat.occlusionTexIdx != INVALID_TEX) {
+            float4 occSample = g_textures[NonUniformResourceIndex(mat.occlusionTexIdx)].SampleLevel(samp, uv, 0);
+            occlusion = lerp(1.0, occSample.r, mat.occlusionStrength);
+        }
+
+        // Motion vectors: NDC-space velocity (current - previous).
+        float4 prevClipPos = mul(cam.prevViewProj, float4(worldPos, 1.0));
+        float4 currClipPos = mul(cam.viewProj,     float4(worldPos, 1.0));
+        float2 currentNDC  = currClipPos.xy / currClipPos.w;
+        float2 prevNDC     = prevClipPos.xy / prevClipPos.w;
+
+        albedo     = float4(baseColor.rgb, occlusion);
+        normal     = N;
+        metalRough = float2(metallic, roughness);
+        motionVec  = currentNDC - prevNDC;
     }
-
-    // Metallic + roughness (glTF: G=roughness, B=metallic).
-    float metallic  = mat.metallicFactor;
-    float roughness = mat.roughnessFactor;
-    if (mat.metalRoughTexIdx != INVALID_TEX) {
-        float4 mr = g_textures[NonUniformResourceIndex(mat.metalRoughTexIdx)].SampleLevel(samp, uv, 0);
-        roughness *= mr.g;
-        metallic  *= mr.b;
-    }
-
-    // Normal mapping via TBN.
-    if (mat.normalTexIdx != INVALID_TEX) {
-        float3 B = normalize(cross(N, T) * bitSign);
-        float3x3 TBN = float3x3(T, B, N);
-
-        float4 normalSample = g_textures[NonUniformResourceIndex(mat.normalTexIdx)].SampleLevel(samp, uv, 0);
-        float3 tn = normalSample.xyz * 2.0 - 1.0;
-        tn.xy    *= mat.normalScale;
-        tn.y      = -tn.y; // glTF +Y flip for DX/Vulkan NDC
-        N = normalize(mul(tn, TBN));
-    }
-
-    // Ambient occlusion.
-    float occlusion = 1.0;
-    if (mat.occlusionTexIdx != INVALID_TEX) {
-        float4 occSample = g_textures[NonUniformResourceIndex(mat.occlusionTexIdx)].SampleLevel(samp, uv, 0);
-        occlusion = lerp(1.0, occSample.r, mat.occlusionStrength);
-    }
-
-    // Motion vectors: NDC-space velocity (current - previous).
-    float4 prevClipPos = mul(cam.prevViewProj, float4(worldPos, 1.0));
-    float4 currClipPos = mul(cam.viewProj,     float4(worldPos, 1.0));
-    float2 currentNDC  = currClipPos.xy / currClipPos.w;
-    float2 prevNDC     = prevClipPos.xy / prevClipPos.w;
-    float2 motion      = currentNDC - prevNDC;
 
     // Write G-buffer storage images.
-    g_storageImages[NonUniformResourceIndex(pc.albedoStorageSlot)][pixelCoord]     = float4(baseColor.rgb, occlusion);
-    g_storageImages[NonUniformResourceIndex(pc.normalStorageSlot)][pixelCoord]     = float4(N * 0.5 + 0.5, 0.0);
-    g_storageImages[NonUniformResourceIndex(pc.metalRoughStorageSlot)][pixelCoord] = float4(metallic, roughness, 0, 0);
-    g_storageImages[NonUniformResourceIndex(pc.motionVecStorageSlot)][pixelCoord]  = float4(motion, 0, 0);
+    g_storageImages[NonUniformResourceIndex(pc.albedoStorageSlot)][pixelCoord]     = albedo;
+    g_storageImages[NonUniformResourceIndex(pc.normalStorageSlot)][pixelCoord]     = float4(normal * 0.5 + 0.5, 0.0);
+    g_storageImages[NonUniformResourceIndex(pc.metalRoughStorageSlot)][pixelCoord] = float4(metalRough, 0, 0);
+    g_storageImages[NonUniformResourceIndex(pc.motionVecStorageSlot)][pixelCoord]  = float4(motionVec, 0, 0);
 }

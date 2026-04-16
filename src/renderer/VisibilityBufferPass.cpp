@@ -42,6 +42,25 @@ struct VBPushBlock {
 
 static_assert(sizeof(VBPushBlock) == 32);
 
+// Terrain push block — extends VBPushBlock with the two per-LOD shared
+// topology SSBO slots the terrain mesh shader reads patch topology from.
+// Must match the PushBlock declaration in terrain_cdlod.task.hlsl and
+// terrain_cdlod.mesh.hlsl exactly (same first 8 fields, then 2 extra).
+struct VBTerrainPushBlock {
+    u32 instanceBufferSlot;
+    u32 meshletBufferSlot;
+    u32 survivingIdsSlot;
+    u32 meshletVerticesSlot;
+    u32 meshletTrianglesSlot;
+    u32 cameraSlot;
+    u32 countBufferSlot;
+    u32 instanceCount;
+    u32 topologyVerticesSlot;
+    u32 topologyTrianglesSlot;
+};
+
+static_assert(sizeof(VBTerrainPushBlock) == 40);
+
 VisibilityBufferPass::VisibilityBufferPass(gfx::Device& device,
                                            gfx::Allocator& allocator,
                                            gfx::DescriptorAllocator& descriptors)
@@ -54,6 +73,8 @@ VisibilityBufferPass::VisibilityBufferPass(gfx::Device& device,
 VisibilityBufferPass::~VisibilityBufferPass() {
     if (m_wireframePipeline       != VK_NULL_HANDLE) vkDestroyPipeline(m_device->logical(), m_wireframePipeline, nullptr);
     if (m_wireframePipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_device->logical(), m_wireframePipelineLayout, nullptr);
+    if (m_terrainPipeline       != VK_NULL_HANDLE) vkDestroyPipeline(m_device->logical(), m_terrainPipeline, nullptr);
+    if (m_terrainPipelineLayout != VK_NULL_HANDLE) vkDestroyPipelineLayout(m_device->logical(), m_terrainPipelineLayout, nullptr);
     if (m_vsFallbackPipeline != VK_NULL_HANDLE)
         vkDestroyPipeline(m_device->logical(), m_vsFallbackPipeline, nullptr);
     if (m_vsFallbackDrawBuffer != VK_NULL_HANDLE)
@@ -846,6 +867,244 @@ void VisibilityBufferPass::record(VkCommandBuffer           cmd,
         },
     };
 
+    VkDependencyInfo postDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+    postDep.imageMemoryBarrierCount = 2;
+    postDep.pImageMemoryBarriers    = postBarriers;
+    vkCmdPipelineBarrier2(cmd, &postDep);
+}
+
+// ---------------------------------------------------------------------------
+// CDLOD terrain pipeline — identical pipeline layout semantics to record()'s
+// scene pipeline but different shaders and a larger push-constant range.
+// ---------------------------------------------------------------------------
+
+void VisibilityBufferPass::buildTerrainPipeline(gfx::ShaderManager& shaderManager,
+                                                 VkDescriptorSetLayout globalSetLayout) {
+    ENIGMA_ASSERT(m_terrainPipeline == VK_NULL_HANDLE &&
+                  "VisibilityBufferPass::buildTerrainPipeline called twice");
+    if (!m_useMeshShaders) {
+        ENIGMA_LOG_WARN("[visibility_buffer] terrain pipeline skipped (no mesh shader support)");
+        return;
+    }
+
+    m_shaderManager         = &shaderManager;
+    m_globalSetLayout       = globalSetLayout;
+    m_terrainTaskShaderPath = Paths::shaderSourceDir() / "terrain_cdlod.task.hlsl";
+    m_terrainMeshShaderPath = Paths::shaderSourceDir() / "terrain_cdlod.mesh.hlsl";
+
+    VkShaderModule taskMod = shaderManager.compile(m_terrainTaskShaderPath, gfx::ShaderManager::Stage::Task, "ASMain");
+    VkShaderModule meshMod = shaderManager.compile(m_terrainMeshShaderPath, gfx::ShaderManager::Stage::Mesh, "MSMain");
+    VkShaderModule fragMod = shaderManager.compile(m_terrainMeshShaderPath, gfx::ShaderManager::Stage::Fragment, "PSMain");
+
+    VkPushConstantRange pushRange{};
+    pushRange.stageFlags = VK_SHADER_STAGE_TASK_BIT_EXT
+                         | VK_SHADER_STAGE_MESH_BIT_EXT
+                         | VK_SHADER_STAGE_FRAGMENT_BIT;
+    pushRange.offset     = 0;
+    pushRange.size       = sizeof(VBTerrainPushBlock);
+
+    VkPipelineLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    layoutInfo.setLayoutCount         = 1;
+    layoutInfo.pSetLayouts            = &globalSetLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges    = &pushRange;
+
+    ENIGMA_VK_CHECK(vkCreatePipelineLayout(m_device->logical(), &layoutInfo, nullptr,
+                                           &m_terrainPipelineLayout));
+
+    const std::array<VkPipelineShaderStageCreateInfo, 3> stages = {{
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+          VK_SHADER_STAGE_TASK_BIT_EXT, taskMod, "ASMain", nullptr },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+          VK_SHADER_STAGE_MESH_BIT_EXT, meshMod, "MSMain", nullptr },
+        { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0,
+          VK_SHADER_STAGE_FRAGMENT_BIT, fragMod, "PSMain", nullptr },
+    }};
+
+    const std::array<VkDynamicState, 2> dynamicStates = {{ VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR }};
+    VkPipelineDynamicStateCreateInfo dynamicState{ VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+    dynamicState.dynamicStateCount = 2; dynamicState.pDynamicStates = dynamicStates.data();
+
+    VkPipelineViewportStateCreateInfo viewportState{ VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+    viewportState.viewportCount = 1; viewportState.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo rasterizer{ VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+    rasterizer.polygonMode = VK_POLYGON_MODE_FILL; rasterizer.cullMode = VK_CULL_MODE_NONE;
+    rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE; rasterizer.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo multisample{ VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState blendAttachment{};
+    blendAttachment.blendEnable = VK_FALSE; blendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT;
+    VkPipelineColorBlendStateCreateInfo colorBlend{ VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+    colorBlend.attachmentCount = 1; colorBlend.pAttachments = &blendAttachment;
+
+    VkPipelineDepthStencilStateCreateInfo depthStencil{ VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+    depthStencil.depthTestEnable = VK_TRUE; depthStencil.depthWriteEnable = VK_TRUE;
+    depthStencil.depthCompareOp  = VK_COMPARE_OP_GREATER_OR_EQUAL; // reverse-Z, matches record() pipeline
+
+    const VkFormat visFormat = VK_FORMAT_R32_UINT;
+    VkPipelineRenderingCreateInfo renderingInfo{ VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+    renderingInfo.colorAttachmentCount = 1; renderingInfo.pColorAttachmentFormats = &visFormat;
+    renderingInfo.depthAttachmentFormat = m_depthFormat;
+
+    VkGraphicsPipelineCreateInfo pipelineInfo{ VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO };
+    pipelineInfo.pNext               = &renderingInfo;
+    pipelineInfo.stageCount          = static_cast<u32>(stages.size());
+    pipelineInfo.pStages             = stages.data();
+    pipelineInfo.pVertexInputState   = nullptr;
+    pipelineInfo.pInputAssemblyState = nullptr;
+    pipelineInfo.pViewportState      = &viewportState;
+    pipelineInfo.pRasterizationState = &rasterizer;
+    pipelineInfo.pMultisampleState   = &multisample;
+    pipelineInfo.pDepthStencilState  = &depthStencil;
+    pipelineInfo.pColorBlendState    = &colorBlend;
+    pipelineInfo.pDynamicState       = &dynamicState;
+    pipelineInfo.layout              = m_terrainPipelineLayout;
+
+    ENIGMA_VK_CHECK(vkCreateGraphicsPipelines(m_device->logical(), VK_NULL_HANDLE,
+                                              1, &pipelineInfo, nullptr, &m_terrainPipeline));
+
+    vkDestroyShaderModule(m_device->logical(), taskMod, nullptr);
+    vkDestroyShaderModule(m_device->logical(), meshMod, nullptr);
+    vkDestroyShaderModule(m_device->logical(), fragMod, nullptr);
+
+    ENIGMA_LOG_INFO("[visibility_buffer] terrain pipeline built");
+}
+
+void VisibilityBufferPass::recordTerrain(VkCommandBuffer           cmd,
+                                          VkDescriptorSet           globalSet,
+                                          VkExtent2D                extent,
+                                          VkImageView               depthView,
+                                          VkImage                   depthImage,
+                                          const GpuSceneBuffer&     scene,
+                                          const GpuMeshletBuffer&   meshlets,
+                                          const IndirectDrawBuffer& indirect,
+                                          u32                       cameraSlot,
+                                          u32                       topologyVerticesSlot,
+                                          u32                       topologyTrianglesSlot,
+                                          u32                       survivingMeshletCount) {
+    if (m_terrainPipeline == VK_NULL_HANDLE) return;
+    if (!m_useMeshShaders)                   return;
+    if (survivingMeshletCount == 0)          return;
+    ENIGMA_ASSERT(m_vis_image != VK_NULL_HANDLE && "recordTerrain before allocate");
+
+    // --------- Pre-pass: SHADER_READ → COLOR/DEPTH_ATTACHMENT_OPTIMAL ---------
+    // record() exits with both images in SHADER_READ_ONLY_OPTIMAL. Transition
+    // them back so we can append a LOAD_OP_LOAD draw that preserves the scene
+    // meshlet output and writes terrain on top.
+    const VkImageMemoryBarrier2 preBarriers[2] = {
+        {
+            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+            m_vis_image, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+        },
+        {
+            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+            VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT
+            | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+            depthImage, { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 }
+        },
+    };
+    VkDependencyInfo preDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+    preDep.imageMemoryBarrierCount = 2;
+    preDep.pImageMemoryBarriers    = preBarriers;
+    vkCmdPipelineBarrier2(cmd, &preDep);
+
+    // --------- Begin dynamic rendering — LOAD_OP_LOAD preserves scene draws ---
+    VkRenderingAttachmentInfo visAttachment{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    visAttachment.imageView   = m_vis_view;
+    visAttachment.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    visAttachment.loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD;
+    visAttachment.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingAttachmentInfo depthAttachment{ VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+    depthAttachment.imageView   = depthView;
+    depthAttachment.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+    depthAttachment.loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD;
+    depthAttachment.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingInfo renderingInfo{ VK_STRUCTURE_TYPE_RENDERING_INFO };
+    renderingInfo.renderArea           = { {0, 0}, extent };
+    renderingInfo.layerCount           = 1;
+    renderingInfo.colorAttachmentCount = 1;
+    renderingInfo.pColorAttachments    = &visAttachment;
+    renderingInfo.pDepthAttachment     = &depthAttachment;
+
+    vkCmdBeginRendering(cmd, &renderingInfo);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_terrainPipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            m_terrainPipelineLayout, 0, 1, &globalSet, 0, nullptr);
+
+    VkViewport viewport{};
+    viewport.width    = static_cast<float>(extent.width);
+    viewport.height   = static_cast<float>(extent.height);
+    viewport.minDepth = 0.0f;
+    viewport.maxDepth = 1.0f;
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+
+    VkRect2D scissor{ {0, 0}, extent };
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+    VBTerrainPushBlock pc{};
+    pc.instanceBufferSlot    = scene.slot();
+    pc.meshletBufferSlot     = meshlets.meshlets_slot();
+    pc.survivingIdsSlot      = indirect.surviving_slot();
+    pc.meshletVerticesSlot   = meshlets.vertices_slot();
+    pc.meshletTrianglesSlot  = meshlets.triangles_slot();
+    pc.cameraSlot            = cameraSlot;
+    pc.countBufferSlot       = indirect.count_slot();
+    pc.instanceCount         = static_cast<u32>(scene.instance_count());
+    pc.topologyVerticesSlot  = topologyVerticesSlot;
+    pc.topologyTrianglesSlot = topologyTrianglesSlot;
+
+    vkCmdPushConstants(cmd, m_terrainPipelineLayout,
+                       VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT
+                       | VK_SHADER_STAGE_FRAGMENT_BIT,
+                       0, sizeof(pc), &pc);
+
+    // Dispatch ceil(survivingMeshletCount / TASK_GROUP_SIZE) task groups.
+    // The task shader also reads the actual surviving count from the count
+    // buffer — the CPU-side argument here is only the dispatch size.
+    const u32 taskGroups = (survivingMeshletCount + TASK_GROUP_SIZE - 1) / TASK_GROUP_SIZE;
+    vkCmdDrawMeshTasksEXT(cmd, taskGroups, 1, 1);
+
+    vkCmdEndRendering(cmd);
+
+    // --------- Post-pass: COLOR/DEPTH_ATTACHMENT → SHADER_READ_ONLY ---------
+    // Matches the post state left by record() so MaterialEvalPass (the reader
+    // after this function) can sample both vis and depth as textures.
+    const VkImageMemoryBarrier2 postBarriers[2] = {
+        {
+            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
+            VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+            m_vis_image, { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 }
+        },
+        {
+            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2, nullptr,
+            VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT, VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+            VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+            VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED,
+            depthImage, { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1 }
+        },
+    };
     VkDependencyInfo postDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
     postDep.imageMemoryBarrierCount = 2;
     postDep.pImageMemoryBarriers    = postBarriers;

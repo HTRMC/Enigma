@@ -7,7 +7,6 @@
 #include "ecs/systems/CameraSystem.h"
 #include "ecs/systems/InputSystem.h"
 #include "ecs/systems/PhysicsSystem.h"
-#include "ecs/systems/TerrainSystem.h"
 #include "ecs/systems/TransformSystem.h"
 #include "ecs/systems/VehicleSystem.h"
 #include "engine/Engine.h"
@@ -15,18 +14,17 @@
 #include "physics/PhysicsWorld.h"
 #include "physics/VehicleController.h"
 #include "platform/Window.h"
-#include "renderer/GBufferFormats.h"
 #include "renderer/Renderer.h"
 #include "scene/Camera.h"
 #include "scene/FollowCamera.h"
 #include "scene/Scene.h"
-#include "world/Terrain.h"
+#include "world/CdlodTerrain.h"
+#include "world/HeightmapLoader.h"
 
 #include <volk.h>
 
 #include <GLFW/glfw3.h>
 
-#include <cmath>
 #include <filesystem>
 #include <optional>
 #include <vector>
@@ -89,46 +87,29 @@ int Application::run(int argc, char** argv) {
                         modelPath.string());
     }
 
-    // GPU-driven clipmap terrain.
-    Terrain terrain(renderer.device(),
-                    renderer.allocator(),
-                    renderer.descriptorAllocator());
-    terrain.buildPipeline(renderer.shaderManager(),
-                          renderer.descriptorAllocator().layout(),
-                          gbuf::kAlbedoFormat,
-                          gbuf::kDepthFormat,
-                          gbuf::kNormalFormat,
-                          gbuf::kMetalRoughFormat,
-                          gbuf::kMotionVecFormat);
-    terrain.registerHotReload(renderer.shaderHotReload());
-    renderer.setTerrain(&terrain);
+    // CDLOD terrain — Renderer::setScene() has already loaded the heightmap
+    // and initialized CdlodTerrain; we just fetch the HeightmapLoader pointer
+    // here for physics heightfield construction.
+    const HeightmapLoader* hfHeightmap =
+        renderer.cdlodTerrain() ? renderer.cdlodTerrain()->heightmap() : nullptr;
 
-    // Heightfield streaming parameters and mutable state.
-    // terrainHeight() must match terrain_clipmap.hlsl terrainHeight() exactly.
-    auto terrainHeight = [](float wx, float wz) -> float {
-        return std::sin(wx * 0.05f) * std::cos(wz * 0.05f) * 2.0f
-             + std::sin(wx * 0.13f + 1.1f) * std::sin(wz * 0.09f) * 0.8f;
-    };
-    constexpr u32 kHFN       = 512;
-    constexpr f32 kHFSize    = 512.0f;
-    constexpr f32 kHFRebuild = 150.0f;
-    constexpr f32 kHFSnap    = 64.0f;
-    u32  hfBodyId = ~0u;
-    vec2 hfCenter = {0.0f, 0.0f};
-
-    // Build the initial heightfield centred at the origin.
-    {
-        const f32 spacing = kHFSize / static_cast<f32>(kHFN - 1);
-        const f32 oriX    = -kHFSize * 0.5f;
-        const f32 oriZ    = -kHFSize * 0.5f;
-        std::vector<f32> heights(static_cast<size_t>(kHFN) * kHFN);
-        for (u32 row = 0; row < kHFN; ++row)
-            for (u32 col = 0; col < kHFN; ++col)
-                heights[row * kHFN + col] =
-                    terrainHeight(oriX + col * spacing, oriZ + row * spacing);
-        hfBodyId = engine.physics().addHeightField(
-            vec3(oriX, 0.0f, oriZ), kHFSize, kHFN, heights);
-        ENIGMA_LOG_INFO("[app] initial heightfield built at origin");
+    // Build the physics heightfield directly from the loaded heightmap — the
+    // same byte-for-byte samples that the mesh shader bakes into patch vertex
+    // Y, so physics and visuals can never drift.
+    u32 hfBodyId = ~0u;
+    if (hfHeightmap != nullptr) {
+        const u32  hfN      = hfHeightmap->sampleCount();
+        const f32  hfWorld  = hfHeightmap->worldSize();
+        const vec3 hfOrigin = hfHeightmap->origin();
+        const auto& srcH    = hfHeightmap->heights(); // hfN*hfN floats
+        std::vector<f32> heights(srcH.begin(), srcH.end());
+        hfBodyId = engine.physics().addHeightField(hfOrigin, hfWorld, hfN, heights);
+        ENIGMA_LOG_INFO(
+            "[app] physics heightfield built from HeightmapLoader "
+            "(origin=({:.1f},{:.1f},{:.1f}), size={:.1f}, samples={})",
+            hfOrigin.x, hfOrigin.y, hfOrigin.z, hfWorld, hfN);
+    } else {
+        ENIGMA_LOG_WARN("[app] no heightmap available — physics heightfield skipped");
     }
 
     // ECS entity: the player vehicle.
@@ -157,13 +138,10 @@ int Application::run(int argc, char** argv) {
                                           *engine.vehicle(),
                                           scene.has_value() ? &scene.value() : nullptr,
                                           nodeRestTransforms));
-    world.add_system(ecs::SystemSchedule::PostPhysics,
-        ecs::systems::makeTerrainSystem(terrain, camera,
-                                         engine.physics(), engine.interpolation(),
-                                         *engine.vehicle(),
-                                         terrainHeight,
-                                         hfBodyId, hfCenter,
-                                         kHFSize, kHFN, kHFRebuild, kHFSnap));
+    // CDLOD terrain traversal is driven by Renderer::drawFrame() per frame —
+    // no ECS system is required. Physics heightfield streaming is similarly
+    // unnecessary with a single 4 km tile covering the playable area.
+    (void)hfBodyId;
 
     // PreRender: update follow camera + physics debug overlay toggle.
     world.add_system(ecs::SystemSchedule::PreRender,
@@ -194,8 +172,8 @@ int Application::run(int argc, char** argv) {
         renderer.drawFrame();
     }
 
-    // Clean up scene and terrain before renderer teardown.
-    renderer.setTerrain(nullptr);
+    // Clean up scene before renderer teardown. CDLOD terrain is owned by the
+    // renderer and released inside its destructor.
     if (scene.has_value()) {
         renderer.setScene(nullptr);
         vkDeviceWaitIdle(renderer.device().logical());

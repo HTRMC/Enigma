@@ -38,9 +38,10 @@ struct PushBlock {
 [[vk::push_constant]] PushBlock pc;
 
 // --- Constants ---
-static const uint INVALID_TEX = 0xFFFFFFFFu;
-static const uint FLAG_BLEND  = 1u;
-static const float PI         = 3.14159265358979323846f;
+static const uint INVALID_TEX           = 0xFFFFFFFFu;
+static const uint FLAG_BLEND            = 0x1u; // bit 0 — matches Scene.h kFlagBlend
+static const uint MATERIAL_FLAG_TERRAIN = 0x4u; // bit 2 — matches Scene.h kFlagTerrain
+static const float PI                   = 3.14159265358979323846f;
 
 // --- Material struct (std430, mirrors Scene.h Material) ---
 struct GpuMaterial {

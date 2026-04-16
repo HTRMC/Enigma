@@ -41,7 +41,8 @@
 #include "renderer/UpscalerSettings.h"
 #include "physics/DeformationSystem.h"
 #include "physics/PhysicsDebugRenderer.h"
-#include "world/Terrain.h"
+#include "world/CdlodTerrain.h"
+#include "world/HeightmapLoader.h"
 
 #include <volk.h>
 
@@ -96,12 +97,11 @@ public:
     // On RT hardware, builds acceleration structures for the scene.
     void setScene(Scene* scene);
 
-    // Attach a GPU-driven clipmap terrain. The terrain is drawn inside
-    // the G-buffer render pass so it writes straight into the deferred
-    // G-buffer targets and participates in lighting / RT effects.
-    // Pass nullptr to detach.
-    void setTerrain(Terrain* terrain);
-
+    // Access the CDLOD terrain owned by the renderer. Null until setScene()
+    // has been invoked (which triggers heightmap load + terrain initialize).
+    // Exposed so Application can query the heightmap for physics heightfield
+    // construction.
+    CdlodTerrain* cdlodTerrain() { return m_terrain.get(); }
 
     // Set the directional sun light. Takes effect on the next drawFrame().
     void setLight(const SunLight& light) { m_light = light; }
@@ -227,7 +227,13 @@ private:
     // Camera state.
     Camera*  m_camera  = nullptr;
     Scene*   m_scene   = nullptr;
-    Terrain* m_terrain = nullptr;
+
+    // CDLOD terrain — owned by the renderer. Created in setScene() after the
+    // scene's meshlets have been appended but before they are uploaded, so
+    // GpuMeshletBuffer::reserveCapacity() can size the device buffer to cover
+    // both scene meshlets and the terrain's per-patch activation ceiling.
+    std::unique_ptr<HeightmapLoader> m_heightmapLoader;
+    std::unique_ptr<CdlodTerrain>    m_terrain;
 
     SunLight m_light{};
 

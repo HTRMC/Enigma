@@ -285,6 +285,7 @@ Renderer::Renderer(Window& window)
     m_visibilityPass = std::make_unique<VisibilityBufferPass>(*m_device, *m_allocator, *m_descriptorAllocator);
     m_visibilityPass->allocate(m_swapchain->extent(), gbuf::kDepthFormat);
     m_visibilityPass->buildPipeline(*m_shaderManager, m_descriptorAllocator->layout());
+    m_visibilityPass->buildTerrainPipeline(*m_shaderManager, m_descriptorAllocator->layout());
     m_visibilityPass->registerHotReload(*m_shaderHotReload);
 
     // Wireframe pipeline (conditional on fillModeNonSolid support).
@@ -434,6 +435,11 @@ Renderer::~Renderer() {
     if (m_device) {
         vkDeviceWaitIdle(m_device->logical());
     }
+
+    // CDLOD terrain + heightmap own VMA buffers/images and bindless slots —
+    // destroy before VMA / DescriptorAllocator teardown.
+    m_terrain.reset();
+    m_heightmapLoader.reset();
 
     // Shut down ImGui before destroying Vulkan resources.
     m_imguiLayer.reset();
@@ -857,9 +863,31 @@ void Renderer::drawFrame() {
                 inst.meshlet_count      = static_cast<u32>(prim.meshlets.meshlets.size());
                 inst.material_index     = prim.materialIndex < 0 ? 0u : static_cast<u32>(prim.materialIndex);
                 inst.vertex_buffer_slot = prim.vertexBufferSlot;
+                inst.vertex_base_offset = 0; // Non-terrain meshes index from vertex 0; CDLOD terrain overrides.
+                // inst._pad is zero-initialized by GpuInstance inst{}.
                 m_gpuScene->add_instance(inst);
             }
         }
+        // Remember the split point: scene instances are [0, sceneInstanceCount),
+        // terrain instances (appended below) live at [sceneInstanceCount, total).
+        // Used by the two-pass cull + VB draw sequence further down so scene
+        // meshlets go through visibility_buffer.mesh.hlsl and terrain meshlets
+        // go through terrain_cdlod.mesh.hlsl.
+        const u32 sceneInstanceCount  = static_cast<u32>(m_gpuScene->instance_count());
+        const u32 sceneMeshletCount   = m_gpuMeshlets->total_meshlet_count();
+
+        // Per-frame CDLOD terrain traversal — activates/deactivates patches,
+        // emits a GpuInstance per active patch into the scene buffer, and
+        // records incremental vertex + meshlet uploads on this frame's cmd.
+        if (m_terrain != nullptr && m_terrain->isEnabled()) {
+            m_terrain->update(m_cameraWorldPos, frame.commandBuffer,
+                              m_frameIndex, *m_gpuScene);
+        }
+        const u32 totalInstanceCount  = static_cast<u32>(m_gpuScene->instance_count());
+        const u32 totalMeshletCount   = m_gpuMeshlets->total_meshlet_count();
+        const u32 terrainInstanceCount = totalInstanceCount - sceneInstanceCount;
+        const u32 terrainMeshletCount  = totalMeshletCount - sceneMeshletCount;
+
         m_gpuScene->upload(frame.commandBuffer, m_frameIndex);
 
         m_indirectBuffer->reset_count(frame.commandBuffer);
@@ -890,32 +918,103 @@ void Renderer::drawFrame() {
             vkCmdPipelineBarrier2(frame.commandBuffer, &transferDep);
         }
 
-        if (m_gpuMeshlets->total_meshlet_count() > 0) {
-            m_gpuCullPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
-                                   *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot);
+        if (totalMeshletCount > 0) {
+            // Helper: compute→task/mesh barrier on the surviving-IDs +
+            // count buffer so the task shader sees the cull output.
+            auto emitCullToTaskBarrier = [&]() {
+                VkMemoryBarrier2 cullBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                cullBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
+                cullBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                cullBarrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
+                cullBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT;
+                cullBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+                VkDependencyInfo cullDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                cullDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+                cullDep.memoryBarrierCount = 1;
+                cullDep.pMemoryBarriers    = &cullBarrier;
+                vkCmdPipelineBarrier2(frame.commandBuffer, &cullDep);
+            };
 
-            m_indirectBuffer->record_count_readback(frame.commandBuffer);
+            // ---------- Pass A: Scene meshlets ----------
+            // Cull scene instances/meshlets and draw via the scene VB pipeline.
+            // When there are zero scene meshlets (pure-terrain scene), skip
+            // entirely so the VB record() doesn't clear with no content.
+            if (sceneMeshletCount > 0 && sceneInstanceCount > 0) {
+                m_gpuCullPass->record(frame.commandBuffer,
+                                       m_descriptorAllocator->globalSet(),
+                                       *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
+                                       cameraSlot,
+                                       /*instanceOffset*/ 0, sceneInstanceCount,
+                                       /*meshletOffset*/  0, sceneMeshletCount);
 
-            // Compute (cull) → task shader barrier.
-            // The task shader reads the count buffer and surviving IDs buffer
-            // written by the cull compute pass. No indirect buffer is used since
-            // the dispatch is vkCmdDrawMeshTasksEXT (direct, not indirect).
-            VkMemoryBarrier2 cullBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
-            cullBarrier.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2;
-            cullBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
-            cullBarrier.srcAccessMask = VK_ACCESS_2_SHADER_WRITE_BIT;
-            cullBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT;
-            cullBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
-            VkDependencyInfo cullDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
-            cullDep.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
-            cullDep.memoryBarrierCount = 1;
-            cullDep.pMemoryBarriers    = &cullBarrier;
-            vkCmdPipelineBarrier2(frame.commandBuffer, &cullDep);
+                m_indirectBuffer->record_count_readback(frame.commandBuffer);
 
-            m_visibilityPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
-                                      extent,
-                                      m_gbufDepth.view, m_gbufDepth.image,
-                                      *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot);
+                emitCullToTaskBarrier();
+
+                m_visibilityPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
+                                          extent,
+                                          m_gbufDepth.view, m_gbufDepth.image,
+                                          *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot);
+            }
+
+            // ---------- Pass B: Terrain meshlets ----------
+            // Route terrain through terrain_cdlod.mesh.hlsl. Requires a
+            // separate cull pass (different instance + meshlet ranges) with a
+            // fresh surviving-IDs buffer — reset_count() wipes the counter
+            // and, transitively, the surviving slot [0..N) overwrite.
+            if (m_terrain != nullptr && m_terrain->isEnabled()
+                && terrainMeshletCount > 0 && terrainInstanceCount > 0
+                && m_visibilityPass->hasTerrainPipeline())
+            {
+                // Barrier: previous task-shader reads on count/surviving →
+                // compute writes for this pass. Skip if scene pass didn't run.
+                if (sceneMeshletCount > 0) {
+                    VkMemoryBarrier2 readToWrite{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                    readToWrite.srcStageMask  = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT
+                                              | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT;
+                    readToWrite.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+                    readToWrite.dstStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT
+                                              | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                    readToWrite.dstAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT
+                                              | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+                    VkDependencyInfo dep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                    dep.memoryBarrierCount = 1;
+                    dep.pMemoryBarriers    = &readToWrite;
+                    vkCmdPipelineBarrier2(frame.commandBuffer, &dep);
+                }
+
+                m_indirectBuffer->reset_count(frame.commandBuffer);
+
+                // Transfer → compute barrier for the reset.
+                VkMemoryBarrier2 resetBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                resetBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+                resetBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+                resetBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                resetBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+                                           | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+                VkDependencyInfo resetDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                resetDep.memoryBarrierCount = 1;
+                resetDep.pMemoryBarriers    = &resetBarrier;
+                vkCmdPipelineBarrier2(frame.commandBuffer, &resetDep);
+
+                m_gpuCullPass->record(frame.commandBuffer,
+                                       m_descriptorAllocator->globalSet(),
+                                       *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer,
+                                       cameraSlot,
+                                       sceneInstanceCount, terrainInstanceCount,
+                                       sceneMeshletCount,  terrainMeshletCount);
+
+                emitCullToTaskBarrier();
+
+                const auto terrainTopo = m_terrain->sharedTopologyHandle();
+                m_visibilityPass->recordTerrain(
+                    frame.commandBuffer, m_descriptorAllocator->globalSet(), extent,
+                    m_gbufDepth.view, m_gbufDepth.image,
+                    *m_gpuScene, *m_gpuMeshlets, *m_indirectBuffer, cameraSlot,
+                    terrainTopo.topologyVerticesSlot,
+                    terrainTopo.topologyTrianglesSlot,
+                    terrainMeshletCount);
+            }
 
             // MaterialEvalPass reads vis buffer + depth, writes G-buffer to SHADER_READ_ONLY_OPTIMAL.
             m_materialEvalPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
@@ -953,23 +1052,9 @@ void Renderer::drawFrame() {
             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_UNDEFINED,
             VK_IMAGE_ASPECT_DEPTH_BIT);
 
-        // Terrain is always drawn as a separate raster pass (meshlet-incompatible).
-        // LOAD ops preserve the VB G-buffer output; depth test/write works correctly
-        // against the reverse-Z depth filled by VisibilityBufferPass.
-        if (m_terrain != nullptr) {
-            gfx::RenderGraph::RasterPassDesc terrainPassDesc{};
-            terrainPassDesc.name         = "TerrainPass";
-            terrainPassDesc.colorTargets = {gbufAlbedo, gbufNormal, gbufMetalRough, gbufMotionVec};
-            terrainPassDesc.depthTarget  = gbufDepth;
-            terrainPassDesc.colorLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
-            terrainPassDesc.depthLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
-            terrainPassDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
-                m_gpuProfiler->beginZone(cmd, "TerrainPass");
-                m_terrain->record(cmd, ext, m_descriptorAllocator->globalSet(), cameraSlot);
-                m_gpuProfiler->endZone(cmd);
-            };
-            m_renderGraph->addRasterPass(std::move(terrainPassDesc));
-        }
+        // CDLOD terrain is drawn through the visibility-buffer pipeline —
+        // per-patch GpuInstances emitted in update() are culled and rasterised
+        // alongside scene meshes. No dedicated raster pass is required here.
 
         // ---- Mode-dependent render graph passes ----
         if (m_debugMode == DebugMode::Lit) {
@@ -1319,22 +1404,6 @@ void Renderer::drawFrame() {
             };
             m_renderGraph->addRasterPass(std::move(wireDesc));
 
-            // Terrain wireframe overlay — LOAD preserves the mesh wireframe output.
-            if (m_terrain != nullptr && m_terrain->hasWireframePipeline()) {
-                gfx::RenderGraph::RasterPassDesc terrWireDesc{};
-                terrWireDesc.name        = "TerrainWireframePass";
-                terrWireDesc.colorTargets = {colorHandle};
-                terrWireDesc.colorLoadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
-                terrWireDesc.execute     = [&](VkCommandBuffer cmd, VkExtent2D ext) {
-                    m_gpuProfiler->beginZone(cmd, "TerrainWireframePass");
-                    m_terrain->recordWireframe(cmd, ext,
-                                               m_descriptorAllocator->globalSet(),
-                                               cameraSlot, m_wireframeColor);
-                    m_gpuProfiler->endZone(cmd);
-                };
-                m_renderGraph->addRasterPass(std::move(terrWireDesc));
-            }
-
         } else if (m_debugMode == DebugMode::LitWireframe) {
             // === LIT WIREFRAME — lit scene (no post-proc) + wireframe overlay ===
             // Phase 1: lighting -> hdrColorHandle
@@ -1382,22 +1451,6 @@ void Renderer::drawFrame() {
                 m_gpuProfiler->endZone(cmd);
             };
             m_renderGraph->addRasterPass(std::move(wireOverlayDesc));
-
-            // Terrain wireframe overlay on lit wireframe.
-            if (m_terrain != nullptr && m_terrain->hasWireframePipeline()) {
-                gfx::RenderGraph::RasterPassDesc terrWireDesc{};
-                terrWireDesc.name         = "TerrainWireframePass";
-                terrWireDesc.colorTargets = {colorHandle};
-                terrWireDesc.colorLoadOp  = VK_ATTACHMENT_LOAD_OP_LOAD;
-                terrWireDesc.execute      = [&](VkCommandBuffer cmd, VkExtent2D ext) {
-                    m_gpuProfiler->beginZone(cmd, "TerrainWireframePass");
-                    m_terrain->recordWireframe(cmd, ext,
-                                               m_descriptorAllocator->globalSet(),
-                                               cameraSlot, m_wireframeColor);
-                    m_gpuProfiler->endZone(cmd);
-                };
-                m_renderGraph->addRasterPass(std::move(terrWireDesc));
-            }
 
         } else if (m_debugMode == DebugMode::DetailLighting) {
             // === DETAIL LIGHTING — Cook-Torrance on white material ===
@@ -1564,16 +1617,6 @@ void Renderer::setScene(Scene* scene) {
     }
 }
 
-void Renderer::setTerrain(Terrain* terrain) {
-    m_terrain = terrain;
-    // Build terrain wireframe pipeline if fillModeNonSolid is available.
-    if (m_terrain && m_device->fillModeNonSolidSupported()) {
-        m_terrain->buildWireframePipeline(*m_shaderManager,
-                                          m_descriptorAllocator->layout(),
-                                          m_swapchain->format());
-    }
-}
-
 void Renderer::buildAccelerationStructures() {
     ENIGMA_ASSERT(m_scene != nullptr);
 
@@ -1666,6 +1709,10 @@ void Renderer::uploadMeshlets() {
     ENIGMA_ASSERT(m_scene != nullptr);
     ENIGMA_ASSERT(m_gpuMeshlets != nullptr);
 
+    // Append scene meshlets into the CPU-side accumulation. These must be
+    // committed BEFORE reserveCapacity() is called so the reserved GPU buffer
+    // is sized large enough to cover scene meshlets + terrain activation
+    // ceiling (see GpuMeshletBuffer::reserveCapacity contract).
     bool anyMeshlets = false;
     for (auto& prim : m_scene->primitives) {
         if (prim.meshlets.meshlets.empty()) continue;
@@ -1673,8 +1720,8 @@ void Renderer::uploadMeshlets() {
         anyMeshlets = true;
     }
 
-    if (!anyMeshlets) return;
-
+    // Even with no mesh primitives we still need the one-shot command buffer
+    // for heightmap upload + CDLOD initialize.
     VkCommandPoolCreateInfo poolCI{};
     poolCI.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     poolCI.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
@@ -1697,7 +1744,28 @@ void Renderer::uploadMeshlets() {
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     ENIGMA_VK_CHECK(vkBeginCommandBuffer(cmd, &beginInfo));
 
-    m_gpuMeshlets->upload(cmd);
+    // Load heightmap (record staging->image copy + layout transitions).
+    m_heightmapLoader = std::make_unique<HeightmapLoader>(
+        *m_device, *m_allocator, *m_descriptorAllocator);
+    HeightmapDesc hDesc{};
+    hDesc.path        = "assets/terrain/height_4k.r32f";
+    hDesc.sampleCount = 4097;
+    hDesc.worldSize   = 4096.0f;
+    hDesc.minHeight   = 0.0f;
+    hDesc.maxHeight   = 512.0f;
+    (void)m_heightmapLoader->load(hDesc, cmd); // tolerate missing file — zeros
+
+    // Initialize CDLOD terrain. initialize() internally calls
+    // GpuMeshletBuffer::reserveCapacity() which uploads the current
+    // CPU-side meshlet array to the device-local buffer and pre-reserves
+    // room for per-patch incremental appends. This replaces the old
+    // m_gpuMeshlets->upload() call on the meshlet-only path.
+    m_terrain = std::make_unique<CdlodTerrain>(
+        *m_device, *m_allocator, *m_descriptorAllocator);
+    CdlodConfig terrainConfig{};
+    m_terrain->initialize(terrainConfig, *m_heightmapLoader,
+                          *m_gpuMeshlets, *m_indirectBuffer, *m_scene,
+                          cmd);
 
     ENIGMA_VK_CHECK(vkEndCommandBuffer(cmd));
 
@@ -1708,10 +1776,87 @@ void Renderer::uploadMeshlets() {
     ENIGMA_VK_CHECK(vkQueueSubmit(m_device->graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
     ENIGMA_VK_CHECK(vkQueueWaitIdle(m_device->graphicsQueue()));
 
+    // Release heightmap staging + meshlet staging now that the GPU has
+    // finished consuming them.
+    m_heightmapLoader->releaseStaging();
     m_gpuMeshlets->flush_staging();
+
     vkDestroyCommandPool(m_device->logical(), cmdPool, nullptr);
 
-    ENIGMA_LOG_INFO("[renderer] meshlets uploaded ({} total)", m_gpuMeshlets->total_meshlet_count());
+    // Rebuild material SSBO to include the terrain material appended by
+    // CdlodTerrain::initialize() — the buffer built by loadGltf was sized
+    // before terrain init, so the terrain slot was absent.
+    if (m_terrain && m_terrain->isEnabled() && m_scene->materialBufferSlot != 0xFFFFFFFFu) {
+        const VkDeviceSize matBufSize = m_scene->materials.size() * sizeof(Material);
+
+        VkBufferCreateInfo bufCI{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bufCI.size        = matBufSize;
+        bufCI.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bufCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VmaAllocationCreateInfo devAllocCI{};
+        devAllocCI.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        VkBuffer      newBuf   = VK_NULL_HANDLE;
+        VmaAllocation newAlloc = nullptr;
+        ENIGMA_VK_CHECK(vmaCreateBuffer(m_allocator->handle(), &bufCI, &devAllocCI,
+                                        &newBuf, &newAlloc, nullptr));
+
+        VkBufferCreateInfo stagCI{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        stagCI.size        = matBufSize;
+        stagCI.usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        stagCI.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VmaAllocationCreateInfo stagAllocCI{};
+        stagAllocCI.usage  = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+        stagAllocCI.flags  = VMA_ALLOCATION_CREATE_MAPPED_BIT |
+                             VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT;
+        VkBuffer          stagBuf   = VK_NULL_HANDLE;
+        VmaAllocation     stagAlloc = nullptr;
+        VmaAllocationInfo stagInfo{};
+        ENIGMA_VK_CHECK(vmaCreateBuffer(m_allocator->handle(), &stagCI, &stagAllocCI,
+                                        &stagBuf, &stagAlloc, &stagInfo));
+        std::memcpy(stagInfo.pMappedData, m_scene->materials.data(), matBufSize);
+        vmaFlushAllocation(m_allocator->handle(), stagAlloc, 0, VK_WHOLE_SIZE);
+
+        VkCommandPoolCreateInfo pool2CI{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+        pool2CI.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        pool2CI.queueFamilyIndex = m_device->graphicsQueueFamily();
+        VkCommandPool pool2 = VK_NULL_HANDLE;
+        ENIGMA_VK_CHECK(vkCreateCommandPool(m_device->logical(), &pool2CI, nullptr, &pool2));
+        VkCommandBufferAllocateInfo cb2AI{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        cb2AI.commandPool        = pool2;
+        cb2AI.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cb2AI.commandBufferCount = 1;
+        VkCommandBuffer cmd2 = VK_NULL_HANDLE;
+        ENIGMA_VK_CHECK(vkAllocateCommandBuffers(m_device->logical(), &cb2AI, &cmd2));
+        VkCommandBufferBeginInfo cb2BI{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        cb2BI.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd2, &cb2BI);
+        VkBufferCopy region{0, 0, matBufSize};
+        vkCmdCopyBuffer(cmd2, stagBuf, newBuf, 1, &region);
+        vkEndCommandBuffer(cmd2);
+        VkSubmitInfo sub2{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        sub2.commandBufferCount = 1;
+        sub2.pCommandBuffers    = &cmd2;
+        ENIGMA_VK_CHECK(vkQueueSubmit(m_device->graphicsQueue(), 1, &sub2, VK_NULL_HANDLE));
+        ENIGMA_VK_CHECK(vkQueueWaitIdle(m_device->graphicsQueue()));
+        vkDestroyCommandPool(m_device->logical(), pool2, nullptr);
+        vmaDestroyBuffer(m_allocator->handle(), stagBuf, stagAlloc);
+
+        vmaDestroyBuffer(m_allocator->handle(),
+                         m_scene->materialBuffer.buffer,
+                         m_scene->materialBuffer.allocation);
+        m_scene->materialBuffer.buffer     = newBuf;
+        m_scene->materialBuffer.allocation = newAlloc;
+        m_scene->materialBufferSlot = m_descriptorAllocator->registerStorageBuffer(
+            newBuf, matBufSize);
+        ENIGMA_LOG_INFO("[renderer] material SSBO rebuilt with {} materials ({} B)",
+                        m_scene->materials.size(), matBufSize);
+    }
+
+    ENIGMA_LOG_INFO("[renderer] meshlets reserved ({} scene meshlets), "
+                    "cdlod terrain {} (anyMeshlets={})",
+                    m_gpuMeshlets->total_meshlet_count(),
+                    m_terrain->isEnabled() ? "enabled" : "disabled",
+                    anyMeshlets);
 }
 
 void Renderer::applyImpact(const ImpactEvent& event) {

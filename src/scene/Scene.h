@@ -41,9 +41,13 @@ struct Material {
     u32  normalTexIdx       = 0xFFFFFFFFu;
     u32  emissiveTexIdx     = 0xFFFFFFFFu;
     u32  occlusionTexIdx    = 0xFFFFFFFFu;
-    u32  flags              = 0u;          // bit0=BLEND, bit1=MASK
+    u32  flags              = 0u;          // bit0=BLEND, bit1=MASK, bit2=TERRAIN
     u32  samplerSlot        = 0u;
     u32  _pad               = 0u;
+
+    static constexpr u32 kFlagBlend   = 0x1u; // bit 0 — alpha blending
+    static constexpr u32 kFlagMask    = 0x2u; // bit 1 — alpha masking
+    static constexpr u32 kFlagTerrain = 0x4u; // bit 2 — terrain material, normal from heightmap gradient
 };
 static_assert(sizeof(Material) == 80, "Material must be 80 bytes for std430 SSBO layout");
 

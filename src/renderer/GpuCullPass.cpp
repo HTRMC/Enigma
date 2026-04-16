@@ -21,11 +21,13 @@ struct GpuCullPushBlock {
     u32 countBufferSlot;     // RWByteAddressBuffer at binding 5 — atomic counter
     u32 survivingIdsSlot;    // RWByteAddressBuffer at binding 5 — surviving meshlet IDs
     u32 cameraSlot;          // CameraData at binding 2
-    u32 totalMeshlets;       // total meshlet count across all instances
-    u32 instanceCount;       // number of GpuInstance entries
+    u32 meshletCount;        // number of meshlets in THIS batch (dispatch range)
+    u32 instanceCount;       // number of GpuInstance entries in THIS batch
+    u32 instanceOffset;      // first GpuInstance index searched by findInstanceAndLocal
+    u32 meshletOffset;       // global meshlet index that threadID=0 maps to
 };
 
-static_assert(sizeof(GpuCullPushBlock) == 32);
+static_assert(sizeof(GpuCullPushBlock) == 40);
 
 GpuCullPass::GpuCullPass(gfx::Device& device)
     : m_device(&device) {}
@@ -88,11 +90,14 @@ void GpuCullPass::record(VkCommandBuffer           cmd,
                           const GpuSceneBuffer&     scene,
                           const GpuMeshletBuffer&   meshlets,
                           const IndirectDrawBuffer& indirect,
-                          u32                       cameraSlot) {
+                          u32                       cameraSlot,
+                          u32                       instanceOffset,
+                          u32                       instanceCount,
+                          u32                       meshletOffset,
+                          u32                       meshletCount) {
     ENIGMA_ASSERT(m_pipeline != nullptr && "GpuCullPass::record before buildPipeline");
 
-    const u32 totalMeshlets = meshlets.total_meshlet_count();
-    if (totalMeshlets == 0) return;
+    if (meshletCount == 0 || instanceCount == 0) return;
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_pipeline->handle());
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -105,14 +110,16 @@ void GpuCullPass::record(VkCommandBuffer           cmd,
     pc.countBufferSlot    = indirect.count_slot();
     pc.survivingIdsSlot   = indirect.surviving_slot();
     pc.cameraSlot         = cameraSlot;
-    pc.totalMeshlets      = totalMeshlets;
-    pc.instanceCount      = static_cast<u32>(scene.instance_count());
+    pc.meshletCount       = meshletCount;
+    pc.instanceCount      = instanceCount;
+    pc.instanceOffset     = instanceOffset;
+    pc.meshletOffset      = meshletOffset;
 
     vkCmdPushConstants(cmd, m_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                        0, sizeof(pc), &pc);
 
-    // One thread per meshlet, 64 threads per workgroup.
-    const u32 groups = (totalMeshlets + 63) / 64;
+    // One thread per meshlet in this batch, 64 threads per workgroup.
+    const u32 groups = (meshletCount + 63) / 64;
     vkCmdDispatch(cmd, groups, 1, 1);
 
     // Barrier: compute SSBO writes (count + surviving IDs) → task shader SSBO reads.

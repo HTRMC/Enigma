@@ -26,7 +26,8 @@ struct ClusteredForwardPushBlock {
 static_assert(sizeof(ClusteredForwardPushBlock) == 112);
 
 // Material flags — mirrors Scene.h Material::flags bit layout.
-static constexpr u32 kFlagBlend = 1u << 0;
+static constexpr u32 kFlagBlend = Material::kFlagBlend;
+static_assert(kFlagBlend == 0x1u, "kFlagBlend mismatch with Scene.h");
 
 ClusteredForwardPass::ClusteredForwardPass(gfx::Device& device)
     : m_device(&device) {}

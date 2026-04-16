@@ -25,16 +25,29 @@ namespace enigma {
 
 // Per-instance GPU data. Must match GpuInstance in gpu_cull.comp.hlsl and
 // visibility_buffer.mesh.hlsl.
+//
+// Layout (read as 6 float4s by the GPU):
+//   transform     [0..3]  mat4 world transform
+//   pack0         [4]     {meshlet_offset, meshlet_count, material_index, vertex_buffer_slot}
+//   pack1         [5]     {vertex_base_offset, asfloat(patch_quad_size), verts_per_edge, _pad}
+//
+// The last three uints in pack1 are terrain-only. For regular meshes they are
+// zero (set by GpuInstance inst{}), and the terrain_cdlod.mesh.hlsl shader
+// never references them for non-terrain instances.
 struct alignas(16) GpuInstance {
-    mat4 transform;          // world matrix (column-major, GLM default)
-    u32  meshlet_offset;     // index into global meshlet buffer where this mesh starts
-    u32  meshlet_count;      // number of meshlets in this mesh
-    u32  material_index;     // bindless material index
-    u32  vertex_buffer_slot; // bindless vertex SSBO slot
-};
+    mat4 transform;            // 64 B  world matrix (column-major, GLM default)
+    u32  meshlet_offset;       //  4 B  index into global meshlet buffer where this mesh starts
+    u32  meshlet_count;        //  4 B  number of meshlets in this mesh
+    u32  material_index;       //  4 B  bindless material index
+    u32  vertex_buffer_slot;   //  4 B  bindless vertex SSBO slot
+    u32  vertex_base_offset;   //  4 B  CDLOD terrain: base vertex offset inside vertex SSBO (0 for regular meshes)
+    f32  patch_quad_size;      //  4 B  CDLOD terrain: world-space quad size (patch_size / quadsPerPatch)
+    u32  verts_per_edge;       //  4 B  CDLOD terrain: vertices per patch edge = quadsPerPatch + 1
+    u32  _pad;                 //  4 B  explicit tail padding — keeps 16-byte alignment
+};                             // 96 B total
 
-static_assert(sizeof(GpuInstance) == 80,
-              "GpuInstance layout mismatch: GPU shader reads 5 float4s (80 bytes) per instance");
+static_assert(sizeof(GpuInstance) == 96,
+              "GpuInstance layout mismatch: GPU shader reads 6 float4s (96 bytes) per instance");
 
 // CPU-side builder — filled from ECS query or Scene, then uploaded to GPU.
 class GpuSceneBuffer {

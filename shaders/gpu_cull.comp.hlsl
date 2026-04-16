@@ -18,6 +18,10 @@ StructuredBuffer<float4> g_buffers[] : register(t0, space1);
 RWByteAddressBuffer g_rwBuffers[] : register(u1, space0);
 
 // --- Push constants ---
+// Two-pass CDLOD batching: (instanceOffset, instanceCount) scopes findInstanceAndLocal
+// to a contiguous GpuInstance range; (meshletOffset, meshletCount) scopes the
+// dispatch to the meshlet range produced by that instance set. For a one-pass
+// full-scene cull pass (offset=0, count=total, meshletOffset=0, meshletCount=total).
 struct PushBlock {
     uint instanceBufferSlot;   // StructuredBuffer<GpuInstance> (read as float4)
     uint meshletBufferSlot;    // StructuredBuffer<Meshlet>     (read as float4)
@@ -25,33 +29,42 @@ struct PushBlock {
     uint countBufferSlot;      // RWByteAddressBuffer — atomic counter at offset 0
     uint survivingIdsSlot;     // RWByteAddressBuffer — surviving global meshlet ids
     uint cameraSlot;           // StructuredBuffer<float4> camera data
-    uint totalMeshlets;        // total meshlet count across all instances
-    uint instanceCount;        // number of GpuInstance entries
+    uint meshletCount;         // number of meshlets in THIS batch (dispatch range)
+    uint instanceCount;        // number of GpuInstance entries in THIS batch
+    uint instanceOffset;       // first GpuInstance index searched by findInstanceAndLocal
+    uint meshletOffset;        // global meshlet index that threadID=0 maps to
 };
 
 [[vk::push_constant]] PushBlock pc;
 
 // --- GPU struct accessors ---
-// GpuInstance: 18 float4s (float4x4 transform = 4, then 4 uints packed as 1 float4)
-// Layout: transform[0..3], {meshlet_offset, meshlet_count, material_index, vertex_buffer_slot}
+// GpuInstance: 6 float4s (float4x4 transform = 4, then 2 float4s of packed fields).
+// Layout (matches GpuSceneBuffer.h):
+//   transform[0..3]
+//   pack0 = {meshlet_offset, meshlet_count, material_index, vertex_buffer_slot}
+//   pack1 = {vertex_base_offset, patch_quad_size (float), verts_per_edge, _pad}
+// The cull pass only consumes the first two pack1 fields (the rest are terrain-specific).
 struct GpuInstance {
     float4x4 transform;
     uint     meshlet_offset;
     uint     meshlet_count;
     uint     material_index;
     uint     vertex_buffer_slot;
+    uint     vertex_base_offset;
 };
 
 GpuInstance loadInstance(uint idx) {
     StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.instanceBufferSlot)];
-    const uint base = idx * 5; // 4 float4 for mat4 + 1 float4 for 4 uints = 5 float4
+    const uint base = idx * 6; // 4 float4 for mat4 + 2 float4 for packed fields = 6 float4
     GpuInstance inst;
     inst.transform = transpose(float4x4(buf[base + 0], buf[base + 1], buf[base + 2], buf[base + 3]));
-    uint4 packed   = asuint(buf[base + 4]);
-    inst.meshlet_offset    = packed.x;
-    inst.meshlet_count     = packed.y;
-    inst.material_index    = packed.z;
-    inst.vertex_buffer_slot = packed.w;
+    uint4 pack0    = asuint(buf[base + 4]);
+    inst.meshlet_offset     = pack0.x;
+    inst.meshlet_count      = pack0.y;
+    inst.material_index     = pack0.z;
+    inst.vertex_buffer_slot = pack0.w;
+    uint4 pack1             = asuint(buf[base + 5]);
+    inst.vertex_base_offset = pack1.x;
     return inst;
 }
 
@@ -112,9 +125,13 @@ CameraData loadCamera(uint slot) {
 void findInstanceAndLocal(uint globalMeshletIdx,
                           out uint instanceId,
                           out uint localMeshletIdx) {
-    for (uint i = 0; i < pc.instanceCount; ++i) {
+    // Search only the (instanceOffset, instanceCount) batch passed for this
+    // dispatch. For a single-pass cull over the whole scene, instanceOffset=0
+    // and instanceCount=totalInstances — the original behaviour.
+    for (uint k = 0; k < pc.instanceCount; ++k) {
+        uint i = pc.instanceOffset + k;
         StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.instanceBufferSlot)];
-        uint4 packed          = asuint(buf[i * 5 + 4]);
+        uint4 packed          = asuint(buf[i * 6 + 4]);
         uint meshlet_offset   = packed.x;
         uint meshlet_count    = packed.y;
         if (globalMeshletIdx >= meshlet_offset && globalMeshletIdx < meshlet_offset + meshlet_count) {
@@ -123,7 +140,7 @@ void findInstanceAndLocal(uint globalMeshletIdx,
             return;
         }
     }
-    // Should not reach here if totalMeshlets is correct.
+    // Should not reach here if meshletOffset/meshletCount match the instance range.
     instanceId      = 0;
     localMeshletIdx = 0;
 }
@@ -131,8 +148,11 @@ void findInstanceAndLocal(uint globalMeshletIdx,
 // --- Main ---
 [numthreads(64, 1, 1)]
 void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
-    uint globalId = dispatchId.x;
-    if (globalId >= pc.totalMeshlets)
+    // Shift threadID by meshletOffset so two-pass CDLOD batching can target a
+    // sub-range of the global meshlet buffer (e.g. scene meshlets then terrain
+    // meshlets). For a single-batch dispatch meshletOffset=0 — identity shift.
+    uint globalId = dispatchId.x + pc.meshletOffset;
+    if (dispatchId.x >= pc.meshletCount)
         return;
 
     // Determine which instance and local meshlet this global ID maps to.
