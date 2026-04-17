@@ -39,7 +39,14 @@ struct CdlodConfig {
     f32 lodDistanceBase    = 8.0f;    // LOD switch dist at LOD 0 (≈4× leaf patch size for 4096m world/12 LODs)
     f32 lodDistanceGrow    = 2.0f;    // each level multiplies distance
     u32 terrainMaterialIdx = 0;       // set during initialize()
-    u32 poolSlotsPerLod    = 96;      // vertex pool capacity per LOD
+    // Per-LOD vertex-pool capacity. The steady-state working set at a single
+    // LOD is ≈ 4π × d_{L+1}² / parentSize² patches; with the default
+    // lodDistanceBase=8 / lodDistanceGrow=2 that evaluates to ~201 patches
+    // across LODs 0..7. 256 covers that with ~25% headroom for camera-motion
+    // transients and the +1-frame retirement fence window. Undersizing causes
+    // the ring allocator to exhaust slots and skip activations, producing
+    // visible terrain gaps at the finest LODs.
+    u32 poolSlotsPerLod    = 256;     // vertex pool capacity per LOD
     u32 activationBudget   = 16;      // max new patch activations per frame
 };
 
