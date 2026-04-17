@@ -1530,19 +1530,60 @@ void Renderer::drawFrame() {
             };
             m_renderGraph->addRasterPass(std::move(lightPassDesc));
 
-            // Phase 2: blit hdr -> swapchain with Reinhard tonemap
-            gfx::RenderGraph::RasterPassDesc blitDesc{};
-            blitDesc.name          = "DebugBlitPass";
-            blitDesc.colorTargets  = {colorHandle};
-            blitDesc.sampledInputs = {hdrColorHandle};
-            blitDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 1.0f}};
-            blitDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
-                m_gpuProfiler->beginZone(cmd, "DebugBlitPass");
-                m_debugVisPass->recordBlit(cmd, m_descriptorAllocator->globalSet(), ext,
-                                           m_hdrColorSampledSlot, m_gbufferSamplerSlot);
+            // Phase 1b: SkyBackgroundPass — writes the atmospheric sky into
+            // HDR at pixels where depth==0.  Without this the LitWire frame
+            // shows black void where the sky should be, which also defeats
+            // the visual cue for aerial perspective (fog reads as a gradient
+            // *into* the sky). Mirror of the pass that runs in Lit mode.
+            {
+                gfx::RenderGraph::RasterPassDesc skyDesc{};
+                skyDesc.name          = "SkyBackgroundPass";
+                skyDesc.colorTargets  = {hdrColorHandle};
+                skyDesc.colorLoadOp   = VK_ATTACHMENT_LOAD_OP_LOAD;
+                skyDesc.sampledInputs = {gbufDepth};
+                skyDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                    m_gpuProfiler->beginZone(cmd, "SkyBackgroundPass");
+                    m_skyPass->record(cmd,
+                        m_descriptorAllocator->globalSet(), ext,
+                        cameraSlot,
+                        m_gbufDepthSlot,
+                        m_atmospherePass->skyViewLutSlot(),
+                        m_atmospherePass->transmittanceLutSlot(),
+                        m_gbufferSamplerSlot,
+                        vec4{m_sunWorldDir, m_atmosphereSettings.sunIntensity},
+                        vec4{m_cameraWorldPos * 0.001f, 0.0f});
+                    m_gpuProfiler->endZone(cmd);
+                };
+                m_renderGraph->addRasterPass(std::move(skyDesc));
+            }
+
+            // Phase 2: PostProcessPass — identical setup to Lit mode so the
+            // wireframe overlay sits on top of a fully-composited beauty
+            // frame (aerial perspective, bloom, tonemap, exposure).  The
+            // prior DebugBlitPass only ran a Reinhard tonemap and skipped
+            // atmosphere, which made LitWire look stylistically detached
+            // from the pure Lit mode.
+            gfx::RenderGraph::RasterPassDesc ppDesc{};
+            ppDesc.name          = "PostProcessPass";
+            ppDesc.colorTargets  = {colorHandle};
+            ppDesc.sampledInputs = {hdrColorHandle, gbufDepth};
+            ppDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            ppDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "PostProcessPass");
+                m_postProcessPass->record(cmd,
+                    m_descriptorAllocator->globalSet(),
+                    m_atmospherePass->aerialPerspectiveReadSet(),
+                    ext,
+                    m_hdrColorSampledSlot,
+                    m_gbufDepthSlot,
+                    cameraSlot,
+                    m_gbufferSamplerSlot,
+                    m_linearSamplerSlot,
+                    m_atmosphereSettings,
+                    vec4{m_cameraWorldPos * 0.001f, 0.0f});
                 m_gpuProfiler->endZone(cmd);
             };
-            m_renderGraph->addRasterPass(std::move(blitDesc));
+            m_renderGraph->addRasterPass(std::move(ppDesc));
 
             // Phase 3: wireframe overlay -> swapchain (LOAD preserves lit base)
             gfx::RenderGraph::RasterPassDesc wireOverlayDesc{};
