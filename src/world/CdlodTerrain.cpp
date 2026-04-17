@@ -275,6 +275,7 @@ void CdlodTerrain::allocLodPool(u32 lod) {
     pool.verticesPerSlot = (N + 1u) * (N + 1u);
     pool.slotCount       = m_config.poolSlotsPerLod;
     pool.nextSlot        = 0;
+    pool.slotLive.assign(pool.slotCount, 0u);
 
     // Each vertex stores only its Y (height) as a single float. The mesh
     // shader reconstructs X and Z from the patch-local vertex index using
@@ -330,6 +331,8 @@ u32 CdlodTerrain::allocPoolSlot(u32 lod) {
             break;
         if (m_meshletBuffer && front.meshletCount > 0)
             m_meshletBuffer->freeMeshletRange({ front.meshletOffset, front.meshletCount });
+        // Drained: slot is past the GPU-fence window and safe to overwrite.
+        pool.slotLive[front.poolSlot] = 0u;
         m_readySlots[lod].push_back(front.poolSlot);
         retired.pop_front();
     }
@@ -339,14 +342,24 @@ u32 CdlodTerrain::allocPoolSlot(u32 lod) {
     if (!ready.empty()) {
         const u32 reclaimedSlot = ready.front();
         ready.pop_front();
+        pool.slotLive[reclaimedSlot] = 1u;
         return reclaimedSlot;
     }
 
-    // Fallback: ring allocator. Only wraps after poolSlotsPerLod unique
-    // activations without any retirement arriving in time.
-    const u32 slot = pool.nextSlot;
-    pool.nextSlot = (pool.nextSlot + 1u) % pool.slotCount;
-    return slot;
+    // Ring allocator: scan up to slotCount positions for a slot whose
+    // liveness bit is clear. Every set bit means the slot is still referenced
+    // by a live m_patches entry or sitting in m_retiredSlots awaiting fence
+    // drain — handing it out would alias and corrupt the held patch's
+    // heights. If every slot is live, bail; the caller skips this activation.
+    for (u32 tries = 0; tries < pool.slotCount; ++tries) {
+        const u32 candidate = pool.nextSlot;
+        pool.nextSlot = (pool.nextSlot + 1u) % pool.slotCount;
+        if (pool.slotLive[candidate] == 0u) {
+            pool.slotLive[candidate] = 1u;
+            return candidate;
+        }
+    }
+    return UINT32_MAX;
 }
 
 // ---------------------------------------------------------------------------
@@ -476,8 +489,10 @@ void CdlodTerrain::update(const vec3&    cameraPos,
     poolBarriers.reserve(m_config.activationBudget);
     for (u32 nodeIdx : toActivate) {
         if (m_activationsThisFrame >= m_config.activationBudget) break;
-        activatePatch(nodeIdx, *m_meshletBuffer, cmd, frameIndex, poolBarriers);
-        ++m_activationsThisFrame;
+        // Only consume budget on success. A saturated per-LOD pool returns
+        // false without doing GPU work; skip and let other LODs try.
+        if (activatePatch(nodeIdx, *m_meshletBuffer, cmd, frameIndex, poolBarriers))
+            ++m_activationsThisFrame;
     }
 
     // 4. Retire patches no longer needed (frame-counter-gated reclamation).
@@ -545,7 +560,7 @@ void CdlodTerrain::update(const vec3&    cameraPos,
 // Patch activation.
 // ---------------------------------------------------------------------------
 
-void CdlodTerrain::activatePatch(u32               nodeIndex,
+bool CdlodTerrain::activatePatch(u32               nodeIndex,
                                   GpuMeshletBuffer& meshletBuffer,
                                   VkCommandBuffer   cmd,
                                   u32               frameIndex,
@@ -564,6 +579,11 @@ void CdlodTerrain::activatePatch(u32               nodeIndex,
 
     // 1. Allocate a vertex pool slot and stream Y-only heights into it.
     patch.poolSlot = allocPoolSlot(lod);
+    if (patch.poolSlot == UINT32_MAX) {
+        // Pool saturated this frame (working set exceeds poolSlotsPerLod at
+        // this LOD). Skip; retry next frame after retirements drain.
+        return false;
+    }
 
     const u32 N          = m_config.quadsPerPatch;
     const u32 vertCount  = (N + 1u) * (N + 1u);
@@ -673,6 +693,7 @@ void CdlodTerrain::activatePatch(u32               nodeIndex,
     patch.active        = true;
 
     m_patches.emplace(nodeIndex, patch);
+    return true;
 }
 
 // ---------------------------------------------------------------------------

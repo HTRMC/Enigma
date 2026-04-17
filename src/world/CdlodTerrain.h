@@ -60,6 +60,11 @@ struct LodPool {
     u32           slotCount       = 0;
     u32           nextSlot        = 0;          // ring allocator cursor
     u32           verticesPerSlot = 0;          // (quadsPerPatch+1)^2
+    // Per-slot liveness: 1 = referenced by an m_patches entry or sitting in
+    // m_retiredSlots (GPU may still read). 0 = safe to overwrite. Prevents the
+    // ring allocator from silently aliasing a live slot when the working set
+    // exceeds slotCount.
+    std::vector<u8> slotLive;
 };
 
 // Runtime state of an active terrain patch.
@@ -140,7 +145,10 @@ private:
     u32  allocPoolSlot(u32 lod);
     void collectActive(u32 nodeIndex, const vec3& cameraPos,
                        std::vector<u32>& outNodes, u32 maxNodes) const;
-    void activatePatch(u32               nodeIndex,
+    // Returns true if the patch was activated. Returns false when the LOD's
+    // vertex pool is saturated (no free slot this frame); the caller should
+    // skip the activation and retry next frame rather than consume budget.
+    bool activatePatch(u32               nodeIndex,
                        GpuMeshletBuffer& meshletBuffer,
                        VkCommandBuffer   cmd,
                        u32               frameIndex,
