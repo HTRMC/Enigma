@@ -1369,8 +1369,12 @@ void Renderer::drawFrame() {
                 edgeDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 0.0f}};
                 edgeDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
                     m_gpuProfiler->beginZone(cmd, "SMAAEdgePass");
+                    // Linear sampler for all three SMAA passes: the reference
+                    // algorithm relies on sub-texel bilinear interpolation
+                    // (edge search taps, area/search tex lookups, neighbourhood
+                    // 0.5-texel sampling). Nearest here would break the math.
                     m_smaaPass->recordEdge(cmd, m_descriptorAllocator->globalSet(), ext,
-                                            m_smaaLdrSampledSlot, m_gbufferSamplerSlot);
+                                            m_smaaLdrSampledSlot, m_linearSamplerSlot);
                     m_gpuProfiler->endZone(cmd);
                 };
                 m_renderGraph->addRasterPass(std::move(edgeDesc));
@@ -1386,7 +1390,7 @@ void Renderer::drawFrame() {
                 blendDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
                     m_gpuProfiler->beginZone(cmd, "SMAABlendPass");
                     m_smaaPass->recordBlend(cmd, m_descriptorAllocator->globalSet(), ext,
-                                             m_gbufferSamplerSlot);
+                                             m_linearSamplerSlot);
                     m_gpuProfiler->endZone(cmd);
                 };
                 m_renderGraph->addRasterPass(std::move(blendDesc));
@@ -1401,8 +1405,13 @@ void Renderer::drawFrame() {
                 nbrDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 1.0f}};
                 nbrDesc.execute       = [&](VkCommandBuffer cmd, VkExtent2D ext) {
                     m_gpuProfiler->beginZone(cmd, "SMAANeighborPass");
+                    // Neighborhood pass MUST use the linear sampler: the shader samples at
+                    // uv ± 0.5*texel and relies on bilinear interpolation to produce the
+                    // sub-pixel blend between the current pixel and its neighbour. A
+                    // nearest sampler snaps back to one of the two pixels, collapsing the
+                    // AA effect to a no-op (SMAA appears disabled).
                     m_smaaPass->recordNeighborhood(cmd, m_descriptorAllocator->globalSet(), ext,
-                                                    m_smaaLdrSampledSlot, m_gbufferSamplerSlot);
+                                                    m_smaaLdrSampledSlot, m_linearSamplerSlot);
                     m_gpuProfiler->endZone(cmd);
                 };
                 m_renderGraph->addRasterPass(std::move(nbrDesc));
@@ -1848,6 +1857,13 @@ void Renderer::uploadMeshlets() {
                           *m_gpuMeshlets, *m_indirectBuffer, *m_scene,
                           cmd);
 
+    // Upload the precomputed AreaTex + SearchTex lookup textures that the
+    // reference SMAA blend pass consumes. Records on the same init cmd; the
+    // waitIdle below guarantees staging buffers are safe to destroy.
+    if (m_smaaPass) {
+        m_smaaPass->uploadLookupTextures(cmd, *m_descriptorAllocator);
+    }
+
     ENIGMA_VK_CHECK(vkEndCommandBuffer(cmd));
 
     VkSubmitInfo submitInfo{};
@@ -1857,10 +1873,11 @@ void Renderer::uploadMeshlets() {
     ENIGMA_VK_CHECK(vkQueueSubmit(m_device->graphicsQueue(), 1, &submitInfo, VK_NULL_HANDLE));
     ENIGMA_VK_CHECK(vkQueueWaitIdle(m_device->graphicsQueue()));
 
-    // Release heightmap staging + meshlet staging now that the GPU has
-    // finished consuming them.
+    // Release heightmap staging + meshlet staging + SMAA lookup-texture
+    // staging now that the GPU has finished consuming them.
     m_heightmapLoader->releaseStaging();
     m_gpuMeshlets->flush_staging();
+    if (m_smaaPass) m_smaaPass->releaseLookupUploadStaging();
 
     vkDestroyCommandPool(m_device->logical(), cmdPool, nullptr);
 

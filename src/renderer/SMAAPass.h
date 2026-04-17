@@ -54,6 +54,15 @@ public:
     void allocate(VkExtent2D extent, gfx::DescriptorAllocator& descriptorAllocator);
     void free   (gfx::DescriptorAllocator& descriptorAllocator);
 
+    // Upload the precomputed AreaTex + SearchTex lookup textures that the
+    // reference SMAA blend pass consumes. Records on `cmd`; caller must
+    // submit + wait idle, then call releaseLookupUploadStaging() to free the
+    // host-visible staging buffers. Textures live for the lifetime of the
+    // pass (not per-resize).
+    void uploadLookupTextures(VkCommandBuffer cmd,
+                              gfx::DescriptorAllocator& descriptorAllocator);
+    void releaseLookupUploadStaging();
+
     // Build the three fullscreen pipelines.
     // ldrFormat: format of both the input LDR intermediate and the final output
     //            (swapchain format). The edge and weight textures have fixed formats.
@@ -117,6 +126,24 @@ private:
     VkImageView     m_weightView        = VK_NULL_HANDLE;
     VmaAllocation   m_weightAlloc       = nullptr;
     u32             m_weightSampledSlot = UINT32_MAX;
+
+    // Precomputed Jimenez SMAA lookup textures (uploaded once at init).
+    VkImage         m_areaTexImage       = VK_NULL_HANDLE; // R8G8_UNORM, 160×560
+    VkImageView     m_areaTexView        = VK_NULL_HANDLE;
+    VmaAllocation   m_areaTexAlloc       = nullptr;
+    u32             m_areaTexSampledSlot = UINT32_MAX;
+
+    VkImage         m_searchTexImage       = VK_NULL_HANDLE; // R8_UNORM, 64×16
+    VkImageView     m_searchTexView        = VK_NULL_HANDLE;
+    VmaAllocation   m_searchTexAlloc       = nullptr;
+    u32             m_searchTexSampledSlot = UINT32_MAX;
+
+    // Host-visible staging buffers for the lookup textures, kept alive
+    // until releaseLookupUploadStaging() is called (post-submit, post-idle).
+    VkBuffer        m_areaTexStaging        = VK_NULL_HANDLE;
+    VmaAllocation   m_areaTexStagingAlloc   = nullptr;
+    VkBuffer        m_searchTexStaging      = VK_NULL_HANDLE;
+    VmaAllocation   m_searchTexStagingAlloc = nullptr;
 
     VkExtent2D      m_extent{};
 
