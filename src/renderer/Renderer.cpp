@@ -461,6 +461,14 @@ Renderer::~Renderer() {
     if (m_linearSampler != VK_NULL_HANDLE) {
         vkDestroySampler(m_device->logical(), m_linearSampler, nullptr);
     }
+    // Renderer-owned runtime-rebuilt material sampler. The original sampler
+    // created by GltfLoader still lives in scene.ownedSamplers and is freed
+    // by Scene::destroy — we only own the replacement created by
+    // applyTextureFilterSettings().
+    if (m_materialSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device->logical(), m_materialSampler, nullptr);
+        m_materialSampler = VK_NULL_HANDLE;
+    }
 
     // Atmosphere pass owns LUT images + pipelines.
     if (m_atmospherePass) {
@@ -773,6 +781,25 @@ void Renderer::drawFrame() {
             }
             if (ImGui::CollapsingHeader("Renderer")) {
                 ImGui::Checkbox("SMAA", &m_aaSettings.smaaEnabled);
+
+                ImGui::SeparatorText("Texture Filtering");
+                bool tfDirty = false;
+                tfDirty |= ImGui::Checkbox("Mipmaps", &m_textureFilterSettings.mipmapsEnabled);
+                static const char* kAnisoLabels[] = { "1x (off)", "2x", "4x", "8x", "16x" };
+                static const u32   kAnisoValues[] = { 1u, 2u, 4u, 8u, 16u };
+                int anisoIdx = 0;
+                for (int i = 0; i < 5; ++i) {
+                    if (kAnisoValues[i] == m_textureFilterSettings.anisotropy) { anisoIdx = i; break; }
+                }
+                const f32 devMaxAniso = m_device->properties().limits.maxSamplerAnisotropy;
+                const bool anisoSupported = devMaxAniso > 1.0f;
+                if (!anisoSupported) ImGui::BeginDisabled();
+                if (ImGui::Combo("Anisotropic Filtering", &anisoIdx, kAnisoLabels, 5)) {
+                    m_textureFilterSettings.anisotropy = kAnisoValues[anisoIdx];
+                    tfDirty = true;
+                }
+                if (!anisoSupported) ImGui::EndDisabled();
+                if (tfDirty) applyTextureFilterSettings();
                 ImGui::Separator();
             }
             if (ImGui::CollapsingHeader("Graphics Quality")) {
@@ -2252,6 +2279,56 @@ void Renderer::destroySmaaLdr() {
         m_smaaLdrImage = VK_NULL_HANDLE;
         m_smaaLdrAlloc = nullptr;
     }
+}
+
+void Renderer::applyTextureFilterSettings() {
+    if (m_scene == nullptr ||
+        m_scene->defaultMaterialSamplerSlot == 0xFFFFFFFFu) {
+        return;
+    }
+
+    vkDeviceWaitIdle(m_device->logical());
+
+    const f32  devMaxAniso   = m_device->properties().limits.maxSamplerAnisotropy;
+    const bool anisoSupported = devMaxAniso > 1.0f;
+    const u32  requestedAniso = std::clamp<u32>(
+        m_textureFilterSettings.anisotropy,
+        1u,
+        static_cast<u32>(std::floor(devMaxAniso)));
+    m_textureFilterSettings.anisotropy = requestedAniso;
+
+    VkSamplerCreateInfo ci{};
+    ci.sType            = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    ci.magFilter        = VK_FILTER_LINEAR;
+    ci.minFilter        = VK_FILTER_LINEAR;
+    ci.mipmapMode       = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    ci.addressModeU     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    ci.addressModeV     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    ci.addressModeW     = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    ci.anisotropyEnable = (anisoSupported && requestedAniso > 1u) ? VK_TRUE : VK_FALSE;
+    ci.maxAnisotropy    = ci.anisotropyEnable ? static_cast<f32>(requestedAniso) : 1.0f;
+    ci.borderColor      = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    ci.minLod           = 0.0f;
+    ci.maxLod           = m_textureFilterSettings.mipmapsEnabled ? VK_LOD_CLAMP_NONE : 0.25f;
+
+    VkSampler newSampler = VK_NULL_HANDLE;
+    ENIGMA_VK_CHECK(vkCreateSampler(m_device->logical(), &ci, nullptr, &newSampler));
+
+    m_descriptorAllocator->updateSampler(
+        m_scene->defaultMaterialSamplerSlot, newSampler);
+
+    // Destroy only our previously-owned sampler. The very first call (m_materialSampler==null)
+    // leaves the GltfLoader-created default in scene.ownedSamplers; it's no longer
+    // referenced by the bindless slot but will be freed by Scene::destroy during shutdown.
+    // Not destroying it here avoids double-free paths if the scene is later swapped.
+    if (m_materialSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(m_device->logical(), m_materialSampler, nullptr);
+    }
+    m_materialSampler = newSampler;
+
+    ENIGMA_LOG_INFO("[renderer] material sampler rebuilt: mipmaps={}, aniso={}x",
+                    m_textureFilterSettings.mipmapsEnabled ? "on" : "off",
+                    requestedAniso);
 }
 
 } // namespace enigma

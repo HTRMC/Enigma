@@ -95,6 +95,12 @@ struct Scene {
     u32       materialBufferSlot = 0xFFFFFFFFu;
     GpuBuffer materialBuffer{};
 
+    // Bindless slot of the default material sampler — cached so the Renderer
+    // can rebuild the sampler at runtime (texture-filter settings) via
+    // DescriptorAllocator::updateSampler without touching each material.
+    // UINT32_MAX when no material-textured scene was loaded.
+    u32 defaultMaterialSamplerSlot = 0xFFFFFFFFu;
+
     std::vector<GpuBuffer>  ownedBuffers;
     std::vector<GpuImage>   ownedImages;
     std::vector<VkSampler>  ownedSamplers;

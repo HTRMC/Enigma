@@ -46,6 +46,15 @@ public:
     void uploadImage(VkImage dst, VkExtent3D extent, VkFormat format,
                      const void* pixels, VkDeviceSize size);
 
+    // Stage a buffer-to-image copy of the base mip then generate all
+    // subsequent mip levels via vkCmdBlitImage with a linear filter.
+    // `dst` must have TRANSFER_SRC_BIT | TRANSFER_DST_BIT | SAMPLED_BIT
+    // and have been created with `mipLevels` levels. Ends with every level
+    // in SHADER_READ_ONLY_OPTIMAL.
+    void uploadImageWithMipchain(VkImage dst, u32 width, u32 height,
+                                 VkFormat format, u32 mipLevels,
+                                 const void* basePixels, VkDeviceSize baseSize);
+
     // Submit the command buffer, wait on fence, free all staging resources.
     // Must be called exactly once. The UploadContext is consumed after this.
     void submitAndWait();

@@ -333,6 +333,26 @@ u32 DescriptorAllocator::registerSampler(VkSampler sampler) {
     return slot;
 }
 
+void DescriptorAllocator::updateSampler(u32 slot, VkSampler sampler) {
+    ENIGMA_ASSERT(slot < m_nextSampler && "slot was never registered");
+
+    VkDescriptorImageInfo imageInfo{};
+    imageInfo.sampler     = sampler;
+    imageInfo.imageView   = VK_NULL_HANDLE;
+    imageInfo.imageLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VkWriteDescriptorSet write{};
+    write.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet          = m_globalSet;
+    write.dstBinding      = kBindingSampler;
+    write.dstArrayElement = slot;
+    write.descriptorCount = 1;
+    write.descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
+    write.pImageInfo      = &imageInfo;
+
+    vkUpdateDescriptorSets(m_device->logical(), 1, &write, 0, nullptr);
+}
+
 u32 DescriptorAllocator::registerAccelerationStructure(VkAccelerationStructureKHR as) {
     VkWriteDescriptorSetAccelerationStructureKHR asWrite{};
     asWrite.sType                      = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;

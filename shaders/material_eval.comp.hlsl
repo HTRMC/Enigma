@@ -360,6 +360,28 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
     // Interpolate vertex attributes.
     float2 uv = v0.uv * bary.x + v1.uv * bary.y + v2.uv * bary.z;
 
+    // Compute UV screen-space gradients analytically so SampleGrad can drive
+    // mipmap selection + anisotropic filtering. Compute shaders have no
+    // implicit ddx/ddy, and SampleLevel(..., 0) forces base-mip sampling
+    // regardless of sampler state — that's why texture aliasing persisted
+    // until this change. We reconstruct barycentrics at pixel+(1,0) and
+    // pixel+(0,1) using the same triangle NDC positions, interpolate the UV
+    // at each, and take finite differences.
+    float2 pixelNDCx = float2(
+        (float(pixelCoord.x) + 1.5) / float(pc.screenWidth)  * 2.0 - 1.0,
+        (float(pixelCoord.y) + 0.5) / float(pc.screenHeight) * 2.0 - 1.0);
+    float2 pixelNDCy = float2(
+        (float(pixelCoord.x) + 0.5) / float(pc.screenWidth)  * 2.0 - 1.0,
+        (float(pixelCoord.y) + 1.5) / float(pc.screenHeight) * 2.0 - 1.0);
+    float3 screenBaryX = computeBarycentrics(pixelNDCx, ndc0, ndc1, ndc2);
+    float3 screenBaryY = computeBarycentrics(pixelNDCy, ndc0, ndc1, ndc2);
+    float3 baryX = perspectiveCorrectBarycentrics(screenBaryX, clipPos0.w, clipPos1.w, clipPos2.w);
+    float3 baryY = perspectiveCorrectBarycentrics(screenBaryY, clipPos0.w, clipPos1.w, clipPos2.w);
+    float2 uvX = v0.uv * baryX.x + v1.uv * baryX.y + v2.uv * baryX.z;
+    float2 uvY = v0.uv * baryY.x + v1.uv * baryY.y + v2.uv * baryY.z;
+    float2 ddx_uv = uvX - uv;
+    float2 ddy_uv = uvY - uv;
+
     float3x3 normalMat = (float3x3)inst.transform;
     float3 N0 = normalize(mul(normalMat, v0.normal));
     float3 N1 = normalize(mul(normalMat, v1.normal));
@@ -397,14 +419,14 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
         // Base color.
         float4 baseColor = mat.baseColorFactor;
         if (mat.baseColorTexIdx != INVALID_TEX) {
-            baseColor *= g_textures[NonUniformResourceIndex(mat.baseColorTexIdx)].SampleLevel(samp, uv, 0);
+            baseColor *= g_textures[NonUniformResourceIndex(mat.baseColorTexIdx)].SampleGrad(samp, uv, ddx_uv, ddy_uv);
         }
 
         // Metallic + roughness (glTF: G=roughness, B=metallic).
         float metallic  = mat.metallicFactor;
         float roughness = mat.roughnessFactor;
         if (mat.metalRoughTexIdx != INVALID_TEX) {
-            float4 mr = g_textures[NonUniformResourceIndex(mat.metalRoughTexIdx)].SampleLevel(samp, uv, 0);
+            float4 mr = g_textures[NonUniformResourceIndex(mat.metalRoughTexIdx)].SampleGrad(samp, uv, ddx_uv, ddy_uv);
             roughness *= mr.g;
             metallic  *= mr.b;
         }
@@ -414,7 +436,7 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
             float3 B = normalize(cross(N, T) * bitSign);
             float3x3 TBN = float3x3(T, B, N);
 
-            float4 normalSample = g_textures[NonUniformResourceIndex(mat.normalTexIdx)].SampleLevel(samp, uv, 0);
+            float4 normalSample = g_textures[NonUniformResourceIndex(mat.normalTexIdx)].SampleGrad(samp, uv, ddx_uv, ddy_uv);
             float3 tn = normalSample.xyz * 2.0 - 1.0;
             tn.xy    *= mat.normalScale;
             tn.y      = -tn.y; // glTF +Y flip for DX/Vulkan NDC
@@ -424,7 +446,7 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
         // Ambient occlusion.
         float occlusion = 1.0;
         if (mat.occlusionTexIdx != INVALID_TEX) {
-            float4 occSample = g_textures[NonUniformResourceIndex(mat.occlusionTexIdx)].SampleLevel(samp, uv, 0);
+            float4 occSample = g_textures[NonUniformResourceIndex(mat.occlusionTexIdx)].SampleGrad(samp, uv, ddx_uv, ddy_uv);
             occlusion = lerp(1.0, occSample.r, mat.occlusionStrength);
         }
 

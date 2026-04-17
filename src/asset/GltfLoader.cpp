@@ -94,16 +94,25 @@ u32 uploadTexture(gfx::Device& device, gfx::Allocator& allocator,
     const VkDeviceSize texSize = static_cast<VkDeviceSize>(width) * height * 4;
     const VkFormat texFormat   = srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
 
+    // Full mip chain: log2(max(w,h)) + 1. Mipgen eliminates the distant-
+    // surface shimmer that a single-level image produces.
+    const u32 mipLevels = static_cast<u32>(
+        std::floor(std::log2(std::max(width, height)))) + 1u;
+
     VkImageCreateInfo imgInfo{};
     imgInfo.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imgInfo.imageType     = VK_IMAGE_TYPE_2D;
     imgInfo.format        = texFormat;
     imgInfo.extent        = {width, height, 1};
-    imgInfo.mipLevels     = 1;
+    imgInfo.mipLevels     = mipLevels;
     imgInfo.arrayLayers   = 1;
     imgInfo.samples       = VK_SAMPLE_COUNT_1_BIT;
     imgInfo.tiling        = VK_IMAGE_TILING_OPTIMAL;
-    imgInfo.usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    // TRANSFER_SRC is required by the blit chain that generates mips 1..N
+    // from mip 0.
+    imgInfo.usage         = VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+                          | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                          | VK_IMAGE_USAGE_SAMPLED_BIT;
     imgInfo.sharingMode   = VK_SHARING_MODE_EXCLUSIVE;
     imgInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -119,13 +128,13 @@ u32 uploadTexture(gfx::Device& device, gfx::Allocator& allocator,
     viewInfo.image            = gpuImg.image;
     viewInfo.viewType         = VK_IMAGE_VIEW_TYPE_2D;
     viewInfo.format           = texFormat;
-    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    viewInfo.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, mipLevels, 0, 1};
     ENIGMA_VK_CHECK(vkCreateImageView(device.logical(), &viewInfo, nullptr, &gpuImg.view));
 
     {
         gfx::UploadContext ctx(device, allocator);
-        ctx.uploadImage(gpuImg.image, {width, height, 1}, texFormat,
-                        pixels, texSize);
+        ctx.uploadImageWithMipchain(gpuImg.image, width, height, texFormat,
+                                    mipLevels, pixels, texSize);
         ctx.submitAndWait();
     }
 
@@ -301,6 +310,7 @@ std::optional<Scene> loadGltf(const std::filesystem::path& path,
     // Default resources.
     const u32 defaultTexSlot     = createDefaultWhiteTexture(device, allocator, descriptorAllocator, scene);
     const u32 defaultSamplerSlot = createDefaultSampler(device, descriptorAllocator, scene);
+    scene.defaultMaterialSamplerSlot = defaultSamplerSlot;
 
     // --- Identify linear (non-color) images before uploading ---
     // metalRoughness, normal, and occlusion textures must be uploaded as UNORM,

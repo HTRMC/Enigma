@@ -37,6 +37,7 @@
 #include "renderer/PostProcessPass.h"
 #include "renderer/SMAAPass.h"
 #include "renderer/AASettings.h"
+#include "renderer/TextureFilterSettings.h"
 #include "renderer/Upscaler.h"
 #include "renderer/UpscalerSettings.h"
 #include "physics/DeformationSystem.h"
@@ -188,6 +189,17 @@ private:
 
     // AA settings — driven from the Settings ImGui panel.
     AASettings m_aaSettings{};
+
+    // Texture-filter settings — driven from the Settings ImGui panel.  On
+    // change, applyTextureFilterSettings() rebuilds the material sampler
+    // and updates the bindless slot in place.
+    TextureFilterSettings m_textureFilterSettings{};
+    VkSampler             m_materialSampler = VK_NULL_HANDLE; // active; owned here after first apply
+
+    // Rebuild the material sampler with the current m_textureFilterSettings
+    // and rewrite the bindless slot via DescriptorAllocator::updateSampler.
+    // Waits idle internally — called from the Settings panel on user change.
+    void applyTextureFilterSettings();
 
     // SMAA LDR intermediate — swapchain format, render-extent sized.
     // PostProcessPass writes here when SMAA is active; the three SMAA passes

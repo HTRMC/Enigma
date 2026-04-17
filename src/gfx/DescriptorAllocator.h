@@ -91,6 +91,13 @@ public:
     // Used when RT pass images are reallocated on swapchain resize.
     void updateStorageImage(u32 slot, VkImageView view);
 
+    // Re-write an existing sampler slot without allocating a new one.
+    // Used for runtime texture-filter setting changes (mipmap toggle,
+    // anisotropy adjustment) where we rebuild the sampler and want every
+    // material that referenced the old slot to pick up the new one without
+    // rewriting the material SSBO.
+    void updateSampler(u32 slot, VkSampler sampler);
+
 private:
     Device*               m_device     = nullptr;
     Caps                  m_caps{};
