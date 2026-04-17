@@ -22,12 +22,13 @@ struct GpuCullPushBlock {
     u32 survivingIdsSlot;    // RWByteAddressBuffer at binding 5 — surviving meshlet IDs
     u32 cameraSlot;          // CameraData at binding 2
     u32 meshletCount;        // number of meshlets in THIS batch (dispatch range)
-    u32 instanceCount;       // number of GpuInstance entries in THIS batch
-    u32 instanceOffset;      // first GpuInstance index searched by findInstanceAndLocal
+    u32 instanceCount;       // unused — retained for ABI stability
+    u32 instanceOffset;      // unused — retained for ABI stability
     u32 meshletOffset;       // global meshlet index that threadID=0 maps to
+    u32 meshletToInstanceSlot; // StructuredBuffer<float4> — u32 per globalMeshletId
 };
 
-static_assert(sizeof(GpuCullPushBlock) == 40);
+static_assert(sizeof(GpuCullPushBlock) == 44);
 
 GpuCullPass::GpuCullPass(gfx::Device& device)
     : m_device(&device) {}
@@ -110,10 +111,11 @@ void GpuCullPass::record(VkCommandBuffer           cmd,
     pc.countBufferSlot    = indirect.count_slot();
     pc.survivingIdsSlot   = indirect.surviving_slot();
     pc.cameraSlot         = cameraSlot;
-    pc.meshletCount       = meshletCount;
-    pc.instanceCount      = instanceCount;
-    pc.instanceOffset     = instanceOffset;
-    pc.meshletOffset      = meshletOffset;
+    pc.meshletCount          = meshletCount;
+    pc.instanceCount         = instanceCount;  // unused by shader; kept for ABI
+    pc.instanceOffset        = instanceOffset; // unused by shader; kept for ABI
+    pc.meshletOffset         = meshletOffset;
+    pc.meshletToInstanceSlot = scene.meshlet_to_instance_slot();
 
     vkCmdPushConstants(cmd, m_pipeline->layout(), VK_SHADER_STAGE_COMPUTE_BIT,
                        0, sizeof(pc), &pc);

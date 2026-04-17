@@ -68,11 +68,21 @@ public:
     // Upload all added instances to the GPU buffer.
     // frameIndex selects which per-frame staging buffer to write into,
     // preventing CPU/GPU races when MAX_FRAMES_IN_FLIGHT > 1.
+    // meshletLookupCount is the highest global meshlet id that any shader
+    // (cull, material-eval) may ask the reverse-lookup about this frame —
+    // typically meshlets.total_meshlet_count(). Entries not claimed by an
+    // add_instance() range remain 0xFFFFFFFFu (orphaned).
     // Must be called after all add_instance() calls and before draw.
-    void upload(VkCommandBuffer cmd, u32 frameIndex);
+    void upload(VkCommandBuffer cmd, u32 frameIndex, u32 meshletLookupCount);
 
     // Bindless slot of the uploaded SSBO (registered in DescriptorAllocator).
     u32 slot() const { return m_slot; }
+
+    // Bindless slot of the meshlet→instance reverse lookup buffer.
+    // Indexed by globalMeshletId → instanceId (or 0xFFFFFFFFu if orphaned).
+    // Replaces the O(n_instances) per-pixel/per-meshlet scan that both
+    // material_eval and gpu_cull previously performed.
+    u32 meshlet_to_instance_slot() const { return m_lookup_slot; }
 
     // Number of instances this frame.
     size_t instance_count() const { return m_instances.size(); }
@@ -82,12 +92,19 @@ public:
 
 private:
     void ensure_capacity(size_t required);
+    void ensure_lookup_capacity(size_t required_bytes);
 
     gfx::Device*              m_device      = nullptr;
     gfx::Allocator*           m_allocator   = nullptr;
     gfx::DescriptorAllocator* m_descriptors = nullptr;
 
     std::vector<GpuInstance> m_instances;
+
+    // Meshlet → instance reverse lookup. Indexed by globalMeshletId; each
+    // u32 holds the owning instance index or 0xFFFFFFFFu for "no current
+    // instance owns this slot" (orphaned retired terrain range, or a meshlet
+    // past max high-water this frame).
+    std::vector<u32> m_meshletToInstance;
 
     // GPU-side SSBO.
     VkBuffer      m_gpu_buffer   = VK_NULL_HANDLE;
@@ -100,6 +117,14 @@ private:
     std::array<VmaAllocation, gfx::MAX_FRAMES_IN_FLIGHT> m_staging_alloc{};
 
     u32 m_slot = 0; // bindless SSBO slot
+
+    // GPU-side meshlet→instance SSBO + per-frame staging.
+    VkBuffer      m_lookup_gpu_buffer   = VK_NULL_HANDLE;
+    VmaAllocation m_lookup_gpu_alloc    = nullptr;
+    size_t        m_lookup_gpu_capacity = 0; // in bytes
+    std::array<VkBuffer,      gfx::MAX_FRAMES_IN_FLIGHT> m_lookup_staging{};
+    std::array<VmaAllocation, gfx::MAX_FRAMES_IN_FLIGHT> m_lookup_staging_alloc{};
+    u32 m_lookup_slot = 0; // bindless SSBO slot for the reverse lookup
 };
 
 } // namespace enigma

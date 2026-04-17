@@ -30,9 +30,10 @@ struct PushBlock {
     uint survivingIdsSlot;     // RWByteAddressBuffer — surviving global meshlet ids
     uint cameraSlot;           // StructuredBuffer<float4> camera data
     uint meshletCount;         // number of meshlets in THIS batch (dispatch range)
-    uint instanceCount;        // number of GpuInstance entries in THIS batch
-    uint instanceOffset;       // first GpuInstance index searched by findInstanceAndLocal
+    uint instanceCount;        // unused (reverse-lookup replaces the instance scan); kept for ABI stability
+    uint instanceOffset;       // unused (reverse-lookup replaces the instance scan); kept for ABI stability
     uint meshletOffset;        // global meshlet index that threadID=0 maps to
+    uint meshletToInstanceSlot; // StructuredBuffer<float4> — u32 instanceId per globalMeshletId
 };
 
 [[vk::push_constant]] PushBlock pc;
@@ -117,35 +118,30 @@ CameraData loadCamera(uint slot) {
 
 // (Gribb-Hartmann frustum extraction removed — see view-space test in CSMain.)
 
-// --- Find which instance a global meshlet index belongs to ---
-// Uses meshlet_offset + meshlet_count directly from each instance — correct
-// regardless of whether the GpuInstance buffer is in the same order as the
-// meshlet buffer (which is NOT guaranteed when GLTF nodes reference meshes
-// out of their array order). An accumulated-offset walk would fail in that case.
+// --- Reverse lookup: globalMeshletId → instanceId ---
+// Replaces the former O(n_instances) linear scan over every GpuInstance with
+// a single SSBO load. The lookup buffer is populated CPU-side in
+// GpuSceneBuffer::add_instance() and 0xFFFFFFFFu for any unowned (orphaned)
+// meshlet — typically a terrain patch retired-but-pending-reclamation whose
+// GpuInstance is no longer in the scene buffer this frame.
 void findInstanceAndLocal(uint globalMeshletIdx,
                           out uint instanceId,
                           out uint localMeshletIdx) {
-    // Search only the (instanceOffset, instanceCount) batch passed for this
-    // dispatch. For a single-pass cull over the whole scene, instanceOffset=0
-    // and instanceCount=totalInstances — the original behaviour.
-    for (uint k = 0; k < pc.instanceCount; ++k) {
-        uint i = pc.instanceOffset + k;
-        StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.instanceBufferSlot)];
-        uint4 packed          = asuint(buf[i * 6 + 4]);
-        uint meshlet_offset   = packed.x;
-        uint meshlet_count    = packed.y;
-        if (globalMeshletIdx >= meshlet_offset && globalMeshletIdx < meshlet_offset + meshlet_count) {
-            instanceId      = i;
-            localMeshletIdx = globalMeshletIdx - meshlet_offset;
-            return;
-        }
+    StructuredBuffer<float4> lookupBuf = g_buffers[NonUniformResourceIndex(pc.meshletToInstanceSlot)];
+    uint float4Idx = globalMeshletIdx / 4u;
+    uint component = globalMeshletIdx & 3u;
+    uint4 packed   = asuint(lookupBuf[float4Idx]);
+    instanceId = (component == 0u) ? packed.x
+               : (component == 1u) ? packed.y
+               : (component == 2u) ? packed.z
+                                   : packed.w;
+    if (instanceId == 0xFFFFFFFFu) {
+        localMeshletIdx = 0;
+        return;
     }
-    // No instance owns this meshlet — it is an orphaned range (e.g. a terrain
-    // patch retired-but-pending-reclamation whose GpuInstance is no longer in
-    // the scene buffer). Signal "not found" with UINT32_MAX so CSMain can
-    // discard the thread rather than falling back to instance 0 (the car).
-    instanceId      = 0xFFFFFFFFu;
-    localMeshletIdx = 0;
+    StructuredBuffer<float4> instBuf = g_buffers[NonUniformResourceIndex(pc.instanceBufferSlot)];
+    uint meshlet_offset = asuint(instBuf[instanceId * 6u + 4u]).x;
+    localMeshletIdx = globalMeshletIdx - meshlet_offset;
 }
 
 // --- Main ---

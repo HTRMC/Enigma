@@ -896,7 +896,7 @@ void Renderer::drawFrame() {
         const u32 terrainInstanceCount = totalInstanceCount - sceneInstanceCount;
         const u32 terrainMeshletCount  = totalMeshletCount - sceneMeshletCount;
 
-        m_gpuScene->upload(frame.commandBuffer, m_frameIndex);
+        m_gpuScene->upload(frame.commandBuffer, m_frameIndex, totalMeshletCount);
 
         m_indirectBuffer->reset_count(frame.commandBuffer);
 
