@@ -111,14 +111,14 @@ uint loadClusterIdx(uint cmdIndex) {
 }
 
 // Load the pageId for a cluster. The DAG buffer is a StructuredBuffer<float4>
-// in bindless slot pc.dagBufferBindlessIndex, 4 float4 per node (M4 widened
-// from 3 to carry maxError/parentMaxError — see
-// mp_cluster_cull.comp.hlsl::loadDagNode for the full layout). The pageId
-// is packed in m2.w low-24 bits.
+// in bindless slot pc.dagBufferBindlessIndex, 5 float4 per node (M4 widened
+// from 3 → 4 for maxError/parentMaxError; M4-fix widened from 4 → 5 for
+// parentCenter — see mp_cluster_cull.comp.hlsl::loadDagNode for the full
+// layout). The pageId is packed in m2.w low-24 bits.
 uint loadPageIdForCluster(uint clusterIdx) {
     if (clusterIdx >= pc.dagNodeCount) return 0xFFFFFFFFu;
     StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.dagBufferBindlessIndex)];
-    const uint base = clusterIdx * 4u;
+    const uint base = clusterIdx * 5u;
     float4 m2 = buf[base + 2u];
     const uint packed = asuint(m2.w);
     return packed & 0x00FFFFFFu;

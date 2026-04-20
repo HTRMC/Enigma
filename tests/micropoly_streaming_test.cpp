@@ -726,9 +726,10 @@ bool testFirstDagNodeAttach(TestEnv& env) {
 // Case 7: M3.3-deferred DAG SSBO — attachDagNodeBuffer ABI check
 // ---------------------------------------------------------------------------
 // Exercises the runtime-format DAG attach path:
-//   1) MpAssetReader::assembleRuntimeDagNodes() yields dagNodeCount × 64 B
-//      (M4: widened from 3 to 4 float4 per node to carry maxError +
-//      parentMaxError for screen-space-error traversal).
+//   1) MpAssetReader::assembleRuntimeDagNodes() yields dagNodeCount × 80 B
+//      (M4: widened from 3 → 4 float4 to carry maxError + parentMaxError;
+//       M4-fix: widened from 4 → 5 float4 to carry parentCenter for the
+//       group-coherent SSE LOD anchor that prevents cross-sibling flicker).
 //   2) MicropolyStreaming::attachDagNodeBuffer() succeeds on the staging
 //      upload + DEVICE_LOCAL fill.
 //   3) dagNodeBuffer() / dagNodeBufferBytes() are non-null/non-zero.
@@ -754,12 +755,13 @@ bool testDagNodeAttach(TestEnv& env) {
         return false;
     }
 
-    // Each runtime node is 64 bytes = 4×float4 (M4 widening: m3 carries
-    // maxError + parentMaxError for screen-space-error traversal). Sanity-
-    // check the type size so a future header tweak doesn't silently break
-    // the upload contract.
-    static_assert(sizeof(MpAssetReader::RuntimeDagNode) == 64u,
-                  "RuntimeDagNode must be 64 bytes (4×float4) to match shader");
+    // Each runtime node is 80 bytes = 5×float4 (M4-fix widening: m4 carries
+    // parentCenter.xyz so the SSE LOD test uses a group-shared anchor —
+    // eliminates cross-sibling flicker at cut boundaries). Sanity-check
+    // the type size so a future header tweak doesn't silently break the
+    // upload contract.
+    static_assert(sizeof(MpAssetReader::RuntimeDagNode) == 80u,
+                  "RuntimeDagNode must be 80 bytes (5×float4) to match shader");
 
     const u8*  dagBytes = reinterpret_cast<const u8*>(runtimeDag->data());
     const auto dagByteCount = runtimeDag->size() * sizeof(MpAssetReader::RuntimeDagNode);

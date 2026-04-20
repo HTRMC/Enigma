@@ -480,8 +480,21 @@ MpAssetReader::assembleRuntimeDagNodes() const {
             n.m3[0] = selfError;
             const MpDagNode& onDisk = dag[globalIdx];
             f32 parentError;
+            // M4-fix: parentCenter is the group-coherent LOD anchor. Every
+            // child in a DAG group shares the same parent, so projecting the
+            // SSE test at the parent's bounds centre guarantees siblings flip
+            // LOD together — eliminates cracks + per-frame blink-in/out.
+            // Per-disk MpDagNode carries `center[3]` (float) for the cluster's
+            // own bounds, so the parent lookup reuses the same dag[] lookup
+            // already used for parentError.
+            f32 parentCx = cd.boundsSphere[0];
+            f32 parentCy = cd.boundsSphere[1];
+            f32 parentCz = cd.boundsSphere[2];
             if (onDisk.parentGroupId == UINT32_MAX) {
                 parentError = std::numeric_limits<f32>::max();
+                // Root: no coarser parent. Keep parentCenter = own centre so
+                // the projection stays finite; the shader's root fallback
+                // (parentError == FLT_MAX) handles the accept decision.
             } else if (onDisk.parentGroupId < dag.size()) {
                 parentError = dag[onDisk.parentGroupId].maxError;
                 // Defence-in-depth: a parent's error must be >= its own
@@ -494,15 +507,36 @@ MpAssetReader::assembleRuntimeDagNodes() const {
                 if (!std::isfinite(parentError) || parentError < selfError) {
                     parentError = selfError;
                 }
+                // Pull the parent's bounds centre from the on-disk DAG node.
+                // On-disk MpDagNode stores centre as boundsSphere[0..2]
+                // (boundsSphere[3] is the radius) — see MpAssetFormat.h.
+                const MpDagNode& parentNode = dag[onDisk.parentGroupId];
+                const f32 pcx = parentNode.boundsSphere[0];
+                const f32 pcy = parentNode.boundsSphere[1];
+                const f32 pcz = parentNode.boundsSphere[2];
+                // Sanitize: non-finite parent centre falls back to the
+                // cluster's own centre. Crafted asset defence-in-depth — the
+                // baker never emits non-finite bounds.
+                if (std::isfinite(pcx) && std::isfinite(pcy) && std::isfinite(pcz)) {
+                    parentCx = pcx;
+                    parentCy = pcy;
+                    parentCz = pcz;
+                }
             } else {
                 // Corrupt parent index — treat as root so the shader's
                 // fallback path emits this cluster rather than silently
-                // dropping it.
+                // dropping it. parentCenter stays at own centre.
                 parentError = std::numeric_limits<f32>::max();
             }
             n.m3[1] = parentError;
             n.m3[2] = 0.0f;
             n.m3[3] = 0.0f;
+
+            // m4: parentCenter.xyz — group-coherent LOD anchor (M4-fix).
+            n.m4[0] = parentCx;
+            n.m4[1] = parentCy;
+            n.m4[2] = parentCz;
+            n.m4[3] = 0.0f;
         }
     }
 

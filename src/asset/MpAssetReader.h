@@ -108,7 +108,7 @@ public:
     // at asset load, so the copy cost is negligible. Empty when not open.
     std::vector<u32> firstDagNodeIndices() const;
 
-    // Runtime-format DAG node for GPU upload. 64 bytes = 4×float4, matching
+    // Runtime-format DAG node for GPU upload. 80 bytes = 5×float4, matching
     // the shader's `MpDagNode` layout in mp_cluster_cull.comp.hlsl::loadDagNode:
     //   float4 m0 = (center.xyz, radius)           — from ClusterOnDisk.boundsSphere
     //   float4 m1 = (coneApex.xyz, coneCutoff)     — from ClusterOnDisk.cone*
@@ -121,6 +121,19 @@ public:
     //                       screen-space-error "emit when parent fails" test
     //                       always accepts a root. M4 widening over the
     //                       previous 48 B layout.
+    //   float4 m4 = (parentCenter.xyz, 0)          — M4-fix widening over 64 B.
+    //     * parentCenter = bounds centre of the coarser parent cluster.
+    //                      Nanite's group-coherent LOD rule requires every
+    //                      child in a DAG group to project its screen-space
+    //                      error at the PARENT'S centre (one parent per group,
+    //                      shared by every child), so siblings compute
+    //                      identical errSelf / errParent and flip LOD
+    //                      together — no cracks or temporal flicker at
+    //                      group boundaries. For roots (parentGroupId ==
+    //                      UINT32_MAX) we copy the node's own centre so
+    //                      the SSE projection stays finite; combined with
+    //                      parentMaxError == FLT_MAX the root fallback in
+    //                      the cull shader still emits the root cluster.
     //
     // On-disk MpDagNode (36 B) carries bounds/parent/pageId + maxError; cone
     // data lives inside each page's ClusterOnDisk entries (76 B each). The
@@ -135,9 +148,10 @@ public:
         f32 m1[4];  // coneApex.xyz, coneCutoff
         f32 m2[4];  // coneAxis.xyz, asfloat(pageId | lodLevel<<24)
         f32 m3[4];  // maxError, parentMaxError, 0, 0
+        f32 m4[4];  // parentCenter.xyz, 0  — group-coherent LOD anchor (M4-fix)
     };
 
-    // Assemble the full 64 B runtime DAG node array (one entry per
+    // Assemble the full 80 B runtime DAG node array (one entry per
     // `MpDagNode` in the on-disk DAG section). Called exactly once at asset
     // load by MicropolyStreaming::attachDagNodeBuffer. Decompresses every
     // page via `fetchPage()` + reuses a single scratch buffer across pages
@@ -145,7 +159,7 @@ public:
     // bounds mismatch, zstd failure, or not-open.
     //
     // Resulting size: header_.dagNodeCount * sizeof(RuntimeDagNode)
-    //                 == dagNodeCount * 64 B.
+    //                 == dagNodeCount * 80 B.
     std::expected<std::vector<RuntimeDagNode>, MpReadError>
     assembleRuntimeDagNodes() const;
 

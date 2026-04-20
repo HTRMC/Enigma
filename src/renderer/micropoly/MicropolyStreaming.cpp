@@ -975,11 +975,13 @@ void MicropolyStreaming::detachPageFirstDagNodeBuffer_() {
 // M3.3-deferred DAG node buffer (attach / detach)
 // ---------------------------------------------------------------------------
 // Wire format: caller passes bytes assembled by
-// MpAssetReader::assembleRuntimeDagNodes() — one 48-byte runtime node per
-// on-disk MpDagNode, containing center/radius + coneApex/coneCutoff +
-// coneAxis/packed(pageId|lodLevel<<24). Staging upload mirrors the M4.5
-// pageFirstDagNode pattern: transient staging buffer → DEVICE_LOCAL SSBO,
-// waited on via a one-shot fence so the buffer is populated before return.
+// MpAssetReader::assembleRuntimeDagNodes() — one 80-byte runtime node per
+// on-disk MpDagNode (5×float4: center/radius, coneApex/coneCutoff,
+// coneAxis/packed(pageId|lodLevel<<24), maxError/parentMaxError,
+// parentCenter — M4-fix widened for group-coherent SSE LOD). Staging upload
+// mirrors the M4.5 pageFirstDagNode pattern: transient staging buffer →
+// DEVICE_LOCAL SSBO, waited on via a one-shot fence so the buffer is
+// populated before return.
 
 bool MicropolyStreaming::attachDagNodeBuffer(std::span<const u8> runtimeDagNodeBytes) {
     // Detach-before-reattach on size change. A re-attach at the same padded

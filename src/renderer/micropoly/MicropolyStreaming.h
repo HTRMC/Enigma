@@ -401,12 +401,13 @@ private:
     u64            pageFirstDagNodeBufferBytes_  = 0ull;
 
     // M3.3-deferred DAG node SSBO. DEVICE_LOCAL, populated once per asset
-    // load via a transient staging buffer. Layout: dagNodeCount × 48 B
-    // (3×float4 per node) matching the shader's MpDagNode format. The
-    // source array is assembled by MpAssetReader::assembleRuntimeDagNodes()
-    // which joins on-disk MpDagNode.pageId with per-page ClusterOnDisk cone
-    // + bounds data (cone fields are NOT in the 36 B on-disk MpDagNode —
-    // they live in the 76 B ClusterOnDisk entries inside each page).
+    // load via a transient staging buffer. Layout: dagNodeCount × 80 B
+    // (5×float4 per node — M4-fix widening) matching the shader's
+    // MpDagNode format. The source array is assembled by
+    // MpAssetReader::assembleRuntimeDagNodes() which joins on-disk
+    // MpDagNode.pageId + parent bounds with per-page ClusterOnDisk cone +
+    // bounds data (cone fields are NOT in the 36 B on-disk MpDagNode — they
+    // live in the 76 B ClusterOnDisk entries inside each page).
     VkBuffer       dagNodeBuffer_       = VK_NULL_HANDLE;
     VmaAllocation  dagNodeAlloc_        = nullptr;
     u32            dagNodeBindlessSlot_ = UINT32_MAX;

@@ -89,15 +89,17 @@ float4 PSMain(VSOut vs) : SV_Target {
         return float4(1.0, 0.0, 1.0, 1.0);
     }
 
-    // MpDagNode GPU layout: 4 float4 per node (M4 widening — see
+    // MpDagNode GPU layout: 5 float4 per node (M4 widening → m3 for SSE
+    // errors; M4-fix widening → m4 for parentCenter — see
     // mp_cluster_cull.comp.hlsl::loadDagNode for the full stride rationale).
     //   float4 m0 = {center.xyz,    radius}
     //   float4 m1 = {coneApex.xyz,  coneCutoff}
     //   float4 m2 = {coneAxis.xyz,  asfloat(packed)} where
     //               packed = pageId(low 24) | lodLevel(high 8).
     //   float4 m3 = {maxError, parentMaxError, _, _}  (not needed here)
+    //   float4 m4 = {parentCenter.xyz, _}             (not needed here)
     StructuredBuffer<float4> dag = g_buffers[NonUniformResourceIndex(pc.dagBufferBindless)];
-    float4 m2 = dag[clusterIdx * 4u + 2u];
+    float4 m2 = dag[clusterIdx * 5u + 2u];
     uint   packedWord = asuint(m2.w);
     uint   lodLevel   = (packedWord >> 24u) & 0xFFu;
 

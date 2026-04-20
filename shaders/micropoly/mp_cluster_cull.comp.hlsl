@@ -87,17 +87,23 @@ struct PushBlock {
 // runtime uploads these as a DEVICE_LOCAL SSBO; the cull pass treats the
 // whole-node SSBO as a flat array indexed by globalClusterIdx.
 //
-// Layout (64 bytes per node = 4 float4):
+// Layout (80 bytes per node = 5 float4):
 //   float4 m0 = {boundsCenter.xyz, boundsRadius}
 //   float4 m1 = {coneApex.xyz, coneCutoff}
 //   float4 m2 = {coneAxis.xyz, asfloat(packed)}
 //   float4 m3 = {maxError, parentMaxError, 0, 0}
+//   float4 m4 = {parentCenter.xyz, 0}    — M4-fix: group-coherent LOD anchor
 //   where packed = pageId<<0 (low 24b) | lodLevel<<24 (high 8b).
 //
 // pageId / lodLevel accessors pull from m2.w. maxError / parentMaxError in
 // m3.xy drive the M4 screen-space-error traversal (see CSMain below).
 // parentMaxError == FLT_MAX marks a root cluster (no coarser parent exists);
 // the SSE test falls back to "emit when own error is above threshold".
+// parentCenter (m4.xyz) is the coarser parent's bounds centre, shared by
+// every child in the same DAG group — projecting the SSE test there makes
+// siblings flip LOD as a unit. For roots the assembler copies the node's
+// own centre so the projection stays finite (shader's root fallback still
+// emits the cluster).
 struct MpDagNode {
     float3 center;
     float  radius;
@@ -108,15 +114,17 @@ struct MpDagNode {
     uint   lodLevel;
     float  maxError;        // M4: world-space simplification error at this LOD
     float  parentMaxError;  // M4: error of the next-coarser parent, or FLT_MAX for roots
+    float3 parentCenter;    // M4-fix: parent's bounds centre (group-coherent SSE anchor)
 };
 
 MpDagNode loadDagNode(uint idx) {
     StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.dagBufferBindlessIndex)];
-    const uint base = idx * 4u;
+    const uint base = idx * 5u;
     float4 m0 = buf[base + 0u];
     float4 m1 = buf[base + 1u];
     float4 m2 = buf[base + 2u];
     float4 m3 = buf[base + 3u];
+    float4 m4 = buf[base + 4u];
 
     MpDagNode n;
     // Engine-wide -90° Y correction: bake writes positions in the
@@ -127,14 +135,18 @@ MpDagNode loadDagNode(uint idx) {
     // raster paths (mp_raster.mesh.hlsl, sw_raster*.comp.hlsl). Without
     // this, backface cone cull misjudges orientation and most 'visible'
     // survivors end up occluded by their own back-facing neighbours.
-    const float3 centerRaw   = m0.xyz;
-    const float3 coneApexRaw = m1.xyz;
-    const float3 coneAxisRaw = m2.xyz;
-    n.center     = float3(-centerRaw.z,   centerRaw.y,   centerRaw.x);
-    n.radius     = m0.w;
-    n.coneApex   = float3(-coneApexRaw.z, coneApexRaw.y, coneApexRaw.x);
-    n.coneCutoff = m1.w;
-    n.coneAxis   = float3(-coneAxisRaw.z, coneAxisRaw.y, coneAxisRaw.x);
+    // parentCenter gets the same rotation as center so the SSE projection
+    // (which uses cam.view, also in engine space) stays consistent.
+    const float3 centerRaw       = m0.xyz;
+    const float3 coneApexRaw     = m1.xyz;
+    const float3 coneAxisRaw     = m2.xyz;
+    const float3 parentCenterRaw = m4.xyz;
+    n.center       = float3(-centerRaw.z,       centerRaw.y,       centerRaw.x);
+    n.radius       = m0.w;
+    n.coneApex     = float3(-coneApexRaw.z,     coneApexRaw.y,     coneApexRaw.x);
+    n.coneCutoff   = m1.w;
+    n.coneAxis     = float3(-coneAxisRaw.z,     coneAxisRaw.y,     coneAxisRaw.x);
+    n.parentCenter = float3(-parentCenterRaw.z, parentCenterRaw.y, parentCenterRaw.x);
     const uint packed = asuint(m2.w);
     n.pageId         = packed & 0x00FFFFFFu;           // low 24 bits
     n.lodLevel       = (packed >> 24u) & 0xFFu;        // high 8 bits
@@ -539,7 +551,19 @@ void CSMain(uint3 dtid : SV_DispatchThreadID) {
     //    available. This handles non-simplifiable roots (e.g. BMW's tiny
     //    disconnected shells) cleanly.
     {
-        float4 viewPos = mul(cam.view, float4(node.center, 1.0f));
+        // M4-fix: project BOTH errSelf and errParent at the PARENT'S centre.
+        // Nanite's group-coherent LOD rule: every child in the same DAG group
+        // shares one parent, so projecting both errors at the parent's
+        // bounds centre guarantees that siblings compute identical errSelf
+        // and errParent at any camera pose. Siblings therefore flip LOD
+        // together — no cracks, no temporal blink-in/out at cut boundaries.
+        // Using the cluster's own centre (the previous code) let siblings
+        // disagree by tiny depth differences, which produced the "parts
+        // going missing / blinking" symptom. For roots the assembler sets
+        // parentCenter = own centre so the projection is still finite; the
+        // root fallback below then emits the cluster on the `errSelf >
+        // threshold` path when parentMaxError == FLT_MAX.
+        float4 viewPos = mul(cam.view, float4(node.parentCenter, 1.0f));
         const float depth = max(-viewPos.z, 1.0e-4f);
         const float fY    = -cam.proj[1][1];
         const float halfH = 0.5f * (float)pc.screenHeight;

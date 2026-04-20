@@ -112,14 +112,15 @@ CameraData loadCamera(uint slot) {
 }
 
 // --- Dag node load — pageId is packed in m2.w low 24 bits ------------------
-// MpDagNode stride is 4 float4 (see mp_cluster_cull.comp.hlsl::loadDagNode —
-// M4 widened from 3 to 4 float4 to carry maxError / parentMaxError for
-// screen-space-error traversal). The SW path only needs the pageId, which
-// still lives in m2.w, so the read is unchanged save for the stride.
+// MpDagNode stride is 5 float4 (see mp_cluster_cull.comp.hlsl::loadDagNode —
+// M4 widened from 3 → 4 float4 for maxError/parentMaxError; M4-fix widened
+// from 4 → 5 float4 to carry parentCenter as the group-coherent SSE LOD
+// anchor). The SW path only needs the pageId, which still lives in m2.w,
+// so the read is unchanged save for the stride.
 uint loadPageIdForCluster(uint clusterIdx) {
     if (clusterIdx >= pc.dagNodeCount) return 0xFFFFFFFFu;
     StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.dagBufferBindless)];
-    const uint base = clusterIdx * 4u;
+    const uint base = clusterIdx * 5u;
     float4 m2 = buf[base + 2u];
     const uint packed = asuint(m2.w);
     return packed & 0x00FFFFFFu;
