@@ -51,7 +51,15 @@
 // handful of tiles and blow past the per-tile cap — can spill without
 // dropping. Drops produced 8x8-pixel "tile-shaped holes" that got worse
 // as the car shrank.
-#define MP_SW_SPILL_CAP    1048576u
+// Raised 1M → 16M (128 MB). 1M was still hitting on dense BMW tiles:
+// at ~5 tile overlaps per triangle × 16k clusters × ~80 tris/cluster,
+// global bin-entry pressure is ~6M, of which the densest 20% spill.
+// Once the global counter exceeded 1M, subsequent entries dropped,
+// and because atomic-add ordering is non-deterministic per frame,
+// different triangles dropped each frame → tile-shaped holes that
+// flickered. 16M covers the worst BMW close-up without touching the
+// VRAM budget.
+#define MP_SW_SPILL_CAP    16777216u
 
 // --- Bindless resource arrays ---------------------------------------------
 [[vk::binding(2, 0)]]

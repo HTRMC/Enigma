@@ -64,7 +64,10 @@
 // lists can absorb small-on-screen BMW without dropping at the tile
 // boundary (symptom: 8x8 square holes in the mesh that get worse as
 // the model shrinks).
-#define MP_SW_SPILL_CAP    1048576u
+// Must mirror sw_raster.comp.hlsl. Raised 1M → 16M so dense BMW tiles
+// don't overflow the global spill counter and drop per-frame non-
+// deterministically (which showed up as tile-shaped flickering holes).
+#define MP_SW_SPILL_CAP    16777216u
 
 // Clusters carry up to 128 triangles on disk; 64 threads cover 2 triangles
 // each at worst when iterating the triangle list.

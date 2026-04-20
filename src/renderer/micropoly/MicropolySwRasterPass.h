@@ -88,7 +88,12 @@ inline constexpr u32 kMpSwTileBinCap = 1024u;
 // dropping. Drops produced 8x8-pixel "tile-shaped holes" that worsened
 // as the model shrank. Must mirror MP_SW_SPILL_CAP in
 // sw_raster.comp.hlsl and sw_raster_bin.comp.hlsl.
-inline constexpr u32 kMpSwSpillCap   = 1048576u;
+// Raised 1M → 16M (128 MB spillBuffer) because 1M was still hitting on
+// dense BMW tiles and dropping triangles per-frame non-deterministically
+// (atomic-add ordering), showing up as tile-shaped holes that flickered.
+// Must mirror MP_SW_SPILL_CAP in sw_raster.comp.hlsl and
+// sw_raster_bin.comp.hlsl.
+inline constexpr u32 kMpSwSpillCap   = 16777216u;
 
 enum class MicropolySwRasterErrorKind {
     MeshShadersUnsupported,
