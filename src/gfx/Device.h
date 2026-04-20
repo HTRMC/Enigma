@@ -4,6 +4,7 @@
 
 #include <volk.h>
 
+#include <memory>
 #include <optional>
 
 namespace enigma::gfx {
@@ -30,7 +31,10 @@ struct RequiredFeatures {
     VkPhysicalDeviceVulkan13Features  v13;
 
     // Populate structs and wire the pNext chain. After this call
-    // features2.pNext points at v11, v11.pNext at v12, etc.
+    // features2.pNext points at v11, v11.pNext at v12, etc. The Vulkan 1.2
+    // promoted fields (e.g. shaderBufferInt64Atomics) are surfaced through
+    // v12 directly — do NOT chain the legacy VkPhysicalDeviceShaderAtomicInt64Features
+    // struct here, VVL rejects that as duplicate feature coverage.
     void requestAllRequired();
 };
 
@@ -46,6 +50,35 @@ public:
     Device& operator=(const Device&) = delete;
     Device(Device&&)                 = delete;
     Device& operator=(Device&&)      = delete;
+
+    // --- Test-only adopt path (M2.4 micropoly streaming tests) ---
+    //
+    // Creates a Device instance from already-existing Vulkan handles. Used by
+    // micropoly unit/integration tests that bring up their own headless bundle
+    // and want to pass it into streaming code as a real `gfx::Device` reference
+    // (see Allocator::adopt precedent in M2.2).
+    //
+    // Ownership: the adopted Device does NOT destroy `physical` OR the logical
+    // `device` — the caller retains full ownership of both handles. This lets
+    // test harnesses keep their own VulkanBundle destructor logic unchanged
+    // (destroy instance/device/vma in their established order) while still
+    // giving streaming code a real `gfx::Device` reference. `transferQueueFamily`
+    // is optional; when set it also populates transferQueue/transferQueueFamily
+    // accessors so MicropolyStreaming's transfer-queue wiring can exercise a
+    // real queue.
+    //
+    // No feature probes are performed — the adopter is responsible for having
+    // enabled whatever features it needs (e.g. timelineSemaphore).
+    struct AdoptDesc {
+        VkPhysicalDevice physical            = VK_NULL_HANDLE;
+        VkDevice         device              = VK_NULL_HANDLE;
+        VkQueue          graphicsQueue       = VK_NULL_HANDLE;
+        u32              graphicsQueueFamily = 0u;
+        VkQueue          transferQueue       = VK_NULL_HANDLE;
+        u32              transferQueueFamily = 0u;
+        bool             hasTransferQueue    = false;
+    };
+    static std::unique_ptr<Device> adopt(const AdoptDesc& desc);
 
     VkPhysicalDevice physical() const { return m_physical; }
     VkDevice         logical()  const { return m_device;   }
@@ -73,11 +106,39 @@ public:
     // True when VkPhysicalDeviceFeatures::fillModeNonSolid was enabled (wireframe debug).
     bool fillModeNonSolidSupported() const { return m_fillModeNonSolidSupported; }
 
+    // True when BOTH VkPhysicalDeviceVulkan12Features::shaderBufferInt64Atomics
+    // AND shaderSharedInt64Atomics were advertised and enabled. Both are
+    // required for the micropoly software-raster path: buffer atomics for
+    // the vis-buffer atomic-min write, shared atomics for workgroup-level
+    // tile reductions. Probed-only here, not mandatory for device creation.
+    // Gate lives at Device.cpp §305-314.
+    bool supportsShaderAtomicInt64() const { return m_shaderAtomicInt64Supported; }
+
+    // True when VkPhysicalDeviceFeatures::sparseBinding AND sparseResidencyImage2D
+    // were advertised. Required for VSM shadow pages and micropoly page-streamed
+    // geometry residency; optional.
+    bool supportsSparseResidency() const { return m_sparseResidencySupported; }
+
+    // True when VK_EXT_shader_image_atomic_int64 was advertised (SPV_EXT_shader_image_int64).
+    // Required for packed 64-bit vis image atomic-min on R32G32_UINT alias when
+    // R64_UINT is unavailable.
+    bool supportsShaderImageInt64() const { return m_shaderImageInt64Supported; }
+
+    // True when the RT extension trio (acceleration_structure + ray_tracing_pipeline
+    // + deferred_host_operations) was enabled at device creation. Redundant with
+    // `gpuTier() >= GpuTier::Recommended` today but kept explicit so micropoly
+    // code paths do not couple to the VRAM-driven tier heuristic.
+    bool supportsRayTracing() const { return m_rtEnabled; }
+
     const VkPhysicalDeviceProperties& properties() const { return m_properties; }
 
 private:
     void    pickPhysicalDevice(VkInstance instance);
     GpuTier detectTier() const;
+
+    // Private ctor used by adopt() — fills members from an externally-owned
+    // VkDevice bundle. See Device::adopt() in .cpp for the contract.
+    explicit Device(const AdoptDesc& desc);
 
     VkPhysicalDevice            m_physical            = VK_NULL_HANDLE;
     VkDevice                    m_device              = VK_NULL_HANDLE;
@@ -90,7 +151,16 @@ private:
     GpuTier                     m_gpuTier             = GpuTier::Min;
     bool                        m_meshShadersEnabled  = false;
     bool                        m_fillModeNonSolidSupported = false;
+    bool                        m_shaderAtomicInt64Supported = false;
+    bool                        m_sparseResidencySupported   = false;
+    bool                        m_shaderImageInt64Supported  = false;
+    bool                        m_rtEnabled                  = false;
     VkPhysicalDeviceProperties  m_properties{};
+
+    // When true, the destructor does NOT call vkDestroyDevice — the logical
+    // device handle was adopted from a caller who retains ownership. Only
+    // set by the AdoptDesc private ctor.
+    bool m_externallyOwnedDevice = false;
 };
 
 } // namespace enigma::gfx

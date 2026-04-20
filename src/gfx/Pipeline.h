@@ -75,6 +75,13 @@ public:
         // graphics-specific fields above are ignored in that case.
         VkShaderModule        computeShader             = VK_NULL_HANDLE;
         const char*           computeEntryPoint         = nullptr;
+        // Optional specialization constants for the compute stage. Keep
+        // the pointers live for the duration of the constructor call —
+        // Vulkan copies the data at vkCreateComputePipelines time, so
+        // the caller may free immediately after the Pipeline ctor returns.
+        // When computeSpecInfo is null (the default), no VkSpecializationInfo
+        // is attached and the shader runs with its DXC-declared defaults.
+        const VkSpecializationInfo* computeSpecInfo     = nullptr;
         // Alpha blending for all color attachments (src_alpha / one_minus_src_alpha).
         // When false (default), all attachments use opaque overwrite.
         bool                  blendEnable               = false;

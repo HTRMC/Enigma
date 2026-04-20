@@ -15,6 +15,10 @@
 // Depth convention: reverse-Z (far = 0, near = 1).
 
 #include "common.hlsl"
+#ifdef MP_ENABLE
+#include "micropoly/mp_vis_pack.hlsl"
+#include "micropoly/mp_cluster_layout.hlsl"
+#endif
 
 // --- Bindless resource arrays ---
 [[vk::binding(0, 0)]]
@@ -22,6 +26,15 @@ Texture2D g_textures[] : register(t0, space0);
 
 [[vk::binding(1, 0)]]
 RWTexture2D<float4> g_storageImages[] : register(u0, space0);
+
+// M3.4 — aliased view of the same bindless storage-image slot space as a
+// 64-bit R64_UINT array. Only declared when MP_ENABLE is defined so the
+// =false DXC compile never sees Int64 types and the SPIR-V is byte-identical
+// to the pre-M3.4 golden (Principle 1 acceptance gate).
+#ifdef MP_ENABLE
+[[vk::binding(1, 0)]]
+RWTexture2D<uint64_t> g_storageImages64[] : register(u0, space0);
+#endif
 
 [[vk::binding(2, 0)]]
 StructuredBuffer<float4> g_buffers[] : register(t0, space1);
@@ -49,6 +62,26 @@ struct PushBlock {
     uint screenWidth;
     uint screenHeight;
     uint meshletToInstanceSlot; // StructuredBuffer<float4> — u32 instanceId per globalMeshletId
+    // M3.4 — Bindless slot of the 64-bit Micropoly vis image. Only
+    // declared when MP_ENABLE is defined so the =false shader's push
+    // constant layout is byte-identical to the pre-M3.4 golden (Principle 1).
+    // The C++ side pushes the full MP-enabled block size for both variants;
+    // Vulkan ignores the trailing bytes that the shader's layout doesn't
+    // declare.
+#ifdef MP_ENABLE
+    uint vis64BufferSlot;
+    // M5 material resolution: bindless slots needed to decode an mp sample's
+    // geometry (DAG node -> page -> on-disk cluster -> vertices) and reproject
+    // it. Appended after vis64BufferSlot so the MP-disabled prefix is still
+    // byte-identical to the pre-M3.4 golden.
+    uint mpDagBufferSlot;            // StructuredBuffer<float4> MpDagNode
+    uint mpPageToSlotSlot;           // pageId -> slotIndex
+    uint mpPageCacheSlot;            // entire page pool
+    uint mpPageFirstDagNodeSlot;     // pageId -> firstDagNodeIdx
+    uint mpPageSlotBytes;            // PageCache slot byte stride
+    uint mpPageCount;                // pageToSlot bounds check
+    uint mpDagNodeCount;             // DAG bounds check
+#endif
 };
 
 [[vk::push_constant]] PushBlock pc;
@@ -270,6 +303,325 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
     // Read visibility buffer (R32_UINT).
     Texture2D visTex = g_textures[NonUniformResourceIndex(pc.visBufferSlot)];
     uint visPacked = asuint(visTex.Load(int3(pixelCoord, 0)).r);
+
+    // M3.4 — Micropoly merge. Gated by the MP_ENABLE preprocessor define so
+    // the =false DXC compile never sees Int64 types and produces SPIR-V
+    // byte-identical to the pre-M3.4 baseline (Principle 1). When compiled
+    // with -D MP_ENABLE=1 we peek at the 64-bit vis image populated by
+    // mp_raster.{task,mesh}.hlsl, compare the encoded depth to the 32-bit
+    // meshlet vis, and if the micropoly sample is closer we stamp a debug
+    // magenta (full material resolution is M5 scope).
+#ifdef MP_ENABLE
+    {
+        const uint64_t mpPacked =
+            g_storageImages64[NonUniformResourceIndex(pc.vis64BufferSlot)][pixelCoord];
+        if (mpPacked != kMpVisEmpty) {
+            // Reverse-Z: larger uint depth = nearer, use `>` comparator.
+            // The depth lives in the high 32 bits of the packed vis value
+            // (see mp_vis_pack.hlsl banner). IEEE-754 bitwise ordering of
+            // non-negative float32 matches numeric ordering, so comparing
+            // the uint representations is equivalent to comparing the
+            // floats directly but cheaper.
+            const uint depth32FromMp    = (uint)(mpPacked >> 32);
+            const float meshletDepth    = g_textures[NonUniformResourceIndex(pc.depthBufferSlot)]
+                                            .Load(int3(pixelCoord, 0)).r;
+            const uint depth32FromMesh  = asuint(meshletDepth);
+            const bool meshletInvalid   = (visPacked == INVALID_VIS);
+            // mp vs glTF depth resolution: mp positions come from the same
+            // world coordinates as glTF (bake folds world transform + the
+            // engine-wide -90° Y correction is applied in both paths), but
+            // meshlet simplification (even at lodLevel==0 the bake can
+            // shift positions by float rounding) and independent fragment
+            // interpolation produce depths that differ by a few ulps at
+            // matching surfaces. A strict `>` compare loses on every near-
+            // tie, which silenced ~99% of mp fragments on BMW. Allow mp
+            // to be up to a small relative epsilon farther than glTF so
+            // co-located surfaces both survive; genuine occluders (foreground
+            // glTF walls) still dominate because their depth is strictly
+            // larger than mp by well more than epsilon.
+            // mp wins when glTF has nothing at this pixel, OR when mp's
+            // depth is within 1e-4 of glTF (tolerate simplification ulp
+            // drift — strict `>` silenced ~99% of mp fragments on BMW).
+            // Genuine foreground glTF occluders still dominate because
+            // their depth is larger than mp by well more than epsilon.
+            const float mpDepthF   = asfloat(depth32FromMp);
+            const float kDepthEps  = 1.0e-4f;
+            const bool mpWins = meshletInvalid
+                              || (mpDepthF + kDepthEps >= meshletDepth);
+            if (mpWins) {
+                // M4.1 — vis-pack v2: 4-output unpack (depth32, rasterClass,
+                // clusterId, triId). rasterClass is unused here; the M4.6
+                // DebugMode::MicropolyRasterClass overlay reads it elsewhere.
+                uint mpDepth32; uint mpRasterClass;
+                uint mpClusterId; uint mpTriId;
+                UnpackMpVis64(mpPacked, mpDepth32, mpRasterClass,
+                              mpClusterId, mpTriId);
+                (void)mpRasterClass;
+
+                // M5 material resolution. Mirrors mp_cluster_cull::loadDagNode
+                // + sw_raster{,_bin}.comp.hlsl's page->cluster->vertex walk.
+                // All lookups are defensive — any out-of-range value falls
+                // back to writing a neutral G-buffer sample so the engine's
+                // lighting pass treats the pixel as "something is here" rather
+                // than stamping garbage.
+                //
+                // Step 1: load the DAG node (3 float4 = 48 B per node), apply
+                // the engine-wide -90° Y correction to its positional data so
+                // the cluster's bounds centre/cone match the rendered
+                // geometry (the HW + SW raster paths already do the same).
+                if (mpClusterId >= pc.mpDagNodeCount) return;
+                StructuredBuffer<float4> dagBuf =
+                    g_buffers[NonUniformResourceIndex(pc.mpDagBufferSlot)];
+                const uint dagBase = mpClusterId * 3u;
+                float4 dm0 = dagBuf[dagBase + 0u];
+                // dm1 + dm2 carry cone data that the material pass doesn't
+                // need beyond the pageId packed in dm2.w.
+                float4 dm2 = dagBuf[dagBase + 2u];
+                const uint pageId = asuint(dm2.w) & 0x00FFFFFFu;
+                (void)dm0;
+                if (pageId >= pc.mpPageCount) return;
+
+                // Step 2: resolve the resident page slot + local cluster idx.
+                StructuredBuffer<float4> p2sBuf =
+                    g_buffers[NonUniformResourceIndex(pc.mpPageToSlotSlot)];
+                const uint p2sFloat4 = pageId >> 2u;
+                const uint p2sComp   = pageId & 3u;
+                uint4 p2sPacked = asuint(p2sBuf[p2sFloat4]);
+                uint slotIndex;
+                if      (p2sComp == 0u) slotIndex = p2sPacked.x;
+                else if (p2sComp == 1u) slotIndex = p2sPacked.y;
+                else if (p2sComp == 2u) slotIndex = p2sPacked.z;
+                else                    slotIndex = p2sPacked.w;
+                if (slotIndex == 0xFFFFFFFFu) return;
+
+                StructuredBuffer<float4> fdnBuf =
+                    g_buffers[NonUniformResourceIndex(pc.mpPageFirstDagNodeSlot)];
+                uint4 fdnPacked = asuint(fdnBuf[p2sFloat4]);
+                uint firstDagIdx;
+                if      (p2sComp == 0u) firstDagIdx = fdnPacked.x;
+                else if (p2sComp == 1u) firstDagIdx = fdnPacked.y;
+                else if (p2sComp == 2u) firstDagIdx = fdnPacked.z;
+                else                    firstDagIdx = fdnPacked.w;
+                if (mpClusterId < firstDagIdx) return;
+                const uint localClusterIdx = mpClusterId - firstDagIdx;
+
+                // Step 3: read the ClusterOnDisk header for this cluster. The
+                // page pool is one big RWByteAddressBuffer; each slot starts
+                // at slotIndex * mpPageSlotBytes and carries:
+                //   PagePayloadHeader (16 B: clusterCount, version, pad, pad)
+                //   ClusterOnDisk[clusterCount] (76 B each)
+                //   vertex blob (32 B/vertex)
+                //   triangle blob (3 B/triangle)
+                RWByteAddressBuffer pageBuf =
+                    g_rwBuffers[NonUniformResourceIndex(pc.mpPageCacheSlot)];
+                const uint pageByteOffset = slotIndex * pc.mpPageSlotBytes;
+                const uint clusterOnDiskOff =
+                    MP_PAGE_PAYLOAD_HEADER_BYTES
+                  + localClusterIdx * MP_CLUSTER_ON_DISK_STRIDE;
+                uint4 cFields = pageBuf.Load4(pageByteOffset + clusterOnDiskOff);
+                const uint vertexCount          = cFields.x;
+                const uint triangleCount        = cFields.y;
+                const uint vertexOffsetInBlob   = cFields.z;
+                const uint triangleOffsetInBlob = cFields.w;
+                if (vertexCount == 0u || triangleCount == 0u) return;
+                if (mpTriId >= triangleCount) return;
+
+                // Step 4: locate the vertex + triangle blob starts. Mirrors
+                // the same loop in sw_raster.comp.hlsl::pageTriangleBlobStart
+                // — multi-cluster pages concatenate vertex blobs back-to-back
+                // so we sum every ClusterOnDisk.vertexCount in this page.
+                uint pageClusterCount = pageBuf.Load(pageByteOffset + 0u);
+                if (pageClusterCount > 64u) pageClusterCount = 64u;
+                const uint vertexBlobStart = pageByteOffset
+                    + MP_PAGE_PAYLOAD_HEADER_BYTES
+                    + pageClusterCount * MP_CLUSTER_ON_DISK_STRIDE;
+                uint totalVertexBytes = 0u;
+                for (uint ci = 0u; ci < pageClusterCount; ++ci) {
+                    const uint cAddr = pageByteOffset
+                                     + MP_PAGE_PAYLOAD_HEADER_BYTES
+                                     + ci * MP_CLUSTER_ON_DISK_STRIDE;
+                    totalVertexBytes += pageBuf.Load(cAddr) * 32u;
+                }
+                const uint triangleBlobStart = vertexBlobStart + totalVertexBytes;
+
+                // Step 5: read 3 packed u8 local vertex indices for this tri.
+                const uint triByteOff = triangleBlobStart
+                                      + triangleOffsetInBlob + mpTriId * 3u;
+                const uint triWordOff = triByteOff & ~3u;
+                const uint triShift   = (triByteOff & 3u) * 8u;
+                const uint triW0 = pageBuf.Load(triWordOff);
+                const uint triW1 = pageBuf.Load(triWordOff + 4u);
+                uint triBits;
+                if (triShift == 0u) triBits = triW0;
+                else                triBits = (triW0 >> triShift)
+                                            | (triW1 << (32u - triShift));
+                const uint li0 = min(triBits         & 0xFFu, vertexCount - 1u);
+                const uint li1 = min((triBits >>  8u) & 0xFFu, vertexCount - 1u);
+                const uint li2 = min((triBits >> 16u) & 0xFFu, vertexCount - 1u);
+
+                // Step 6: read 3 vertices (32 B each: vec3 pos + vec3 normal
+                // + vec2 uv). Apply the engine-wide -90° Y correction
+                // (x,y,z) -> (-z,y,x) to both positions AND normals. For a
+                // pure rotation the normal transforms identically, so no
+                // inverse-transpose matrix needed.
+                const uint vertexBaseInBlob = vertexOffsetInBlob / 32u;
+                const uint v0Addr = vertexBlobStart + (vertexBaseInBlob + li0) * 32u;
+                const uint v1Addr = vertexBlobStart + (vertexBaseInBlob + li1) * 32u;
+                const uint v2Addr = vertexBlobStart + (vertexBaseInBlob + li2) * 32u;
+                uint3 v0Pos3 = pageBuf.Load3(v0Addr);
+                uint3 v0Nrm3 = pageBuf.Load3(v0Addr + 12u);
+                uint2 v0Uv2  = pageBuf.Load2(v0Addr + 24u);
+                uint3 v1Pos3 = pageBuf.Load3(v1Addr);
+                uint3 v1Nrm3 = pageBuf.Load3(v1Addr + 12u);
+                uint2 v1Uv2  = pageBuf.Load2(v1Addr + 24u);
+                uint3 v2Pos3 = pageBuf.Load3(v2Addr);
+                uint3 v2Nrm3 = pageBuf.Load3(v2Addr + 12u);
+                uint2 v2Uv2  = pageBuf.Load2(v2Addr + 24u);
+                const float3 p0Raw = float3(asfloat(v0Pos3.x), asfloat(v0Pos3.y), asfloat(v0Pos3.z));
+                const float3 p1Raw = float3(asfloat(v1Pos3.x), asfloat(v1Pos3.y), asfloat(v1Pos3.z));
+                const float3 p2Raw = float3(asfloat(v2Pos3.x), asfloat(v2Pos3.y), asfloat(v2Pos3.z));
+                const float3 n0Raw = float3(asfloat(v0Nrm3.x), asfloat(v0Nrm3.y), asfloat(v0Nrm3.z));
+                const float3 n1Raw = float3(asfloat(v1Nrm3.x), asfloat(v1Nrm3.y), asfloat(v1Nrm3.z));
+                const float3 n2Raw = float3(asfloat(v2Nrm3.x), asfloat(v2Nrm3.y), asfloat(v2Nrm3.z));
+                const float2 uv0 = float2(asfloat(v0Uv2.x), asfloat(v0Uv2.y));
+                const float2 uv1 = float2(asfloat(v1Uv2.x), asfloat(v1Uv2.y));
+                const float2 uv2 = float2(asfloat(v2Uv2.x), asfloat(v2Uv2.y));
+                const float3 p0W = float3(-p0Raw.z, p0Raw.y, p0Raw.x);
+                const float3 p1W = float3(-p1Raw.z, p1Raw.y, p1Raw.x);
+                const float3 p2W = float3(-p2Raw.z, p2Raw.y, p2Raw.x);
+                const float3 n0W = float3(-n0Raw.z, n0Raw.y, n0Raw.x);
+                const float3 n1W = float3(-n1Raw.z, n1Raw.y, n1Raw.x);
+                const float3 n2W = float3(-n2Raw.z, n2Raw.y, n2Raw.x);
+
+                // Step 7: project + winding-swap to match sw_raster::projectTri.
+                CameraData mpCam = loadCamera(pc.cameraSlot);
+                const float4 c0 = mul(mpCam.viewProj, float4(p0W, 1.0f));
+                const float4 c1 = mul(mpCam.viewProj, float4(p1W, 1.0f));
+                const float4 c2 = mul(mpCam.viewProj, float4(p2W, 1.0f));
+                if (c0.w <= 0.0f || c1.w <= 0.0f || c2.w <= 0.0f) return;
+                const float invW0 = 1.0f / c0.w;
+                const float invW1 = 1.0f / c1.w;
+                const float invW2 = 1.0f / c2.w;
+                const float viewW = (float)pc.screenWidth;
+                const float viewH = (float)pc.screenHeight;
+                float2 pix0 = float2((c0.x * invW0 * 0.5f + 0.5f) * viewW,
+                                     (c0.y * invW0 * 0.5f + 0.5f) * viewH);
+                float2 pix1 = float2((c1.x * invW1 * 0.5f + 0.5f) * viewW,
+                                     (c1.y * invW1 * 0.5f + 0.5f) * viewH);
+                float2 pix2 = float2((c2.x * invW2 * 0.5f + 0.5f) * viewW,
+                                     (c2.y * invW2 * 0.5f + 0.5f) * viewH);
+                float3 nA = n0W, nB = n1W, nC = n2W;
+                float2 uvA = uv0, uvB = uv1, uvC = uv2;
+                const float edgeAll = (pix1.x - pix0.x) * (pix2.y - pix0.y)
+                                    - (pix1.y - pix0.y) * (pix2.x - pix0.x);
+                if (edgeAll == 0.0f) return;
+                if (edgeAll < 0.0f) {
+                    const float2 tmpPix = pix1; pix1 = pix2; pix2 = tmpPix;
+                    const float3 tmpN  = nB;  nB  = nC;  nC  = tmpN;
+                    const float2 tmpUv = uvB; uvB = uvC; uvC = tmpUv;
+                }
+
+                // Step 8: edge-function barycentrics at the pixel centre.
+                const float2 pc2 = float2((float)pixelCoord.x + 0.5f,
+                                          (float)pixelCoord.y + 0.5f);
+                const float e0 = (pix1.x - pix0.x) * (pc2.y - pix0.y)
+                               - (pix1.y - pix0.y) * (pc2.x - pix0.x);
+                const float e1 = (pix2.x - pix1.x) * (pc2.y - pix1.y)
+                               - (pix2.y - pix1.y) * (pc2.x - pix1.x);
+                const float e2 = (pix0.x - pix2.x) * (pc2.y - pix2.y)
+                               - (pix0.y - pix2.y) * (pc2.x - pix2.x);
+                const float area = e0 + e1 + e2;
+                float w0, w1, w2;
+                if (area > 0.0f) {
+                    const float invA = 1.0f / area;
+                    w0 = e1 * invA;  // weight for vertex 0
+                    w1 = e2 * invA;  // weight for vertex 1
+                    w2 = e0 * invA;  // weight for vertex 2
+                } else {
+                    // Degenerate/off-edge — centre the weights so the normal
+                    // interpolation still produces a valid output.
+                    w0 = 1.0f / 3.0f; w1 = 1.0f / 3.0f; w2 = 1.0f / 3.0f;
+                }
+
+                // Step 9: interpolate world normal + normalize. A near-zero
+                // sum defends against three nearly-opposing normals averaging
+                // to zero.
+                float3 N = nA * w0 + nB * w1 + nC * w2;
+                const float Nlen = length(N);
+                if (Nlen > 1.0e-6f) N /= Nlen;
+                else                N = float3(0.0f, 1.0f, 0.0f);
+
+                // Step 9b: interpolate UV from the winding-swapped triangle.
+                const float2 mpUV = uvA * w0 + uvB * w1 + uvC * w2;
+
+                // Step 9c: resolve the source material for this cluster. The
+                // ClusterOnDisk stores materialIndex at byte offset 68 (see
+                // asset::ClusterOnDisk in MpAssetFormat.h). loadMaterial()
+                // mirrors the non-mp branch below.
+                const uint mpMaterialIdx =
+                    pageBuf.Load(pageByteOffset + clusterOnDiskOff + 68u);
+                GpuMaterial mpMat = loadMaterial(pc.materialBufferSlot, mpMaterialIdx);
+
+                // Analytic UV gradients so SampleGrad picks the correct mip
+                // level. Compute shaders have no implicit ddx/ddy, so
+                // SampleLevel(..., 0) forced base-mip everywhere — which
+                // produced per-pixel texture aliasing that got worse as the
+                // BMW shrank on screen (Nyquist failures on high-frequency
+                // paint / bodywork textures). Solve the 2x2 screen-to-UV
+                // linear system over the projected triangle:
+                //   [ (pix1-pix0).x  (pix1-pix0).y ] [ dUdx ]   [ uvB-uvA ]
+                //   [ (pix2-pix0).x  (pix2-pix0).y ] [ dUdy ] = [ uvC-uvA ]
+                // Degenerate fallback (determinant near zero) uses zero
+                // gradients = mip0; the triangle is sub-pixel anyway so
+                // aliasing would be mild regardless.
+                const float2 dP1 = pix1 - pix0;
+                const float2 dP2 = pix2 - pix0;
+                const float2 dUV1 = uvB - uvA;
+                const float2 dUV2 = uvC - uvA;
+                const float det   = dP1.x * dP2.y - dP1.y * dP2.x;
+                float2 mpDUVdx = float2(0.0f, 0.0f);
+                float2 mpDUVdy = float2(0.0f, 0.0f);
+                if (abs(det) > 1.0e-8f) {
+                    const float invDet = 1.0f / det;
+                    mpDUVdx = (dUV1 * dP2.y - dUV2 * dP1.y) * invDet;
+                    mpDUVdy = (dUV2 * dP1.x - dUV1 * dP2.x) * invDet;
+                }
+
+                // Sample albedo with analytic gradients.
+                float4 mpBaseColor = mpMat.baseColorFactor;
+                if (mpMat.baseColorTexIdx != INVALID_TEX) {
+                    Texture2D    mpTex  = g_textures[NonUniformResourceIndex(mpMat.baseColorTexIdx)];
+                    SamplerState mpSamp = g_samplers[NonUniformResourceIndex(mpMat.samplerSlot)];
+                    mpBaseColor *= mpTex.SampleGrad(mpSamp, mpUV, mpDUVdx, mpDUVdy);
+                }
+
+                // Sample metallic-roughness (glTF: B=metallic, G=roughness).
+                float mpMetal = mpMat.metallicFactor;
+                float mpRough = mpMat.roughnessFactor;
+                if (mpMat.metalRoughTexIdx != INVALID_TEX) {
+                    Texture2D    mrTex  = g_textures[NonUniformResourceIndex(mpMat.metalRoughTexIdx)];
+                    SamplerState mrSamp = g_samplers[NonUniformResourceIndex(mpMat.samplerSlot)];
+                    const float4 mr = mrTex.SampleGrad(mrSamp, mpUV, mpDUVdx, mpDUVdy);
+                    mpMetal *= mr.b;
+                    mpRough *= mr.g;
+                }
+
+                // Step 10: write G-buffer. Motion vectors zero out — M5 doesn't
+                // reconstruct prev-frame positions yet (would need per-cluster
+                // instance transforms to differ across frames).
+                const float4 mpAlbedo     = float4(mpBaseColor.rgb, 1.0f);
+                const float4 mpNormal     = float4(N * 0.5f + 0.5f, 0.0f);
+                const float4 mpMetalRough = float4(mpMetal, mpRough, 0.0f, 0.0f);
+                const float4 mpMotion     = float4(0.0f, 0.0f, 0.0f, 0.0f);
+                g_storageImages[NonUniformResourceIndex(pc.albedoStorageSlot)][pixelCoord]     = mpAlbedo;
+                g_storageImages[NonUniformResourceIndex(pc.normalStorageSlot)][pixelCoord]     = mpNormal;
+                g_storageImages[NonUniformResourceIndex(pc.metalRoughStorageSlot)][pixelCoord] = mpMetalRough;
+                g_storageImages[NonUniformResourceIndex(pc.motionVecStorageSlot)][pixelCoord]  = mpMotion;
+                return;
+            }
+        }
+    }
+#endif
 
     // Background pixels are marked with INVALID_VIS.
     if (visPacked == INVALID_VIS) {

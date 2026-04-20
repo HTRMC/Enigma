@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 // Forward declarations for DXC's COM interfaces. The full dxcapi.h
 // pulls in Windows.h and the whole COM machinery, so we keep it out
@@ -72,9 +73,12 @@ public:
     // default: HLSL convention is explicit naming, and forcing the
     // caller to say "VSMain" prevents copy-paste bugs where the
     // wrong stage silently compiles the wrong function.
+    // `defines` is a list of preprocessor macros passed as `-D` to DXC,
+    // e.g. {"MP_ENABLE=1"}. Empty by default (no extra defines).
     VkShaderModule compile(const std::filesystem::path& absolutePath,
                            Stage stage,
-                           const std::string& entryPoint);
+                           const std::string& entryPoint,
+                           const std::vector<std::string>& defines = {});
 
     // Non-fatal variant of compile(). Returns VK_NULL_HANDLE on any
     // failure (missing file, syntax error, vkCreateShaderModule
@@ -84,7 +88,8 @@ public:
     // and saves again.
     VkShaderModule tryCompile(const std::filesystem::path& absolutePath,
                               Stage stage,
-                              const std::string& entryPoint);
+                              const std::string& entryPoint,
+                              const std::vector<std::string>& defines = {});
 
 private:
     Device*              m_device         = nullptr;

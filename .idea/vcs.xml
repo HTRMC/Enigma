@@ -2,9 +2,41 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/fastgltf-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/glfw-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/imgui-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/joltphysics-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/meshoptimizer-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/stb-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/volk-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/vulkanmemoryallocator-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build/_deps/zstd-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build_release/_deps/fastgltf-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build_release/_deps/glfw-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build_release/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build_release/_deps/imgui-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build_release/_deps/joltphysics-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build_release/_deps/meshoptimizer-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build_release/_deps/stb-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build_release/_deps/volk-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build_release/_deps/vulkanmemoryallocator-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/build_release/_deps/zstd-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/fastgltf-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/glfw-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/imgui-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/joltphysics-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/meshoptimizer-src" vcs="Git" />
     <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/volk-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-debug/_deps/zstd-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/fastgltf-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/glfw-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/glm-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/imgui-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/joltphysics-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/meshoptimizer-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/volk-src" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/cmake-build-release/_deps/zstd-src" vcs="Git" />
   </component>
 </project>

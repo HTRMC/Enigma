@@ -71,26 +71,9 @@ Allocator::Allocator(Instance& instance, Device& device) {
     ENIGMA_LOG_INFO("[gfx] VMA allocator created");
 }
 
-Allocator::~Allocator() {
-    if (m_allocator == nullptr) {
-        return;
-    }
-
-    // VMA leak gate (AC13). Inspect live allocations before the
-    // allocator is destroyed; log both counts and assert that no live
-    // allocations remain. `blockCount` is INTENTIONALLY not asserted —
-    // VMA retains empty blocks in its block pool and blockCount > 0
-    // with allocationCount == 0 is documented as not-a-leak (see plan
-    // risk R6-blockcount).
-    VmaTotalStatistics stats{};
-    vmaCalculateStatistics(m_allocator, &stats);
-    ENIGMA_LOG_INFO("[vma] shutdown allocationCount = {} blockCount = {}",
-                    stats.total.statistics.allocationCount,
-                    stats.total.statistics.blockCount);
-    ENIGMA_ASSERT(stats.total.statistics.allocationCount == 0);
-
-    vmaDestroyAllocator(m_allocator);
-    m_allocator = nullptr;
-}
+// NOTE: destructor + adopt() + private ctor all live in AllocatorAdopt.cpp —
+// a separate translation unit kept free of core/Log.h so tests that bring
+// up their own VMA bundle can link just the small adopt TU. Mirrors the
+// DeviceAdopt.cpp split (see DeviceAdopt.cpp for the same pattern).
 
 } // namespace enigma::gfx

@@ -102,7 +102,8 @@ ShaderManager::~ShaderManager() {
 
 VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePath,
                                          Stage stage,
-                                         const std::string& entryPoint) {
+                                         const std::string& entryPoint,
+                                         const std::vector<std::string>& defines) {
     const std::string source = readTextFileSafe(absolutePath);
     if (source.empty()) {
         ENIGMA_LOG_ERROR("[shader] failed to open or empty source: {}", absolutePath.string());
@@ -120,6 +121,14 @@ VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePa
     sourceBuffer.Size     = source.size();
     sourceBuffer.Encoding = DXC_CP_UTF8;
 
+    // Widen the define strings up front so their wstrings stay alive for
+    // the duration of the args vector.
+    std::vector<std::wstring> wDefines;
+    wDefines.reserve(defines.size());
+    for (const auto& d : defines) {
+        wDefines.push_back(widenAscii(d));
+    }
+
     // Compile arguments:
     //   -E <entry>          entry point name (VSMain, PSMain, ...)
     //   -T <profile>        target profile (vs_6_0, ps_6_0)
@@ -127,9 +136,10 @@ VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePa
     //   -fvk-use-dx-layout  keep D3D-style cbuffer layout so the C++
     //                       PushBlock struct layout matches byte-for-byte
     //   -HV 2021            HLSL 2021 language version
+    //   -D <define>         preprocessor macro (repeated per entry in defines)
     //   -O0/-Zi/-Qembed_debug on debug, -O3 on release
     std::vector<LPCWSTR> args;
-    args.reserve(16);
+    args.reserve(16 + defines.size() * 2);
     args.push_back(L"-E");
     args.push_back(wEntry.c_str());
     args.push_back(L"-T");
@@ -142,6 +152,10 @@ VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePa
     args.push_back(wIncludeDir.c_str());
     args.push_back(L"-HV");
     args.push_back(L"2021");
+    for (const auto& wd : wDefines) {
+        args.push_back(L"-D");
+        args.push_back(wd.c_str());
+    }
 #if ENIGMA_DEBUG
     args.push_back(L"-O0");
     args.push_back(L"-Zi");
@@ -240,8 +254,9 @@ VkShaderModule ShaderManager::tryCompile(const std::filesystem::path& absolutePa
 
 VkShaderModule ShaderManager::compile(const std::filesystem::path& absolutePath,
                                       Stage stage,
-                                      const std::string& entryPoint) {
-    VkShaderModule module = tryCompile(absolutePath, stage, entryPoint);
+                                      const std::string& entryPoint,
+                                      const std::vector<std::string>& defines) {
+    VkShaderModule module = tryCompile(absolutePath, stage, entryPoint, defines);
     ENIGMA_ASSERT(module != VK_NULL_HANDLE && "shader compilation failed (initial load)");
     return module;
 }

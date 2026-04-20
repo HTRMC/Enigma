@@ -15,6 +15,7 @@
 #include "physics/VehicleController.h"
 #include "platform/Window.h"
 #include "renderer/Renderer.h"
+#include "renderer/micropoly/MicropolyConfig.h"
 #include "scene/Camera.h"
 #include "scene/FollowCamera.h"
 #include "scene/Scene.h"
@@ -44,7 +45,26 @@ int Application::run(int argc, char** argv) {
     Paths::init(argv0);
     ENIGMA_LOG_INFO("[app] starting, exe = {}", Paths::executablePath().string());
 
-    Engine engine;
+    // Parse --micropoly <path> early so the config can be threaded into the
+    // Renderer via Engine's ctor. MicropolyStreaming::create handles path
+    // validation / non-existent files via std::expected; no pre-check here.
+    MicropolyConfig mpCfg{};
+    for (int i = 1; i < argc - 1; ++i) {
+        if (argv[i] && std::string_view(argv[i]) == "--micropoly" && argv[i + 1]) {
+            // asset::isSafeMpaPath rejects non-absolute paths as defense-in-depth
+            // (see src/asset/MpPathUtils.h:40-46). The CLI typically passes a
+            // relative path like "assets/bmw.mpa" — canonicalise here so the
+            // streaming init path sees a clean absolute path. std::filesystem::
+            // absolute does NOT require the file to exist; a nonexistent path
+            // still canonicalises against the CWD, and open() failure surfaces
+            // cleanly in the streaming init log.
+            mpCfg.mpaFilePath = std::filesystem::absolute(argv[i + 1]);
+            mpCfg.enabled     = true;
+            ENIGMA_LOG_INFO("[app] micropoly enabled: {}", mpCfg.mpaFilePath.string());
+        }
+    }
+
+    Engine engine(std::move(mpCfg));
     auto& window   = engine.window();
     auto& renderer = engine.renderer();
     auto& clock    = engine.clock();

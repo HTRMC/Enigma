@@ -64,8 +64,33 @@ public:
     void registerHotReload(gfx::ShaderHotReload& reloader);
 
     // Record the full-screen material evaluation dispatch.
-    // visBufferSlot:      sampled-image slot from VisibilityBufferPass.
+    // visBufferSlot:      sampled-image slot from VisibilityBufferPass (32-bit vis).
+    // vis64BufferSlot:    bindless storage-image slot for the 64-bit Micropoly
+    //                     vis image (M3.4). The =false shader never reads this
+    //                     field (the #ifdef MP_ENABLE preprocessor gate strips
+    //                     it at DXC compile time), but we still push it so both
+    //                     pipeline variants share one push-constant range size.
+    //                     Pass UINT32_MAX when no micropoly image exists.
     // materialBufferSlot: bindless SSBO slot for the GpuMaterial[] array.
+    // enableMp:           when true, bind the MP_ENABLE=true pipeline variant
+    //                     (lazy-built on first call via -D MP_ENABLE=1).
+    //                     When false, bind the baseline pipeline whose SPIR-V
+    //                     is byte-identical to the pre-M3.4 golden (Principle 1).
+    // M5 micropoly material resolution inputs. When enableMp=true the shader's
+    // mpWins branch walks the cluster DAG + page cache to reconstruct the
+    // hit-triangle's world-space vertices + normals. Pass UINT32_MAX for any
+    // slot when micropoly is disabled — the dead-code-eliminated =false
+    // pipeline variant never reads them.
+    struct MpResolveInputs {
+        u32 dagBufferSlot        = UINT32_MAX;
+        u32 pageToSlotSlot       = UINT32_MAX;
+        u32 pageCacheSlot        = UINT32_MAX;
+        u32 pageFirstDagNodeSlot = UINT32_MAX;
+        u32 pageSlotBytes        = 0u;
+        u32 pageCount            = 0u;
+        u32 dagNodeCount         = 0u;
+    };
+
     void record(VkCommandBuffer         cmd,
                 VkDescriptorSet         globalSet,
                 VkExtent2D              extent,
@@ -73,15 +98,35 @@ public:
                 const GpuSceneBuffer&   scene,
                 const GpuMeshletBuffer& meshlets,
                 u32                     materialBufferSlot,
-                u32                     cameraSlot);
+                u32                     cameraSlot,
+                u32                     vis64BufferSlot,
+                bool                    enableMp,
+                const MpResolveInputs&  mp = {});
 
 private:
+    // Build one pipeline variant from a pre-compiled VkShaderModule. The
+    // caller is responsible for compiling with the right defines (-D MP_ENABLE=1
+    // for the =true variant, no extra defines for the =false variant).
+    // `enableMp` is retained as a documentary tag but has no effect on the
+    // pipeline creation itself — the distinction is already baked into the
+    // SPIR-V by DXC at compile time.
+    gfx::Pipeline* buildPipeline_(VkShaderModule module, bool enableMp) const;
+
+    // Lazy-build the MP_ENABLE=true pipeline on first use. Devices that
+    // never hit the micropoly path never pay the compile cost.
+    void ensureMpEnabledPipeline_();
+
     void rebuildPipeline();
 
-    gfx::Device*          m_device         = nullptr;
-    gfx::Pipeline*        m_pipeline       = nullptr;
-    gfx::ShaderManager*   m_shaderManager  = nullptr;
-    VkDescriptorSetLayout m_globalSetLayout = VK_NULL_HANDLE;
+    gfx::Device*          m_device              = nullptr;
+    // Baseline pipeline: MP_ENABLE=false. SPIR-V is byte-identical to the
+    // pre-M3.4 golden (Principle 1). Built eagerly in buildPipeline().
+    gfx::Pipeline*        m_pipelineMpDisabled  = nullptr;
+    // MP-enabled pipeline: MP_ENABLE=true. Lazy-built the first time
+    // record() is invoked with enableMp=true.
+    gfx::Pipeline*        m_pipelineMpEnabled   = nullptr;
+    gfx::ShaderManager*   m_shaderManager       = nullptr;
+    VkDescriptorSetLayout m_globalSetLayout     = VK_NULL_HANDLE;
     std::filesystem::path m_shaderPath;
 
     // Pre-registered slot IDs (owned by Renderer, not this pass).
@@ -99,6 +144,12 @@ private:
     VkImage m_depth_image      = VK_NULL_HANDLE;
 
     VkExtent2D m_extent{};
+
+    // Throttle guard for the MP-fallback error log in record(). Set true
+    // on the first frame enableMp=true is requested while m_pipelineMpEnabled
+    // remains null (i.e. the lazy MP_ENABLE=1 compile failed) so the log
+    // fires once per pass lifetime rather than once per frame.
+    bool m_mpFallbackLogged = false;
 };
 
 } // namespace enigma

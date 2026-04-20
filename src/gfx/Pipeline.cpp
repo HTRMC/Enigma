@@ -36,6 +36,10 @@ Pipeline::Pipeline(Device& device, const CreateInfo& info)
         stageInfo.stage  = VK_SHADER_STAGE_COMPUTE_BIT;
         stageInfo.module = info.computeShader;
         stageInfo.pName  = info.computeEntryPoint;
+        // Pass through the caller's VkSpecializationInfo verbatim — Vulkan
+        // copies the map + data at pipeline creation, so the caller can
+        // free the backing storage the moment this constructor returns.
+        stageInfo.pSpecializationInfo = info.computeSpecInfo;
 
         VkComputePipelineCreateInfo pipelineCI{};
         pipelineCI.sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;

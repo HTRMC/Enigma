@@ -149,6 +149,28 @@ Device::Device(Instance& instance) {
     have.v12.shaderStorageImageArrayNonUniformIndexing     = VK_FALSE;
     have.v12.timelineSemaphore                             = VK_FALSE;
     have.v12.bufferDeviceAddress                           = VK_FALSE;
+
+    // Atomic-int64 support is a Vulkan 1.2 promoted feature exposed via
+    // v12.shaderBufferInt64Atomics / shaderSharedInt64Atomics. VVL rejects
+    // mixing the promoted struct with the legacy
+    // VkPhysicalDeviceShaderAtomicInt64Features extension struct in the
+    // same pNext chain, so we stay on the 1.2 path only.
+    have.v12.shaderBufferInt64Atomics = VK_FALSE;
+    have.v12.shaderSharedInt64Atomics = VK_FALSE;
+
+    // Probe VK_EXT_shader_image_atomic_int64 via its own feature struct
+    // chained onto `have`. Only a probe — the actual feature is requested
+    // below in the `want` chain via a separate struct kept alive for the
+    // lifetime of vkCreateDevice.
+    VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT haveImgInt64{};
+    haveImgInt64.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_IMAGE_ATOMIC_INT64_FEATURES_EXT;
+    {
+        // Chain at tail of have.* so vkGetPhysicalDeviceFeatures2 fills it.
+        auto* tail = reinterpret_cast<VkBaseOutStructure*>(&have.features2);
+        while (tail->pNext != nullptr) tail = tail->pNext;
+        tail->pNext = reinterpret_cast<VkBaseOutStructure*>(&haveImgInt64);
+    }
+
     vkGetPhysicalDeviceFeatures2(m_physical, &have.features2);
 
     const auto check = [](VkBool32 v, const char* name) {
@@ -208,6 +230,7 @@ Device::Device(Instance& instance) {
     VkPhysicalDeviceRayTracingPipelineFeaturesKHR    rtPipelineFeatures{};
     VkPhysicalDeviceRayQueryFeaturesKHR              rayQueryFeatures{};
     VkPhysicalDeviceMeshShaderFeaturesEXT            meshShaderFeatures{};
+    VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT shaderImgInt64Features{};
 
     // Conditionally enable RT extensions when hardware supports them.
     {
@@ -243,9 +266,13 @@ Device::Device(Instance& instance) {
                 enabledExts.push_back(VK_KHR_RAY_QUERY_EXTENSION_NAME);
                 rayQueryFeatures.sType    = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR;
                 rayQueryFeatures.rayQuery = VK_TRUE;
+                rayQueryFeatures.pNext    = nullptr;  // explicit tail terminator; survives refactors that might drop {}-init
                 rtPipelineFeatures.pNext  = &rayQueryFeatures;
+            } else {
+                rtPipelineFeatures.pNext  = nullptr;  // explicit tail terminator when ray_query is absent
             }
 
+            m_rtEnabled = true;
             ENIGMA_LOG_INFO("[gfx] enabling RT extensions (acceleration_structure + ray_tracing_pipeline + deferred_host_operations)");
         }
     }
@@ -265,6 +292,7 @@ Device::Device(Instance& instance) {
             meshShaderFeatures.sType      = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT;
             meshShaderFeatures.taskShader = VK_TRUE;
             meshShaderFeatures.meshShader = VK_TRUE;
+            meshShaderFeatures.pNext      = nullptr;  // explicit tail terminator; survives refactors that might drop {}-init
 
             // Append to the tail of the existing pNext chain rooted at want.v13.
             auto* tail = reinterpret_cast<VkBaseOutStructure*>(&want.v13);
@@ -281,6 +309,82 @@ Device::Device(Instance& instance) {
         want.features2.features.fillModeNonSolid = VK_TRUE;
         m_fillModeNonSolidSupported = true;
         ENIGMA_LOG_INFO("[gfx] enabling fillModeNonSolid (wireframe debug modes available)");
+    }
+
+    // shaderInt64 — the micropoly raster + material_eval shaders declare
+    // uint64_t (SPIR-V Capability Int64). Probed + requested unconditionally
+    // when available; treated as effectively required on target hardware.
+    if (have.features2.features.shaderInt64 == VK_TRUE) {
+        want.features2.features.shaderInt64 = VK_TRUE;
+        ENIGMA_LOG_INFO("[gfx] enabling shaderInt64 (micropoly vis-buffer uint64)");
+    }
+
+    // fragmentStoresAndAtomics — debug-overlay fragment shaders bind
+    // RWTexture2D<uint64_t> for vis reads. Validation requires this feature
+    // whenever a storage image is bound to a fragment stage, even if the
+    // shader only reads from it. Probe + request.
+    if (have.features2.features.fragmentStoresAndAtomics == VK_TRUE) {
+        want.features2.features.fragmentStoresAndAtomics = VK_TRUE;
+        ENIGMA_LOG_INFO("[gfx] enabling fragmentStoresAndAtomics (micropoly debug overlays)");
+    }
+
+    // ---------------------------------------------------------------------
+    // Optional micropoly-related feature probes (plan §3.M0a).
+    //
+    // All four of the following are OPTIONAL — device creation must not
+    // fail when any of them is absent. MicropolyCapability aggregates the
+    // bits into a HW matrix row; MicropolyPass decides whether to run at
+    // all based on the row.
+    // ---------------------------------------------------------------------
+
+    // (1) shader atomic_int64 — request via v12 promoted fields. No separate
+    // pNext struct: VkPhysicalDeviceShaderAtomicInt64Features was promoted
+    // into Vulkan 1.2 core and chaining both is a VVL error.
+    if (have.v12.shaderBufferInt64Atomics == VK_TRUE &&
+        have.v12.shaderSharedInt64Atomics == VK_TRUE) {
+        want.v12.shaderBufferInt64Atomics = VK_TRUE;
+        want.v12.shaderSharedInt64Atomics = VK_TRUE;
+        m_shaderAtomicInt64Supported = true;
+        ENIGMA_LOG_INFO("[gfx] enabling shader atomic_int64 (Vulkan 1.2 core; micropoly SW raster)");
+    }
+
+    // (2) Sparse residency (Image2D) — request if advertised. Optional.
+    if (have.features2.features.sparseBinding == VK_TRUE &&
+        have.features2.features.sparseResidencyImage2D == VK_TRUE) {
+        want.features2.features.sparseBinding         = VK_TRUE;
+        want.features2.features.sparseResidencyImage2D = VK_TRUE;
+        m_sparseResidencySupported = true;
+        ENIGMA_LOG_INFO("[gfx] enabling sparse residency (sparseBinding + sparseResidencyImage2D)");
+    }
+
+    // (3) VK_EXT_shader_image_atomic_int64 — provides SPV_EXT_shader_image_int64
+    // used by the R32G32_UINT aliased vis-buffer fallback path when R64_UINT
+    // storage-image atomic support is missing. Requires BOTH the extension
+    // AND its feature bit; we probe both via haveImgInt64 (chained above into
+    // `have`'s pNext) and the extension enumeration below. Request only when
+    // both are present — otherwise validation errors out on the missing
+    // Int64Image capability when shaders declare RWTexture2D<uint64_t>.
+    {
+        constexpr const char* kShaderImageInt64ExtName = "VK_EXT_shader_image_atomic_int64";
+        bool hasExt = false;
+        for (const auto& ep : extProps) {
+            if (std::strcmp(ep.extensionName, kShaderImageInt64ExtName) == 0) {
+                hasExt = true;
+                break;
+            }
+        }
+        if (hasExt && haveImgInt64.shaderImageInt64Atomics == VK_TRUE) {
+            enabledExts.push_back(kShaderImageInt64ExtName);
+            m_shaderImageInt64Supported = true;
+            shaderImgInt64Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_IMAGE_ATOMIC_INT64_FEATURES_EXT;
+            shaderImgInt64Features.shaderImageInt64Atomics = VK_TRUE;
+            shaderImgInt64Features.pNext = nullptr;
+            // Append to the tail of the existing pNext chain rooted at want.features2.
+            auto* tail = reinterpret_cast<VkBaseOutStructure*>(&want.features2);
+            while (tail->pNext != nullptr) tail = tail->pNext;
+            tail->pNext = reinterpret_cast<VkBaseOutStructure*>(&shaderImgInt64Features);
+            ENIGMA_LOG_INFO("[gfx] enabling VK_EXT_shader_image_atomic_int64 (micropoly vis-buffer fallback)");
+        }
     }
 
     // Discover optional async compute and dedicated transfer queue families.
@@ -378,12 +482,10 @@ Device::Device(Instance& instance) {
                     enabledExts.size(), queueInfos.size(), static_cast<int>(m_gpuTier));
 }
 
-Device::~Device() {
-    if (m_device != VK_NULL_HANDLE) {
-        vkDestroyDevice(m_device, nullptr);
-        m_device = VK_NULL_HANDLE;
-    }
-}
+// NOTE: destructor + adopt() + private ctor all live in DeviceAdopt.cpp —
+// a separate translation unit kept free of core/Log.h and gfx/Instance.h
+// so tests can link it without dragging in the full engine logging +
+// instance surface.
 
 void Device::pickPhysicalDevice(VkInstance instance) {
     u32 count = 0;

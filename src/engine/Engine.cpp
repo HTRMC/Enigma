@@ -9,10 +9,12 @@ constexpr u32 kDefaultWindowWidth  = 1280;
 constexpr u32 kDefaultWindowHeight = 720;
 } // namespace
 
-Engine::Engine()
+Engine::Engine() : Engine(MicropolyConfig{}) {}
+
+Engine::Engine(MicropolyConfig micropolyConfig)
     : m_window(kDefaultWindowWidth, kDefaultWindowHeight, "Enigma")
     , m_physicsWorld(std::make_unique<PhysicsWorld>())
-    , m_renderer(m_window)
+    , m_renderer(m_window, std::move(micropolyConfig))
     , m_input(m_window)
     , m_clock() {
 

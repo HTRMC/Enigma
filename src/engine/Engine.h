@@ -10,6 +10,7 @@
 #include "physics/VehicleConfig.h"
 #include "platform/Window.h"
 #include "renderer/Renderer.h"
+#include "renderer/micropoly/MicropolyConfig.h"
 
 #include <memory>
 
@@ -18,6 +19,7 @@ namespace enigma {
 class Engine {
 public:
     Engine();
+    explicit Engine(MicropolyConfig micropolyConfig);
     ~Engine();
 
     Engine(const Engine&)            = delete;

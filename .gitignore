@@ -40,3 +40,7 @@ desktop.ini
 
 # Workflow artifacts (optional — keep under version control if desired)
 .omc/state/
+
+# Developer-local build-helper scripts (M1a executor scratch — not committed)
+build_configure.bat
+build_mpbake.bat

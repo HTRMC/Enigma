@@ -34,6 +34,11 @@
 #include "renderer/UpscalerFactory.h"
 #include "renderer/DebugVisualizationPass.h"
 #include "renderer/VisibilityBufferPass.h"
+#include "renderer/micropoly/MicropolyCapability.h"
+#include "renderer/micropoly/MicropolyCullPass.h"
+#include "renderer/micropoly/MicropolyStreaming.h"
+#include "asset/MpAssetReader.h"
+#include "asset/MpPathUtils.h"
 #include "scene/Camera.h"
 #include "scene/Scene.h"
 
@@ -55,6 +60,36 @@
 namespace enigma {
 
 namespace {
+
+// Emits the COMPUTE -> FRAGMENT vis-image memory barrier that every
+// micropoly debug overlay needs (HW raster writes in FRAGMENT, SW raster
+// writes in COMPUTE; the overlays all read the vis image in FRAGMENT).
+//
+// Must run OUTSIDE any dynamic-rendering instance (Vulkan
+// VUID-vkCmdPipelineBarrier2-None-09553). The render graph only wraps a
+// pass in vkCmdBeginRendering when colorTargets/depthTarget is populated,
+// so we enqueue a barrier-only pass with NO attachments; the graph
+// treats it as compute and skips the render-pass wrapper.
+//
+// Call BEFORE the raster pass that reads the vis image.
+void addMicropolyVisBarrierPass(gfx::RenderGraph& graph) {
+    gfx::RenderGraph::RasterPassDesc barrier{};
+    barrier.name = "MicropolyVisBarrierCompute2Fragment";
+    // Intentionally no colorTargets / depthTarget — no render-pass wrapper.
+    barrier.execute = [](VkCommandBuffer cmd, VkExtent2D /*ext*/) {
+        VkMemoryBarrier2 visToFrag{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+        visToFrag.srcStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        visToFrag.srcAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+                                | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+        visToFrag.dstStageMask  = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        visToFrag.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+        VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        dep.memoryBarrierCount = 1u;
+        dep.pMemoryBarriers    = &visToFrag;
+        vkCmdPipelineBarrier2(cmd, &dep);
+    };
+    graph.addRasterPass(std::move(barrier));
+}
 
 // Convert spherical sun angles (degrees) to a unit world-space direction
 // pointing FROM the surface TO the sun (Y-up world, azimuth clockwise from Z+).
@@ -86,6 +121,9 @@ f32 haltonJitter(u32 index, u32 base) {
 } // namespace
 
 Renderer::Renderer(Window& window)
+    : Renderer(window, MicropolyConfig{}) {}
+
+Renderer::Renderer(Window& window, MicropolyConfig micropolyConfig)
     : m_window(window)
     , m_instance(std::make_unique<gfx::Instance>())
     , m_device(std::make_unique<gfx::Device>(*m_instance))
@@ -98,7 +136,311 @@ Renderer::Renderer(Window& window)
     , m_shaderManager(std::make_unique<gfx::ShaderManager>(*m_device))
     , m_shaderHotReload(std::make_unique<gfx::ShaderHotReload>())
     , m_trianglePass(std::make_unique<TrianglePass>(*m_device, *m_allocator, *m_descriptorAllocator))
-    , m_meshPass(std::make_unique<MeshPass>(*m_device)) {
+    , m_meshPass(std::make_unique<MeshPass>(*m_device))
+    , m_micropolyConfig(std::move(micropolyConfig)) {
+
+    // Micropoly scaffolding (M0a) — construct the pass shell after Device
+    // so its constructor can probe capabilities and log the chosen vis
+    // image format. MicropolyConfig::enabled defaults to false; when off,
+    // MicropolyPass::record() is an early-return no-op and no GPU resources
+    // are touched (Principle 1: bit-identical-when-disabled).
+    m_micropolyPass = std::make_unique<MicropolyPass>(*m_device, m_micropolyConfig);
+
+    // M2.4a: bring up the streaming orchestrator IFF enabled + capability-
+    // gated on. When disabled we construct NOTHING here; no file IO, no VMA
+    // allocations, no semaphores — the Renderer output is bit-identical to
+    // the pre-micropoly path (Principle 1; screenshot_diff maxDelta=0).
+    if (m_micropolyConfig.enabled) {
+        const MicropolyCaps caps = micropolyCaps(*m_device);
+        if (caps.row != HwMatrixRow::Disabled) {
+            // M3.2 closeout fix #1: shared path-validation helper. Identical
+            // rules are applied in AsyncIOWorker.cpp's worker thread as a
+            // defence-in-depth check. See src/asset/MpPathUtils.h for the
+            // canonical rule list (absolute; no UNC; no NT device namespace;
+            // length bound). Previously this block inlined a lambda that
+            // drifted against the worker's version — the helper eliminates
+            // the duplication.
+            std::string pathDetail;
+            if (m_micropolyConfig.mpaFilePath.empty()) {
+                ENIGMA_LOG_ERROR("[micropoly] streaming: enabled=true but mpaFilePath is empty; streaming disabled");
+            } else if (!asset::isSafeMpaPath(m_micropolyConfig.mpaFilePath, pathDetail)) {
+                ENIGMA_LOG_ERROR(
+                    "[micropoly] streaming: mpaFilePath rejected: {}",
+                    pathDetail);
+            } else {
+                auto reader = std::make_unique<asset::MpAssetReader>();
+                auto openRes = reader->open(m_micropolyConfig.mpaFilePath);
+                if (!openRes.has_value()) {
+                    ENIGMA_LOG_ERROR("[micropoly] streaming: failed to open .mpa '{}'",
+                                     m_micropolyConfig.mpaFilePath.string());
+                } else {
+                    renderer::micropoly::MicropolyStreamingOptions opts{};
+                    opts.mpaFilePath             = m_micropolyConfig.mpaFilePath;
+                    opts.reader                  = reader.get();
+                    opts.residency.capacityBytes =
+                        static_cast<u64>(m_micropolyConfig.pageCacheMB) * 1024ull * 1024ull;
+                    opts.pageCache.poolBytes     =
+                        static_cast<u64>(m_micropolyConfig.pageCacheMB) * 1024ull * 1024ull;
+                    opts.pageCache.slotBytes     = 128u * 1024u;
+                    opts.requestQueue.capacity   = 4096u;
+                    opts.asyncIO.maxInflightRequests = 64u;
+                    opts.debugName               = "micropoly.streaming";
+
+                    auto made = renderer::micropoly::MicropolyStreaming::create(
+                        *m_device, *m_allocator, std::move(opts));
+                    if (!made) {
+                        ENIGMA_LOG_ERROR(
+                            "[micropoly] streaming: create failed: {} / {}",
+                            renderer::micropoly::micropolyStreamingErrorKindString(made.error().kind),
+                            made.error().detail);
+                    } else {
+                        m_micropolyStreaming = std::move(*made);
+                        m_micropolyReader    = std::move(reader);
+                        ENIGMA_LOG_INFO("[micropoly] streaming: initialised on '{}'",
+                                        m_micropolyConfig.mpaFilePath.string());
+
+                        // Register the RequestQueue buffer as a bindless
+                        // UAV RWByteAddressBuffer. Without this the cull
+                        // shader's emitPageReq() dereferences UINT32_MAX
+                        // which silently no-ops on NVIDIA, so no page is
+                        // ever streamed in and every cluster stays
+                        // non-resident — streaming appears frozen.
+                        auto& rq = m_micropolyStreaming->requestQueue();
+                        const u32 rqSlot = m_descriptorAllocator->registerUavBuffer(
+                            rq.buffer(), rq.bufferBytes());
+                        if (rqSlot == UINT32_MAX) {
+                            ENIGMA_LOG_ERROR(
+                                "[micropoly] requestQueue bindless registration failed "
+                                "— streaming will stall (emitPageReq no-ops)");
+                        } else {
+                            rq.setBindlessSlot(rqSlot);
+                            ENIGMA_LOG_INFO(
+                                "[micropoly] requestQueue bindless registered (slot={})",
+                                rqSlot);
+                        }
+
+                        // Register PageCache VkBuffer as a bindless
+                        // RWByteAddressBuffer. PageCache::create leaves
+                        // bindlessBindingIndex at UINT32_MAX — without this
+                        // step the HW raster task/mesh shaders read from
+                        // g_rwBuffers[UINT32_MAX] and every Load returns
+                        // zero, so cluster.vertexCount reads as 0 for every
+                        // cluster and all debug overlays stay black.
+                        auto& pc = m_micropolyStreaming->pageCache();
+                        const VkDeviceSize pcBytes =
+                            static_cast<VkDeviceSize>(pc.totalSlots()) *
+                            static_cast<VkDeviceSize>(pc.slotBytes());
+                        const u32 pcSlot = m_descriptorAllocator->registerUavBuffer(
+                            pc.buffer(), pcBytes);
+                        if (pcSlot == UINT32_MAX) {
+                            ENIGMA_LOG_ERROR(
+                                "[micropoly] pageCache bindless registration failed "
+                                "— HW raster will read zeros and produce no output");
+                        } else {
+                            pc.setBindlessSlot(pcSlot);
+                            ENIGMA_LOG_INFO(
+                                "[micropoly] pageCache bindless registered (slot={}, bytes={})",
+                                pcSlot,
+                                static_cast<unsigned long long>(pcBytes));
+                        }
+                    }
+                }
+            }
+
+            // M5a: per-asset-proxy BLAS for micropoly shadow casting.
+            // Double-gated on Device::supportsRayTracing() AND the
+            // micropoly reader having opened a valid .mpa above. On a
+            // non-RT device we skip construction entirely so no RT
+            // extension entrypoint is ever touched (Principle 1). On an
+            // RT device we still guard on m_micropolyReader — without an
+            // asset there's nothing to build.
+            if (m_device->supportsRayTracing() && m_micropolyReader != nullptr) {
+                auto blasMade = renderer::micropoly::MicropolyBlasManager::create(
+                    *m_device, *m_allocator);
+                if (!blasMade) {
+                    ENIGMA_LOG_ERROR(
+                        "[micropoly] BLAS manager: create failed: {} / {}",
+                        renderer::micropoly::micropolyBlasErrorKindString(
+                            blasMade.error().kind),
+                        blasMade.error().detail);
+                } else {
+                    m_micropolyBlasManager = std::move(*blasMade);
+                    auto built = m_micropolyBlasManager->buildForAsset(
+                        *m_micropolyReader,
+                        renderer::micropoly::kMpBlasDefaultDagLodLevel);
+                    if (!built) {
+                        // NoLevel3Clusters is soft — continue without
+                        // micropoly shadows rather than fail the ctor.
+                        ENIGMA_LOG_ERROR(
+                            "[micropoly] BLAS manager: buildForAsset failed: "
+                            "{} / {}",
+                            renderer::micropoly::micropolyBlasErrorKindString(
+                                built.error().kind),
+                            built.error().detail);
+                    } else {
+                        ENIGMA_LOG_INFO(
+                            "[micropoly] BLAS manager: built {} instance(s)",
+                            m_micropolyBlasManager->instances().size());
+                    }
+                }
+            }
+
+            // M3.2: cluster cull compute pass. Constructed alongside the
+            // streaming orchestrator so the two share the same enable
+            // gating. Pipeline build failures log but do NOT abort the
+            // Renderer — the pass stays null and dispatch() is skipped,
+            // keeping the rest of the frame functional.
+            auto cullMade = renderer::micropoly::MicropolyCullPass::create(
+                *m_device, *m_allocator, *m_descriptorAllocator, *m_shaderManager);
+            if (!cullMade) {
+                ENIGMA_LOG_ERROR(
+                    "[micropoly] cull pass: create failed: {} / {}",
+                    renderer::micropoly::micropolyCullErrorKindString(cullMade.error().kind),
+                    cullMade.error().detail);
+            } else {
+                m_micropolyCullPass = std::make_unique<renderer::micropoly::MicropolyCullPass>(
+                    std::move(*cullMade));
+                m_micropolyCullPass->registerHotReload(*m_shaderHotReload);
+                ENIGMA_LOG_INFO("[micropoly] cull pass: initialised");
+            }
+
+            // M3.3: HW raster pass. Gated on mesh-shader + shaderImageInt64
+            // device capabilities. Gate at the call site too so non-capable
+            // devices don't log "raster pass: create failed" at every boot —
+            // Principle 1 requires zero observable side effects when the
+            // subsystem is inert.
+            if (m_device->supportsMeshShaders() && m_device->supportsShaderImageInt64()) {
+                auto rasterMade = renderer::micropoly::MicropolyRasterPass::create(
+                    *m_device, *m_descriptorAllocator, *m_shaderManager);
+                if (!rasterMade) {
+                    ENIGMA_LOG_ERROR(
+                        "[micropoly] raster pass: create failed: {} / {}",
+                        renderer::micropoly::micropolyRasterErrorKindString(rasterMade.error().kind),
+                        rasterMade.error().detail);
+                } else {
+                    m_micropolyRasterPass = std::make_unique<renderer::micropoly::MicropolyRasterPass>(
+                        std::move(*rasterMade));
+                    m_micropolyRasterPass->registerHotReload(*m_shaderHotReload);
+                    ENIGMA_LOG_INFO("[micropoly] raster pass: initialised");
+                }
+
+                // M4.2: SW raster binning pass. Same capability umbrella as
+                // the HW raster pass for now — see MicropolySwRasterPass.h
+                // banner. Dispatched after the HW raster so M4.3's fragment
+                // compute can consume the bins in the same frame.
+                auto swRasterMade = renderer::micropoly::MicropolySwRasterPass::create(
+                    *m_device, *m_allocator, *m_descriptorAllocator,
+                    *m_shaderManager, m_swapchain->extent());
+                if (!swRasterMade) {
+                    ENIGMA_LOG_ERROR(
+                        "[micropoly] sw raster pass: create failed: {} / {}",
+                        renderer::micropoly::micropolySwRasterErrorKindString(swRasterMade.error().kind),
+                        swRasterMade.error().detail);
+                } else {
+                    m_micropolySwRasterPass = std::move(*swRasterMade);
+                    m_micropolySwRasterPass->registerHotReload(*m_shaderHotReload);
+                    ENIGMA_LOG_INFO("[micropoly] sw raster pass: initialised (bin + fragment dispatch)");
+                }
+            }
+
+            // M3.3: attach the pageId -> slotIndex GPU mirror that the
+            // raster task shader indexes via pageId. Sized for the .mpa's
+            // pageCount. Needs the reader to be live — skip cleanly when
+            // either streaming init or reader open failed. Renderer owns
+            // the bindless registration side so MicropolyStreaming stays
+            // free of DescriptorAllocator coupling (simplifies the smaller
+            // test binaries' link graphs).
+            if (m_micropolyStreaming != nullptr && m_micropolyReader != nullptr) {
+                const u32 pageCount = m_micropolyReader->header().pageCount;
+                if (pageCount > 0u) {
+                    const bool ok = m_micropolyStreaming->attachPageToSlotBuffer(pageCount);
+                    if (!ok) {
+                        ENIGMA_LOG_ERROR(
+                            "[micropoly] pageToSlot buffer attach failed (pageCount={})",
+                            pageCount);
+                    } else {
+                        const u32 slot = m_descriptorAllocator->registerStorageBuffer(
+                            m_micropolyStreaming->pageToSlotBuffer(),
+                            m_micropolyStreaming->pageToSlotBufferBytes());
+                        m_micropolyStreaming->setPageToSlotBindless(slot);
+                        ENIGMA_LOG_INFO(
+                            "[micropoly] pageToSlot buffer attached (pageCount={}, bindless={})",
+                            pageCount, slot);
+
+                        // M4.5 multi-cluster page support: DEVICE_LOCAL SSBO
+                        // holding firstDagNodeIdx per page. Shaders compute
+                        // localClusterIdx = globalDagNodeIdx - firstDagIdx
+                        // so every cluster in a multi-cluster page renders.
+                        // One-shot staging upload at asset load time.
+                        const auto firstDagIdx =
+                            m_micropolyReader->firstDagNodeIndices();
+                        const bool fdOk = m_micropolyStreaming
+                            ->attachPageFirstDagNodeBuffer(
+                                std::span<const u32>(firstDagIdx));
+                        if (!fdOk) {
+                            ENIGMA_LOG_ERROR(
+                                "[micropoly] pageFirstDagNode buffer attach failed "
+                                "(pageCount={})", pageCount);
+                        } else {
+                            const u32 fdSlot = m_descriptorAllocator->registerStorageBuffer(
+                                m_micropolyStreaming->pageFirstDagNodeBuffer(),
+                                m_micropolyStreaming->pageFirstDagNodeBufferBytes());
+                            m_micropolyStreaming->setPageFirstDagNodeBindless(fdSlot);
+                            ENIGMA_LOG_INFO(
+                                "[micropoly] pageFirstDagNode buffer attached "
+                                "(pageCount={}, bindless={})",
+                                pageCount, fdSlot);
+                        }
+
+                        // M3.3-deferred DAG SSBO: assemble the 48 B runtime
+                        // DAG node array (one entry per on-disk MpDagNode,
+                        // joining cone data from per-page ClusterOnDisk with
+                        // MpDagNode.pageId). This unblocks cull + raster +
+                        // sw_raster + M6.1 heatmaps — the shader's
+                        // `loadDagNode` reads 3×float4 per node with cone
+                        // fields that do NOT exist in the 36 B on-disk
+                        // MpDagNode (they live in ClusterOnDisk).
+                        auto runtimeDag =
+                            m_micropolyReader->assembleRuntimeDagNodes();
+                        if (!runtimeDag.has_value()) {
+                            ENIGMA_LOG_ERROR(
+                                "[micropoly] assembleRuntimeDagNodes failed: {} / {}",
+                                asset::mpReadErrorKindString(runtimeDag.error().kind),
+                                runtimeDag.error().detail);
+                        } else if (runtimeDag->empty()) {
+                            ENIGMA_LOG_INFO(
+                                "[micropoly] DAG node buffer skipped (empty DAG)");
+                        } else {
+                            const u8*  dagBytes = reinterpret_cast<const u8*>(
+                                runtimeDag->data());
+                            const u64  dagByteCount =
+                                runtimeDag->size() * sizeof(decltype(*runtimeDag->data()));
+                            const bool dagOk = m_micropolyStreaming
+                                ->attachDagNodeBuffer(
+                                    std::span<const u8>(dagBytes,
+                                                        static_cast<std::size_t>(dagByteCount)));
+                            if (!dagOk) {
+                                ENIGMA_LOG_ERROR(
+                                    "[micropoly] DAG node buffer attach failed "
+                                    "(dagNodeCount={})", runtimeDag->size());
+                            } else {
+                                const u32 dagSlot = m_descriptorAllocator->registerStorageBuffer(
+                                    m_micropolyStreaming->dagNodeBuffer(),
+                                    m_micropolyStreaming->dagNodeBufferBytes());
+                                m_micropolyStreaming->setDagNodeBufferBindless(dagSlot);
+                                ENIGMA_LOG_INFO(
+                                    "[micropoly] DAG node buffer attached "
+                                    "(dagNodeCount={}, bindless={})",
+                                    runtimeDag->size(), dagSlot);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            ENIGMA_LOG_INFO("[micropoly] streaming: disabled (capability row=Disabled)");
+        }
+    }
 
     m_trianglePass->buildPipeline(*m_shaderManager,
                                   m_descriptorAllocator->layout(),
@@ -139,6 +481,13 @@ Renderer::Renderer(Window& window)
         m_gbufMetalRough.view);
     m_gbufMotionVecStorageSlot  = m_descriptorAllocator->registerStorageImage(
         m_gbufMotionVec.view);
+
+    // M3.1: 64-bit visibility image. createVisImage is a no-op when
+    // MicropolyConfig::enabled=false (Principle 1 invariant) — the call is
+    // safe to make unconditionally. When enabled, allocates the image at
+    // swapchain extent and registers it as a bindless storage image.
+    m_micropolyPass->createVisImage(
+        m_swapchain->extent(), *m_allocator, *m_descriptorAllocator);
 
     // Nearest-neighbour sampler for G-buffer reads in the lighting pass.
     VkSamplerCreateInfo samplerCI{};
@@ -485,6 +834,63 @@ Renderer::~Renderer() {
     destroyHdrColor();
     destroyGBufferImages();
 
+    // M5a: release per-asset-proxy BLAS manager before MicropolyStreaming
+    // destructs. The manager does CPU-side decompression at build time so
+    // it doesn't reference PageCache pages owned by MicropolyStreaming,
+    // but we tear down explicitly here to keep the destruction order
+    // readable: BLAS manager -> streaming -> vis image -> VMA / Device.
+    // Safe to reset when null (non-RT devices never constructed it).
+    m_micropolyBlasManager.reset();
+
+    // M3.3: release the pageId->slot bindless slot before we let
+    // MicropolyStreaming destruct (its destructor frees the VkBuffer, but
+    // the bindless slot is Renderer-owned so we release it here).
+    if (m_micropolyStreaming != nullptr
+        && m_micropolyStreaming->pageToSlotBufferBindless() != UINT32_MAX) {
+        m_descriptorAllocator->releaseStorageBuffer(
+            m_micropolyStreaming->pageToSlotBufferBindless());
+        m_micropolyStreaming->setPageToSlotBindless(UINT32_MAX);
+    }
+
+    // Release the RequestQueue bindless slot. Registered as a UAV byte
+    // buffer at streaming init (see create block in ctor); the VkBuffer
+    // itself is owned by RequestQueue inside MicropolyStreaming and is
+    // released in its destructor below.
+    if (m_micropolyStreaming != nullptr
+        && m_micropolyStreaming->requestQueue().bindlessSlot() != UINT32_MAX) {
+        m_descriptorAllocator->releaseUavBuffer(
+            m_micropolyStreaming->requestQueue().bindlessSlot());
+        m_micropolyStreaming->requestQueue().setBindlessSlot(UINT32_MAX);
+    }
+
+    // M4.5: release the pageFirstDagNode bindless slot (same ownership
+    // model as pageToSlot — DescriptorAllocator owned by Renderer,
+    // VkBuffer owned by MicropolyStreaming).
+    if (m_micropolyStreaming != nullptr
+        && m_micropolyStreaming->pageFirstDagNodeBufferBindless() != UINT32_MAX) {
+        m_descriptorAllocator->releaseStorageBuffer(
+            m_micropolyStreaming->pageFirstDagNodeBufferBindless());
+        m_micropolyStreaming->setPageFirstDagNodeBindless(UINT32_MAX);
+    }
+
+    // M3.3-deferred: release the DAG node bindless slot. Same ownership
+    // model — DescriptorAllocator owned by Renderer, VkBuffer owned by
+    // MicropolyStreaming.
+    if (m_micropolyStreaming != nullptr
+        && m_micropolyStreaming->dagNodeBufferBindless() != UINT32_MAX) {
+        m_descriptorAllocator->releaseStorageBuffer(
+            m_micropolyStreaming->dagNodeBufferBindless());
+        m_micropolyStreaming->setDagNodeBufferBindless(UINT32_MAX);
+    }
+
+    // M3.1: Micropoly 64-bit vis image. destroyVisImage is a no-op when the
+    // pass never allocated one (disabled configs), so this call is safe
+    // unconditionally. Must run before DescriptorAllocator / VMA teardown
+    // since it releases a bindless slot + VMA allocation.
+    if (m_micropolyPass) {
+        m_micropolyPass->destroyVisImage(*m_allocator, *m_descriptorAllocator);
+    }
+
     // Physics debug renderer owns a VMA buffer — must be destroyed before VMA teardown.
     m_physicsDebugRenderer.destroy();
 
@@ -726,6 +1132,22 @@ void Renderer::drawFrame() {
     if (ImGui::IsKeyPressed(ImGuiKey_F6)) m_debugMode = DebugMode::DetailLighting;
     if (ImGui::IsKeyPressed(ImGuiKey_F7))
         m_debugMode = DebugMode::Clusters;
+    // M4.6: MicropolyRasterClass — availability gated on Int64 storage-image
+    // support + an active HW raster pass (both SW and HW write to the same
+    // vis image, so one capability-gate covers both).
+    if (ImGui::IsKeyPressed(ImGuiKey_F8) &&
+        m_device->supportsShaderImageInt64() &&
+        m_micropolyRasterPass != nullptr)
+        m_debugMode = DebugMode::MicropolyRasterClass;
+    // M6.1: LOD + Residency heatmaps — same capability gate as RasterClass.
+    if (ImGui::IsKeyPressed(ImGuiKey_F9) &&
+        m_device->supportsShaderImageInt64() &&
+        m_micropolyRasterPass != nullptr)
+        m_debugMode = DebugMode::MicropolyLodHeatmap;
+    if (ImGui::IsKeyPressed(ImGuiKey_F10) &&
+        m_device->supportsShaderImageInt64() &&
+        m_micropolyRasterPass != nullptr)
+        m_debugMode = DebugMode::MicropolyResidencyHeatmap;
 
     // ImGui new frame -- must be called before any ImGui:: window calls this frame.
     if (m_imguiLayer) {
@@ -824,30 +1246,90 @@ void Renderer::drawFrame() {
         const bool wireAvail  = m_device->fillModeNonSolidSupported() &&
                                 m_visibilityPass && m_visibilityPass->hasWireframePipeline();
         const bool clustAvail = true;
+        // M4.6 / M6.1: MicropolyRasterClass, LodHeatmap, ResidencyHeatmap
+        // all require Int64 storage images AND an active HW raster pass
+        // (so the vis image has meaningful writes). Share one availability
+        // flag across all three modes.
+        const bool mpClassAvail = m_device->supportsShaderImageInt64()
+                               && m_micropolyRasterPass != nullptr;
+        // M6.2b: bounds overlay iterates the DAG and projects bounding
+        // spheres — it does NOT read the 64-bit vis image, so no Int64
+        // storage-image requirement. All it needs is a wired DAG SSBO.
+        const bool mpBoundsAvail = m_micropolyStreaming
+                               && m_micropolyStreaming->dagNodeBufferBindless() != UINT32_MAX
+                               && m_micropolyReader
+                               && m_micropolyReader->header().dagNodeCount > 0u;
+        // M6 plan §3.M6: BinOverflow heat reads the SW raster tile-bin SSBOs.
+        // They only exist when the SW raster pass is constructed (which itself
+        // requires mesh-shaders + shaderImageInt64 + micropoly enabled). No
+        // vis-image dependency — this overlay is a read-side consumer of the
+        // binning SSBOs only.
+        const bool mpBinOverflowAvail = m_micropolySwRasterPass != nullptr;
 
         ImGui::SetNextWindowPos({620.f, 10.f}, ImGuiCond_FirstUseEver);
         ImGui::SetNextWindowSize({280.f, 140.f}, ImGuiCond_FirstUseEver);
         if (ImGui::Begin("Debug Views")) {
             static const char* kModeNames[] = {
-                "Lit", "Unlit", "Wireframe", "Lit Wireframe", "Detail Lighting", "Clusters"
+                "Lit", "Unlit", "Wireframe", "Lit Wireframe", "Detail Lighting", "Clusters",
+                "Micropoly RasterClass", "Micropoly LOD Heatmap",
+                "Micropoly Residency Heatmap",
+                "Micropoly Bounds",
+                "Micropoly BinOverflow"
             };
             int modeInt = static_cast<int>(m_debugMode);
-            if (ImGui::Combo("Mode", &modeInt, kModeNames, 6)) {
+            if (ImGui::Combo("Mode", &modeInt, kModeNames,
+                             static_cast<int>(sizeof(kModeNames) / sizeof(kModeNames[0])))) {
                 DebugMode selected = static_cast<DebugMode>(modeInt);
                 if (!wireAvail && (selected == DebugMode::Wireframe || selected == DebugMode::LitWireframe))
                     selected = DebugMode::Lit;
                 if (!clustAvail && selected == DebugMode::Clusters)
+                    selected = DebugMode::Lit;
+                if (!mpClassAvail && (selected == DebugMode::MicropolyRasterClass
+                                      || selected == DebugMode::MicropolyLodHeatmap
+                                      || selected == DebugMode::MicropolyResidencyHeatmap))
+                    selected = DebugMode::Lit;
+                if (!mpBoundsAvail && selected == DebugMode::MicropolyBounds)
+                    selected = DebugMode::Lit;
+                if (!mpBinOverflowAvail && selected == DebugMode::MicropolyBinOverflowHeat)
                     selected = DebugMode::Lit;
                 m_debugMode = selected;
             }
             if (m_debugMode == DebugMode::Wireframe || m_debugMode == DebugMode::LitWireframe)
                 ImGui::ColorEdit3("Wire Color", &m_wireframeColor.x);
             ImGui::Separator();
-            ImGui::TextDisabled("F1=Lit F2=Unlit F3=Wire F4=LitWire F6=Detail F7=Cluster");
+            ImGui::TextDisabled("F1=Lit F2=Unlit F3=Wire F4=LitWire F6=Detail F7=Cluster F8=MpRaster");
             if (!wireAvail)
                 ImGui::TextDisabled("Wireframe: requires mesh shaders + fillModeNonSolid");
+            if (!mpClassAvail)
+                ImGui::TextDisabled("Micropoly RasterClass: requires shaderImageInt64 + HW raster pass");
         }
         ImGui::End();
+
+        // M6.2a: Micropoly runtime settings panel — one window for the
+        // enable toggle, page-cache slider, force-HW/SW debug flags, and
+        // the overlay radio. Toggled by the checkbox exposed here (no
+        // separate main-menu bar in this build); the F11 key provides a
+        // quick show/hide shortcut alongside the existing F1..F10 debug
+        // hotkeys.
+        if (ImGui::IsKeyPressed(ImGuiKey_F11)) {
+            m_mpSettingsPanelOpen = !m_mpSettingsPanelOpen;
+        }
+        // Feed the panel the live cull counters when the pass exists.
+        // readbackStats() is cheap (7 u32 loads from a persistent-mapped
+        // pointer) so unconditionally snapshotting here is fine. When
+        // micropoly is disabled m_micropolyCullPass is null and we pass
+        // nullptr so the panel skips the stats section entirely.
+        renderer::micropoly::CullStats mpStatsSnapshot{};
+        const renderer::micropoly::CullStats* mpStatsPtr = nullptr;
+        if (m_micropolyCullPass) {
+            mpStatsSnapshot = m_micropolyCullPass->readbackStats();
+            mpStatsPtr      = &mpStatsSnapshot;
+        }
+        m_mpSettingsPanel.draw(&m_mpSettingsPanelOpen,
+                               *m_device,
+                               m_micropolyConfig,
+                               m_debugMode,
+                               mpStatsPtr);
     }
 
     VkImage     targetImage = m_swapchain->image(imageIndex);
@@ -924,6 +1406,282 @@ void Renderer::drawFrame() {
         const u32 terrainMeshletCount  = totalMeshletCount - sceneMeshletCount;
 
         m_gpuScene->upload(frame.commandBuffer, m_frameIndex, totalMeshletCount);
+
+        // ---- Micropoly streaming per-frame pump (M2.4a) ----
+        // Call site per plan §3.M2 (ralplan-micropolygon.md line 325): drain
+        // the GPU request queue, dispatch async IO, collect completions,
+        // allocate PageCache slots, record transfer-queue uploads, submit
+        // with a timeline semaphore. When m_micropolyStreaming is null
+        // (config disabled or capability-gated off), this is a NO-OP and
+        // the frame is bit-identical to the pre-micropoly path.
+        //
+        // BARRIER NOTE: when M3 adds the compute producer that fills the
+        // RequestQueue, a pipeline barrier with dstStageMask=HOST_BIT and
+        // dstAccessMask=HOST_READ_BIT | HOST_WRITE_BIT must be emitted on
+        // frame.commandBuffer BEFORE this call (the barrier makes the
+        // GPU writes visible to the host-side drain below). In M2.4a
+        // there is no producer yet — no barrier is needed today, but the
+        // call is placed here so the barrier has a natural home later.
+        if (m_micropolyStreaming) {
+            // Clear the 64-bit vis image to the kMpVisEmpty sentinel (0)
+            // before this frame's cull/raster writes. First-frame call also
+            // handles the UNDEFINED → GENERAL layout transition. Missing
+            // this clear is the reason all atomic-max writes from the HW +
+            // SW raster paths were silently discarded — the image stayed in
+            // UNDEFINED layout and the driver no-ops storage writes there.
+            if (m_micropolyPass) {
+                m_micropolyPass->clearVisImage(frame.commandBuffer);
+
+                // Transition clear write (TRANSFER_WRITE) to the storage
+                // accesses the raster paths need: FRAGMENT_SHADER for HW
+                // PSMain's InterlockedMax, COMPUTE_SHADER for SW raster
+                // fragment compute. The image stays in GENERAL.
+                VkMemoryBarrier2 postClear{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};
+                postClear.srcStageMask  = VK_PIPELINE_STAGE_2_CLEAR_BIT
+                                        | VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+                postClear.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+                postClear.dstStageMask  = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
+                                        | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                postClear.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+                                        | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+                VkDependencyInfo dep{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+                dep.memoryBarrierCount = 1u;
+                dep.pMemoryBarriers    = &postClear;
+                vkCmdPipelineBarrier2(frame.commandBuffer, &dep);
+            }
+            (void)m_micropolyStreaming->beginFrame();
+            // The graphics-queue submit at the end of drawFrame() waits on
+            // m_micropolyStreaming->uploadDoneSemaphore() at value
+            // uploadCounter(); see the vkQueueSubmit call site.
+        }
+
+        // M3.2: cluster cull compute dispatch. Runs AFTER streaming.beginFrame
+        // (so newly-uploaded pages are observable by the residency bitmap)
+        // and BEFORE any downstream HW/SW raster consumer (M3.3+). Zero-
+        // cluster dispatch is legal and is a no-op. The pass emits a
+        // compute-write → (DRAW_INDIRECT | TASK | MESH) barrier on the
+        // indirect-draw buffer + a (HOST | COMPUTE) barrier on the cull-
+        // stats buffer; M3.3 can bind the indirect-draw buffer directly.
+        //
+        // M3.2 scope: the pass is constructed but the DAG / residency-
+        // bitmap SSBO bindless slots are not yet plumbed through (those
+        // ride in on M3.3 MicropolyPass rewire). Until then we call
+        // resetCounters() every frame so the indirect-draw header stays
+        // zero — the pass contributes exactly zero draws. Principle 1
+        // holds because when m_micropolyCullPass is null (disabled
+        // config), none of this runs at all.
+        if (m_micropolyCullPass) {
+            m_micropolyCullPass->resetCounters(frame.commandBuffer);
+            // Reset→compute barrier so the shader sees a zeroed header.
+            VkMemoryBarrier2 cullResetBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+            cullResetBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            cullResetBarrier.srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+            cullResetBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+            cullResetBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT
+                                            | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT;
+            VkDependencyInfo cullResetDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+            cullResetDep.memoryBarrierCount = 1u;
+            cullResetDep.pMemoryBarriers    = &cullResetBarrier;
+            vkCmdPipelineBarrier2(frame.commandBuffer, &cullResetDep);
+            // Dispatch with zero clusters until the DAG plumbing lands in
+            // M3.3. The pass treats totalClusterCount==0 as a legal no-op
+            // (early return, no dispatch, no barrier), matching the
+            // gpu_cull pattern. When M3.3 wires in a real DAG SSBO the
+            // cluster count will come from MicropolyStreaming's resident
+            // page set.
+            renderer::micropoly::MicropolyCullPass::DispatchInputs cin{};
+            cin.cmd                         = frame.commandBuffer;
+            cin.globalSet                   = m_descriptorAllocator->globalSet();
+            // Cull processes one DAG node per thread — totalClusterCount is
+            // the full DAG size. The cluster-cull shader's leaf-LOD gate
+            // (lodLevel != 0) skips non-leaf nodes before any draw emission,
+            // so passing dagNodeCount here is correct even though many nodes
+            // are parent groups. Zero when the DAG SSBO isn't attached.
+            cin.totalClusterCount           =
+                (m_micropolyStreaming && m_micropolyStreaming->dagNodeBufferBindless() != UINT32_MAX
+                 && m_micropolyReader)
+                    ? m_micropolyReader->header().dagNodeCount : 0u;
+            cin.dagBufferBindlessIndex      =
+                m_micropolyStreaming ? m_micropolyStreaming->dagNodeBufferBindless()
+                                     : UINT32_MAX;
+            cin.cameraSlot                  = cameraSlot;
+            cin.hiZMipCount                 =
+                m_hizPass ? static_cast<f32>(m_hizPass->mip_count()) : 1.0f;
+            cin.hiZBindlessIndex            =
+                m_hizPass ? m_hizPass->mip_slot(0u) : UINT32_MAX;
+            cin.screenSpaceErrorThreshold   = m_micropolyConfig.lodScale;
+            // Security HIGH-2: pageCount bounds-checks residency-bitmap reads.
+            // Zero is legal for totalClusterCount=0 dispatches (early-out).
+            cin.pageCount                   =
+                m_micropolyReader ? m_micropolyReader->header().pageCount : 0u;
+            // M4.4: classifier inputs. Page cache slots + stride feed the
+            // per-cluster triangleCount lookup; screenHeight converts world
+            // radius into pixel radius for the projected-area threshold.
+            if (m_micropolyStreaming) {
+                cin.pageToSlotBufferBindlessIndex =
+                    m_micropolyStreaming->pageToSlotBufferBindless();
+                cin.pageCacheBufferBindlessIndex  =
+                    m_micropolyStreaming->pageCache().bindlessIndex();
+                cin.pageSlotBytes                 =
+                    m_micropolyStreaming->pageCache().slotBytes();
+                // M4.5 multi-cluster page support: classifier reads
+                // firstDagNodeIdx to derive per-page local cluster index.
+                cin.pageFirstDagNodeBufferBindlessIndex =
+                    m_micropolyStreaming->pageFirstDagNodeBufferBindless();
+                // Bindless slot for the RequestQueue SSBO — the cull shader
+                // writes pageId requests here via emitPageReq(). Without
+                // this the streaming pump never sees work and every page
+                // stays non-resident (cluster cull sees pageToSlot == -1
+                // forever, survivors stay at 0).
+                cin.requestQueueBindlessIndex =
+                    m_micropolyStreaming->requestQueue().bindlessSlot();
+            }
+            cin.screenHeight                =
+                m_swapchain ? m_swapchain->extent().height : 0u;
+            m_gpuProfiler->beginZone(frame.commandBuffer, "MicropolyCull");
+            m_micropolyCullPass->dispatch(cin);
+            m_gpuProfiler->endZone(frame.commandBuffer);
+
+            // M3.3: HW raster dispatch. Consumes the cull pass's indirect-
+            // draw buffer (barrier is already emitted by MicropolyCullPass::
+            // dispatch: COMPUTE_SHADER_BIT -> DRAW_INDIRECT | TASK | MESH).
+            // The vis image is kept in VK_IMAGE_LAYOUT_GENERAL across the
+            // frame — MicropolyPass::clearVisImage handled the initial
+            // UNDEFINED -> GENERAL transition, and atomic-min writes are
+            // legal in GENERAL layout.
+            //
+            // M3.3 zero-cluster safety: the cull pass emits zero draws
+            // until the DAG SSBO is wired (tracked as plan follow-up
+            // M3.3a). vkCmdDrawMeshTasksIndirectCountEXT with count==0 is
+            // a legal no-op — no draws dispatched. This keeps Principle 1
+            // safe even though the raster pass IS bound.
+            if (m_micropolyRasterPass && m_micropolyStreaming) {
+                // Make beginFrame()'s host-coherent writes to pageToSlotBuffer
+                // visible to TASK/MESH shader reads. Persistent-mapped host-
+                // coherent memory still requires an explicit HOST_WRITE ->
+                // SHADER_READ memory dependency per Vulkan spec 7.1.1.
+                // M4.2: the SW raster binning compute (sw_raster_bin.comp.hlsl)
+                // also reads pageToSlotBuffer via bindless, so COMPUTE_SHADER
+                // must be in dstStageMask alongside the TASK/MESH stages.
+                VkMemoryBarrier2 hostBarrier{ VK_STRUCTURE_TYPE_MEMORY_BARRIER_2 };
+                hostBarrier.srcStageMask  = VK_PIPELINE_STAGE_2_HOST_BIT;
+                hostBarrier.srcAccessMask = VK_ACCESS_2_HOST_WRITE_BIT;
+                hostBarrier.dstStageMask  = VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT
+                                          | VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT
+                                          | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+                hostBarrier.dstAccessMask = VK_ACCESS_2_SHADER_STORAGE_READ_BIT;
+                VkDependencyInfo hostDep{ VK_STRUCTURE_TYPE_DEPENDENCY_INFO };
+                hostDep.memoryBarrierCount = 1u;
+                hostDep.pMemoryBarriers    = &hostBarrier;
+                vkCmdPipelineBarrier2(frame.commandBuffer, &hostDep);
+
+                renderer::micropoly::MicropolyRasterPass::DispatchInputs rin{};
+                rin.cmd                            = frame.commandBuffer;
+                rin.globalSet                      = m_descriptorAllocator->globalSet();
+                rin.indirectBuffer                 = m_micropolyCullPass->indirectDrawBuffer();
+                rin.indirectBufferBindlessIndex    = m_micropolyCullPass->indirectDrawBindlessSlot();
+                // M3.3-deferred DAG SSBO wire-up: replaces the UINT32_MAX
+                // stub. The assembled runtime DAG (MicropolyStreaming's
+                // DEVICE_LOCAL SSBO) carries one 48 B node per on-disk
+                // MpDagNode, joining cone data from per-page ClusterOnDisk.
+                rin.dagBufferBindlessIndex         =
+                    m_micropolyStreaming->dagNodeBufferBindless();
+                rin.pageToSlotBufferBindlessIndex  = m_micropolyStreaming->pageToSlotBufferBindless();
+                rin.pageCacheBufferBindlessIndex   = m_micropolyStreaming->pageCache().bindlessIndex();
+                rin.cameraSlot                     = cameraSlot;
+                rin.visImageBindlessIndex          = m_micropolyPass ? m_micropolyPass->visBindlessSlot() : UINT32_MAX;
+                rin.extent                         = m_swapchain->extent();
+                rin.pageSlotBytes                  = m_micropolyStreaming->pageCache().slotBytes();
+                rin.pageCount                      = m_micropolyStreaming->pageToSlotPageCount();
+                rin.dagNodeCount                   =
+                    m_micropolyReader ? m_micropolyReader->header().dagNodeCount : 0u;
+                rin.maxClusters                    = renderer::micropoly::kMpMaxIndirectDrawClusters;
+                // M4.4 dispatcher classifier tag SSBO — task shader gates
+                // DispatchMesh(0,...) on clusters classified SW.
+                rin.rasterClassBufferBindlessIndex =
+                    m_micropolyCullPass->rasterClassBufferBindlessSlot();
+                // M4.5 multi-cluster: task shader reads firstDagNodeIdx to
+                // compute per-cluster localClusterIdx, then forwards it to
+                // the mesh shader via the task->mesh payload.
+                rin.pageFirstDagNodeBufferBindlessIndex =
+                    m_micropolyStreaming->pageFirstDagNodeBufferBindless();
+                m_gpuProfiler->beginZone(frame.commandBuffer, "MicropolyHwRaster");
+                m_micropolyRasterPass->record(rin);
+                m_gpuProfiler->endZone(frame.commandBuffer);
+
+                // M4.2: SW raster binning. Shares the same cull indirect
+                // buffer + DAG/page bindings as the HW raster. The HW
+                // raster pass already emitted a FRAGMENT_SHADER ->
+                // COMPUTE_SHADER barrier on the vis image; we pile on a
+                // separate set of SSBO writes (tileBinCount / Entries /
+                // spill / dispatchIndirect) that no other pass reads yet.
+                // The binning dispatch is pure additive — when M4.3 lands
+                // the fragment compute just consumes these outputs.
+                if (m_micropolySwRasterPass) {
+                    renderer::micropoly::MicropolySwRasterPass::DispatchInputs sin{};
+                    sin.cmd                            = frame.commandBuffer;
+                    sin.globalSet                      = m_descriptorAllocator->globalSet();
+                    sin.indirectBuffer                 = m_micropolyCullPass->indirectDrawBuffer();
+                    sin.indirectBufferBindlessIndex    = m_micropolyCullPass->indirectDrawBindlessSlot();
+                    sin.dagBufferBindlessIndex         = rin.dagBufferBindlessIndex;
+                    sin.pageToSlotBufferBindlessIndex  = rin.pageToSlotBufferBindlessIndex;
+                    sin.pageCacheBufferBindlessIndex   = rin.pageCacheBufferBindlessIndex;
+                    sin.cameraSlot                     = rin.cameraSlot;
+                    // M4.3: feed the R64_UINT vis image's bindless slot so
+                    // the fragment raster pipeline can InterlockedMax into
+                    // the same image the HW raster's PSMain writes. Both
+                    // paths co-exist on a single vis image (reverse-Z).
+                    sin.visImage64Bindless             = rin.visImageBindlessIndex;
+                    sin.extent                         = rin.extent;
+                    sin.pageSlotBytes                  = rin.pageSlotBytes;
+                    sin.pageCount                      = rin.pageCount;
+                    sin.dagNodeCount                   = rin.dagNodeCount;
+                    // M4.4 dispatcher classifier tag — bin shader's
+                    // workgroup-thread-0 early-outs when cluster is HW.
+                    sin.rasterClassBufferBindlessIndex = rin.rasterClassBufferBindlessIndex;
+                    // M4.5 multi-cluster: same firstDagNodeIdx slot both
+                    // bin + raster compute paths consume.
+                    sin.pageFirstDagNodeBufferBindlessIndex =
+                        rin.pageFirstDagNodeBufferBindlessIndex;
+                    m_gpuProfiler->beginZone(frame.commandBuffer, "MicropolySwRaster");
+                    m_micropolySwRasterPass->record(sin);
+                    m_gpuProfiler->endZone(frame.commandBuffer);
+                }
+            }
+        }
+
+        // Throttled per-second cull-stats diagnostic. Helps catch
+        // "is cull producing any survivors?" without opening the ImGui
+        // panel. readbackStats() is cheap (7 u32 loads from a persistent-
+        // mapped pointer); stats reflect the PREVIOUS frame (the one whose
+        // submit has fenced). Guarded on micropoly enabled + pass alive so
+        // there's zero cost on disabled/non-capable paths.
+        if (m_micropolyConfig.enabled && m_micropolyCullPass != nullptr) {
+            static auto sCullStatLastLog = std::chrono::steady_clock::now()
+                                         - std::chrono::seconds(2); // force first-hit log
+            const auto now = std::chrono::steady_clock::now();
+            if (std::chrono::duration<f64>(now - sCullStatLastLog).count() > 1.0) {
+                sCullStatLastLog = now;
+                const auto s = m_micropolyCullPass->readbackStats();
+                ENIGMA_LOG_INFO(
+                    "[micropoly_cull] dispatched={} visible={} "
+                    "culled(LOD={} resid={} frus={} back={} hiz={})",
+                    s.totalDispatched, s.visible, s.culledLOD,
+                    s.culledResidency, s.culledFrustum,
+                    s.culledBackface, s.culledHiZ);
+                // Surface per-pass GPU timings on the same cadence so we can
+                // attribute 5-fps regressions without the ImGui overlay.
+                f32 cullMs = 0.0f, hwMs = 0.0f, swMs = 0.0f;
+                for (const auto& z : m_lastGpuTimings) {
+                    if (z.name == "MicropolyCull")      cullMs = z.durationMs;
+                    else if (z.name == "MicropolyHwRaster") hwMs = z.durationMs;
+                    else if (z.name == "MicropolySwRaster") swMs = z.durationMs;
+                }
+                ENIGMA_LOG_INFO(
+                    "[micropoly_gpu] cull={:.3f}ms hwRaster={:.3f}ms swRaster={:.3f}ms",
+                    cullMs, hwMs, swMs);
+            }
+        }
 
         m_indirectBuffer->reset_count(frame.commandBuffer);
 
@@ -1101,12 +1859,55 @@ void Renderer::drawFrame() {
             }
 
             // MaterialEvalPass reads vis buffer + depth, writes G-buffer to SHADER_READ_ONLY_OPTIMAL.
+            // M3.4: also consumes the 64-bit Micropoly vis image via MP_ENABLE
+            // spec constant. enableMp mirrors the capability gate used for
+            // constructing MicropolyCullPass/MicropolyRasterPass so the three
+            // passes agree on whether the micropoly path is live this frame.
+            // The raster pass emits its own FRAGMENT_SHADER -> COMPUTE_SHADER
+            // memory barrier on the vis image before returning from record(),
+            // so no extra Renderer-level barrier is required here.
+            const u32  vis64Slot =
+                m_micropolyPass ? m_micropolyPass->visBindlessSlot() : UINT32_MAX;
+            const bool enableMp  =
+                (m_micropolyCullPass != nullptr)
+             && (m_micropolyRasterPass != nullptr)
+             && (m_micropolyStreaming != nullptr)
+             && (vis64Slot != UINT32_MAX);
+            // M5 material resolution — thread the mp geometry bindless slots
+            // so the mpWins branch can walk DAG -> page -> vertices and
+            // output real world-space normals instead of the magenta stamp.
+            MaterialEvalPass::MpResolveInputs mpResolve{};
+            if (enableMp) {
+                mpResolve.dagBufferSlot        = m_micropolyStreaming->dagNodeBufferBindless();
+                mpResolve.pageToSlotSlot       = m_micropolyStreaming->pageToSlotBufferBindless();
+                mpResolve.pageCacheSlot        = m_micropolyStreaming->pageCache().bindlessIndex();
+                mpResolve.pageFirstDagNodeSlot = m_micropolyStreaming->pageFirstDagNodeBufferBindless();
+                mpResolve.pageSlotBytes        = m_micropolyStreaming->pageCache().slotBytes();
+                mpResolve.pageCount            = m_micropolyStreaming->pageToSlotPageCount();
+                mpResolve.dagNodeCount         =
+                    m_micropolyReader ? m_micropolyReader->header().dagNodeCount : 0u;
+            }
             m_gpuProfiler->beginZone(frame.commandBuffer, "MaterialEval");
             m_materialEvalPass->record(frame.commandBuffer, m_descriptorAllocator->globalSet(),
                                         extent, m_visibilityPass->vis_buffer_slot(),
                                         *m_gpuScene, *m_gpuMeshlets,
-                                        m_scene->materialBufferSlot, cameraSlot);
+                                        m_scene->materialBufferSlot, cameraSlot,
+                                        vis64Slot, enableMp, mpResolve);
             m_gpuProfiler->endZone(frame.commandBuffer);
+
+            // Micropoly scaffold (M0a) — record() is a no-op whenever
+            // MicropolyConfig::enabled is false, which is the default. This
+            // call only reserves the render-graph slot for future work;
+            // with enabled=false it emits no commands, no barriers, no
+            // descriptor updates. Moving this line or wrapping it in a
+            // different predicate breaks the Principle 1 invariant.
+            //
+            // m_micropolyPass is always non-null after Renderer construction
+            // (see ctor: constructed unconditionally, gated internally via
+            // active()). Calling record() directly matches the idiom used
+            // by every other mandatory pass (m_materialEvalPass, m_lightingPass,
+            // m_postProcessPass, etc.).
+            m_micropolyPass->record(frame.commandBuffer);
         }
     }
 
@@ -1644,6 +2445,195 @@ void Renderer::drawFrame() {
                 m_gpuProfiler->endZone(cmd);
             };
             m_renderGraph->addRasterPass(std::move(dbgDesc));
+
+        } else if (m_debugMode == DebugMode::MicropolyRasterClass) {
+            // === M4.6: MICROPOLY RASTER CLASS — decoded rasterClassBits overlay ===
+            // Samples the 64-bit Micropoly vis image and writes per-pixel
+            // red (HW) / green (SW) / black (empty). The vis image stays in
+            // GENERAL layout (see MicropolyPass::createVisImage) so no layout
+            // transition is needed — but the upstream raster passes terminate
+            // their barrier chains at COMPUTE_SHADER (HW raster FRAGMENT→COMPUTE,
+            // SW raster COMPUTE→COMPUTE). This debug read is in FRAGMENT_SHADER,
+            // so we emit an explicit COMPUTE→FRAGMENT memory barrier inside the
+            // execute lambda to make the prior compute writes visible.
+            const u32 vis64Slot =
+                m_micropolyPass ? m_micropolyPass->visBindlessSlot() : UINT32_MAX;
+            gfx::RenderGraph::RasterPassDesc dbgDesc{};
+            // Emit vis-image COMPUTE->FRAGMENT barrier as a preceding
+            // no-attachment pass. Must run OUTSIDE the dynamic-rendering
+            // instance the debug raster pass opens.
+            addMicropolyVisBarrierPass(*m_renderGraph);
+
+            dbgDesc.name          = "DebugMicropolyRasterClassPass";
+            dbgDesc.colorTargets  = {colorHandle};
+            dbgDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            dbgDesc.execute       = [this, vis64Slot](VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "DebugMicropolyRasterClassPass");
+                if (vis64Slot != UINT32_MAX) {
+                    m_debugVisPass->recordMicropolyRasterClass(
+                        cmd, m_descriptorAllocator->globalSet(), ext, vis64Slot);
+                }
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(dbgDesc));
+
+        } else if (m_debugMode == DebugMode::MicropolyLodHeatmap) {
+            // === M6.1: MICROPOLY LOD HEATMAP — cluster → DAG → lodLevel ===
+            // Same vis-image barrier pattern as MicropolyRasterClass (M4.6
+            // Phase 4 fix). Additional SSBOs read: the DAG buffer (not yet
+            // wired; UINT32_MAX falls through to magenta on the shader side).
+            const u32 vis64Slot =
+                m_micropolyPass ? m_micropolyPass->visBindlessSlot() : UINT32_MAX;
+            // M3.3-deferred: DAG buffer bindless slot now wired through
+            // MicropolyStreaming's DEVICE_LOCAL SSBO. UINT32_MAX falls back
+            // to the shader's defensive magenta paint when micropoly is
+            // disabled or asset-load failed.
+            const u32 dagSlot       = m_micropolyStreaming
+                ? m_micropolyStreaming->dagNodeBufferBindless() : UINT32_MAX;
+            const u32 dagNodeCount  =
+                m_micropolyReader ? m_micropolyReader->header().dagNodeCount : 0u;
+            gfx::RenderGraph::RasterPassDesc dbgDesc{};
+            addMicropolyVisBarrierPass(*m_renderGraph);
+            dbgDesc.name          = "DebugMicropolyLodHeatmapPass";
+            dbgDesc.colorTargets  = {colorHandle};
+            dbgDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            dbgDesc.execute       = [this, vis64Slot, dagSlot, dagNodeCount]
+                                    (VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "DebugMicropolyLodHeatmapPass");
+                if (vis64Slot != UINT32_MAX) {
+
+                    m_debugVisPass->recordMicropolyLodHeatmap(
+                        cmd, m_descriptorAllocator->globalSet(), ext,
+                        vis64Slot, dagSlot, dagNodeCount);
+                }
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(dbgDesc));
+
+        } else if (m_debugMode == DebugMode::MicropolyResidencyHeatmap) {
+            // === M6.1: MICROPOLY RESIDENCY HEATMAP — cluster → pageId → slot ===
+            // Reads vis + DAG + pageToSlot. Under steady-state operation any
+            // non-resident fragment should be rare (cull-pass gates geometry
+            // on residency); magenta pixels indicate eviction racing raster
+            // or a DAG/pageCount bound mismatch.
+            const u32 vis64Slot =
+                m_micropolyPass ? m_micropolyPass->visBindlessSlot() : UINT32_MAX;
+            // M3.3-deferred: DAG buffer bindless slot wired from streaming.
+            const u32 dagSlot        = m_micropolyStreaming
+                ? m_micropolyStreaming->dagNodeBufferBindless() : UINT32_MAX;
+            const u32 pageToSlotSlot = m_micropolyStreaming
+                ? m_micropolyStreaming->pageToSlotBufferBindless() : UINT32_MAX;
+            const u32 dagNodeCount   =
+                m_micropolyReader ? m_micropolyReader->header().dagNodeCount : 0u;
+            const u32 pageCount      = m_micropolyStreaming
+                ? m_micropolyStreaming->pageToSlotPageCount() : 0u;
+            gfx::RenderGraph::RasterPassDesc dbgDesc{};
+            addMicropolyVisBarrierPass(*m_renderGraph);
+            dbgDesc.name          = "DebugMicropolyResidencyHeatmapPass";
+            dbgDesc.colorTargets  = {colorHandle};
+            dbgDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            dbgDesc.execute       = [this, vis64Slot, dagSlot, pageToSlotSlot,
+                                     dagNodeCount, pageCount]
+                                    (VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "DebugMicropolyResidencyHeatmapPass");
+                if (vis64Slot != UINT32_MAX) {
+
+                    m_debugVisPass->recordMicropolyResidencyHeatmap(
+                        cmd, m_descriptorAllocator->globalSet(), ext,
+                        vis64Slot, dagSlot, pageToSlotSlot,
+                        dagNodeCount, pageCount);
+                }
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(dbgDesc));
+
+        } else if (m_debugMode == DebugMode::MicropolyBounds) {
+            // === M6.2b: MICROPOLY BOUNDS — per-cluster bounding-sphere wireframe ===
+            // Iterates the DAG and projects each cluster's bounding sphere
+            // to screen space, tinting pixels near the projected outline.
+            // Reads only the DAG SSBO (written once at asset load) + the
+            // camera buffer (uploaded earlier in drawFrame); no COMPUTE→
+            // FRAGMENT barrier is needed — the DAG is not touched by any
+            // earlier compute pass this frame.
+            //
+            // Cost: O(pixels × clusters), capped at 4096 clusters on the
+            // shader side. Acceptable for debug visualisation; not
+            // production-viable.
+            const u32 dagSlot       = m_micropolyStreaming
+                ? m_micropolyStreaming->dagNodeBufferBindless() : UINT32_MAX;
+            const u32 dagNodeCount  =
+                m_micropolyReader ? m_micropolyReader->header().dagNodeCount : 0u;
+            const u32 screenW       = extent.width;
+            const u32 screenH       = extent.height;
+            gfx::RenderGraph::RasterPassDesc dbgDesc{};
+            dbgDesc.name          = "DebugMicropolyBoundsPass";
+            dbgDesc.colorTargets  = {colorHandle};
+            dbgDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            dbgDesc.execute       = [this, dagSlot, dagNodeCount,
+                                     cameraSlot, screenW, screenH]
+                                    (VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "DebugMicropolyBoundsPass");
+                if (dagSlot != UINT32_MAX && dagNodeCount != 0u) {
+                    m_debugVisPass->recordMicropolyBounds(
+                        cmd, m_descriptorAllocator->globalSet(), ext,
+                        dagSlot, dagNodeCount, cameraSlot,
+                        screenW, screenH);
+                }
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(dbgDesc));
+
+        } else if (m_debugMode == DebugMode::MicropolyBinOverflowHeat) {
+            // === M6 plan §3.M6: MICROPOLY BIN OVERFLOW HEAT ===
+            // Per-pixel colour by the SW raster tile bin fill level. Reads
+            // the tileBinCount + spillBuffer SSBOs that MicropolySwRasterPass
+            // writes during the SW binning compute dispatch. Availability
+            // gate is the pass itself being constructed (mpBinOverflowAvail)
+            // — HW-only builds and non-micropoly capability rows skip this
+            // branch entirely. Does NOT read the 64-bit vis image, so only
+            // the SSBO barrier is needed.
+            //
+            // The upstream SW raster pass terminates its barrier chain at
+            // COMPUTE_SHADER (its own COMPUTE->COMPUTE barrier on the bin
+            // SSBOs). This debug read is in FRAGMENT_SHADER, so we reuse
+            // the existing emitMicropolyVisComputeToFragmentBarrier helper —
+            // despite its name it emits a generic memory barrier on all
+            // shader-storage reads/writes, which is what we need here.
+            const u32 tileBinCountSlot = m_micropolySwRasterPass
+                ? m_micropolySwRasterPass->tileBinCountBindlessSlot() : UINT32_MAX;
+            const u32 spillBufferSlot  = m_micropolySwRasterPass
+                ? m_micropolySwRasterPass->spillBufferBindlessSlot()  : UINT32_MAX;
+            const u32 tilesX           = m_micropolySwRasterPass
+                ? m_micropolySwRasterPass->tilesX() : 0u;
+            const u32 tilesY           = m_micropolySwRasterPass
+                ? m_micropolySwRasterPass->tilesY() : 0u;
+            const u32 screenW          = extent.width;
+            const u32 screenH          = extent.height;
+            gfx::RenderGraph::RasterPassDesc dbgDesc{};
+            addMicropolyVisBarrierPass(*m_renderGraph);
+            dbgDesc.name          = "DebugMicropolyBinOverflowPass";
+            dbgDesc.colorTargets  = {colorHandle};
+            dbgDesc.clearColor    = {{0.0f, 0.0f, 0.0f, 1.0f}};
+            dbgDesc.execute       = [this, tileBinCountSlot, spillBufferSlot,
+                                     tilesX, tilesY, screenW, screenH]
+                                    (VkCommandBuffer cmd, VkExtent2D ext) {
+                m_gpuProfiler->beginZone(cmd, "DebugMicropolyBinOverflowPass");
+                if (tileBinCountSlot != UINT32_MAX
+                    && spillBufferSlot != UINT32_MAX
+                    && tilesX != 0u && tilesY != 0u) {
+                    // COMPUTE->FRAGMENT barrier on the SW bin SSBOs (generic
+                    // memory barrier; the helper name is vis-centric for
+                    // historical reasons but the barrier it emits is
+                    // storage-buffer-wide).
+
+                    m_debugVisPass->recordMicropolyBinOverflow(
+                        cmd, m_descriptorAllocator->globalSet(), ext,
+                        tileBinCountSlot, spillBufferSlot,
+                        tilesX, tilesY, screenW, screenH);
+                }
+                m_gpuProfiler->endZone(cmd);
+            };
+            m_renderGraph->addRasterPass(std::move(dbgDesc));
         }
 
     } else {
@@ -1716,24 +2706,69 @@ void Renderer::drawFrame() {
     const u64 signalValue = frame.frameValue + 1;
     const VkSemaphore imageRenderFinished = m_swapchain->renderFinished(imageIndex);
 
-    const VkSemaphore        waitSems[]    = { frame.imageAvailable };
-    const VkPipelineStageFlags waitStages[] = { VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT };
+    // M2.4a: when micropoly streaming submitted a transfer upload this frame,
+    // the graphics queue must wait on the timeline-semaphore value returned
+    // by uploadCounter() before dispatching any shader that reads the page
+    // cache. Because the current wait dstStageMask only covers color-output
+    // (imageAvailable), extending the wait list to include the streaming
+    // upload at COMPUTE_SHADER/TASK_SHADER/MESH_SHADER is the safe choice.
+    //
+    // When streaming is off OR when no upload happened this frame
+    // (uploadCounter==0), we don't add the wait — the semaphore value would
+    // still be 0 and waiting on it is a no-op, but skipping keeps the
+    // pre-M2.4a submit shape on the bit-identical-when-disabled path.
+    VkSemaphore uploadWaitSem = VK_NULL_HANDLE;
+    u64         uploadWaitVal = 0ull;
+    if (m_micropolyStreaming &&
+        m_micropolyStreaming->uploadDoneSemaphore() != VK_NULL_HANDLE &&
+        m_micropolyStreaming->uploadCounter() > 0ull) {
+        uploadWaitSem = m_micropolyStreaming->uploadDoneSemaphore();
+        uploadWaitVal = m_micropolyStreaming->uploadCounter();
+    }
+
+    // Array size [3] (forward-compat for M3's future semaphore; today
+    // only indices [0..1] are used — Phase-4 CR MINOR / Security LOW fix).
+    VkSemaphore                waitSemsA[3];
+    VkPipelineStageFlags       waitStagesA[3];
+    u64                        waitValuesA[3] = {0ull, 0ull, 0ull};
+    u32                        waitCount = 0u;
+    waitSemsA[waitCount]    = frame.imageAvailable;
+    waitStagesA[waitCount]  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    waitValuesA[waitCount]  = 0ull;
+    ++waitCount;
+    if (uploadWaitSem != VK_NULL_HANDLE) {
+        // Phase-4 CR MEDIUM: TASK/MESH stage bits require VK_EXT_mesh_shader
+        // to have been enabled. On devices that lack mesh-shader support,
+        // waiting on those stages is a validation error — fall back to
+        // COMPUTE_SHADER only (the uploaded pages still feed cull/material
+        // eval via compute).
+        VkPipelineStageFlags uploadStage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+        if (m_device->supportsMeshShaders()) {
+            uploadStage |= VK_PIPELINE_STAGE_TASK_SHADER_BIT_EXT
+                        |  VK_PIPELINE_STAGE_MESH_SHADER_BIT_EXT;
+        }
+        waitSemsA[waitCount]   = uploadWaitSem;
+        waitStagesA[waitCount] = uploadStage;
+        waitValuesA[waitCount] = uploadWaitVal;
+        ++waitCount;
+    }
+
     const VkSemaphore        signalSems[]  = { imageRenderFinished, frame.inFlight };
     const u64                signalValues[] = { 0, signalValue };
 
     VkTimelineSemaphoreSubmitInfo timelineInfo{};
     timelineInfo.sType                     = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
-    timelineInfo.waitSemaphoreValueCount   = 0;
-    timelineInfo.pWaitSemaphoreValues      = nullptr;
+    timelineInfo.waitSemaphoreValueCount   = waitCount;
+    timelineInfo.pWaitSemaphoreValues      = waitValuesA;
     timelineInfo.signalSemaphoreValueCount = 2;
     timelineInfo.pSignalSemaphoreValues    = signalValues;
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.pNext                = &timelineInfo;
-    submitInfo.waitSemaphoreCount   = 1;
-    submitInfo.pWaitSemaphores      = waitSems;
-    submitInfo.pWaitDstStageMask    = waitStages;
+    submitInfo.waitSemaphoreCount   = waitCount;
+    submitInfo.pWaitSemaphores      = waitSemsA;
+    submitInfo.pWaitDstStageMask    = waitStagesA;
     submitInfo.commandBufferCount   = 1;
     submitInfo.pCommandBuffers      = &frame.commandBuffer;
     submitInfo.signalSemaphoreCount = 2;
@@ -1817,6 +2852,46 @@ void Renderer::buildAccelerationStructures() {
             inst.accelerationStructureReference         = prim.blas->deviceAddress();
 
             m_scene->tlas->setInstance(slot, inst);
+        }
+    }
+
+    // M5a: merge micropoly per-asset-proxy BLAS instances into the TLAS
+    // build input. Non-null manager implies RT-capable device + a loaded
+    // .mpa; instances() is empty when buildForAsset either wasn't called
+    // or returned NoLevel3Clusters. shadow.rgen.hlsl traces the TLAS
+    // as-is and picks up these instances automatically — no shader
+    // changes required for M5a (micropoly content is opaque in v1).
+    if (m_micropolyBlasManager != nullptr) {
+        const auto mpInstances = m_micropolyBlasManager->instances();
+        for (const auto& mpi : mpInstances) {
+            const u32 slot = m_scene->tlas->allocateInstanceSlot();
+
+            VkAccelerationStructureInstanceKHR inst{};
+            // 3x4 transpose from GLM column-major to Vulkan row-major,
+            // same pattern as the non-micropoly path above.
+            const mat4& m = mpi.transform;
+            inst.transform.matrix[0][0] = m[0][0]; inst.transform.matrix[0][1] = m[1][0];
+            inst.transform.matrix[0][2] = m[2][0]; inst.transform.matrix[0][3] = m[3][0];
+            inst.transform.matrix[1][0] = m[0][1]; inst.transform.matrix[1][1] = m[1][1];
+            inst.transform.matrix[1][2] = m[2][1]; inst.transform.matrix[1][3] = m[3][1];
+            inst.transform.matrix[2][0] = m[0][2]; inst.transform.matrix[2][1] = m[1][2];
+            inst.transform.matrix[2][2] = m[2][2]; inst.transform.matrix[2][3] = m[3][2];
+
+            inst.instanceCustomIndex                    = mpi.customIndex;
+            inst.mask                                   = mpi.mask;
+            inst.instanceShaderBindingTableRecordOffset  = 0;
+            // v1: opaque content only (plan §3.M5a line 509 — alpha-tested
+            // any-hit deferred). Keep triangle-facing cull ON so back faces
+            // are skipped; matches the meshlet-path rasterizer semantics.
+            inst.flags                                  = 0;
+            inst.accelerationStructureReference         = mpi.blasAddress;
+
+            m_scene->tlas->setInstance(slot, inst);
+        }
+        if (!mpInstances.empty()) {
+            ENIGMA_LOG_INFO(
+                "[renderer] merged {} micropoly BLAS instance(s) into TLAS",
+                mpInstances.size());
         }
     }
 
@@ -2108,6 +3183,35 @@ void Renderer::resizeGBuffer(VkExtent2D extent) {
             m_gbufAlbedoStorageSlot,     m_gbufNormalStorageSlot,
             m_gbufMetalRoughStorageSlot, m_gbufMotionVecStorageSlot,
             m_gbufDepthSlot);
+    }
+
+    // M3.1: resize the 64-bit micropoly vis image. createVisImage is a
+    // no-op when MicropolyConfig::enabled=false, and internally tears down
+    // the previous allocation (vkDeviceWaitIdle was already issued by the
+    // swapchain recreate path that called resizeGBuffer). The bindless
+    // slot is released + re-acquired so existing pipelines that have
+    // baked-in slot indices must be refreshed — no such pipelines exist
+    // yet in M3.1 (M3.3/M3.4 will be the first callers).
+    if (m_micropolyPass) {
+        m_micropolyPass->createVisImage(
+            extent, *m_allocator, *m_descriptorAllocator);
+    }
+
+    // M4.2: resize the SW raster tile-bin SSBOs. Without this the bin
+    // shader writes past the end of the old tile-count-sized buffers at
+    // 1080p -> 4K. resize() internally waits-idle + tears down the
+    // extent-dependent buffers and re-registers their bindless slots.
+    // A failure here is non-fatal — log and leave the pass in a
+    // crash-safe (non-functional) state until the next resize.
+    if (m_micropolySwRasterPass) {
+        auto r = m_micropolySwRasterPass->resize(extent);
+        if (!r.has_value()) {
+            ENIGMA_LOG_ERROR(
+                "[renderer] micropoly SW raster resize failed: {} ({})",
+                r.error().detail,
+                renderer::micropoly::micropolySwRasterErrorKindString(
+                    r.error().kind));
+        }
     }
 
     // Recreate HDR intermediate at the new extent and patch bindless slots.

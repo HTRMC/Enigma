@@ -278,6 +278,16 @@ void DescriptorAllocator::updateStorageImage(u32 slot, VkImageView view) {
 }
 
 u32 DescriptorAllocator::registerStorageImage(VkImageView view) {
+    // M3.2 closeout fix #7: a VK_NULL_HANDLE view would pass validation
+    // silently (VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT makes unfilled
+    // slots legal) but the caller's intent on calling register*() is to
+    // bind a real image — a null view is always a programmer error, not
+    // a valid partial-bind. Assert up front so the failure lands at the
+    // register site instead of materialising later as a hard-to-trace
+    // "black pixels where a storage image should be."
+    ENIGMA_ASSERT(view != VK_NULL_HANDLE
+        && "registerStorageImage with VK_NULL_HANDLE view");
+
     u32 slot = 0;
     if (!m_freeStorageImages.empty()) {
         slot = m_freeStorageImages.back();

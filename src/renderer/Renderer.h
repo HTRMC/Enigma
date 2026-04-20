@@ -36,6 +36,15 @@
 #include "renderer/SkyBackgroundPass.h"
 #include "renderer/PostProcessPass.h"
 #include "renderer/SMAAPass.h"
+#include "renderer/micropoly/MicropolyBlasManager.h"
+#include "renderer/micropoly/MicropolyConfig.h"
+#include "renderer/micropoly/MicropolyCullPass.h"
+#include "renderer/micropoly/MicropolyPass.h"
+#include "renderer/micropoly/MicropolyRasterPass.h"
+#include "renderer/micropoly/MicropolySwRasterPass.h"
+#include "renderer/micropoly/MicropolyStreaming.h"
+#include "ui/MicropolySettingsPanel.h"
+#include "asset/MpAssetReader.h"
 #include "renderer/AASettings.h"
 #include "renderer/TextureFilterSettings.h"
 #include "renderer/Upscaler.h"
@@ -69,6 +78,32 @@ enum class DebugMode {
     LitWireframe,  // Lit scene with wireframe overlay
     DetailLighting,// Full PBR on white material (isolates lighting shape)
     Clusters,      // Meshlet colors (requires visibility buffer pipeline)
+    MicropolyRasterClass, // M4.6: per-pixel R/G from rasterClassBits of the
+                          // 64-bit Micropoly vis image (HW=red, SW=green,
+                          // empty=black). Requires Device::supportsShaderImageInt64()
+                          // and an active m_micropolyRasterPass — falls back
+                          // to Lit when unavailable.
+    MicropolyLodHeatmap,  // M6.1: per-pixel heatmap of the DAG node's lodLevel
+                          // (blue = leaf, red = coarse). Same availability gate
+                          // as MicropolyRasterClass (shaderImageInt64 + active
+                          // raster pass).
+    MicropolyResidencyHeatmap, // M6.1: per-pixel residency visualisation —
+                          // green = page resident, magenta = page evicted,
+                          // yellow = wiring bug (DAG/pageToSlot missing),
+                          // black = empty vis pixel. Same availability gate.
+    MicropolyBounds,      // M6.2b: per-cluster bounding-sphere wireframe
+                          // overlay. Iterates the DAG, projects each
+                          // sphere to screen space, and draws the outline
+                          // with per-cluster hue. Availability: DAG buffer
+                          // wired (does NOT require shaderImageInt64 —
+                          // doesn't read the vis image).
+    MicropolyBinOverflowHeat, // M6 plan §3.M6: per-pixel SW-raster tile bin
+                          // fill-level heat. Black=empty, green gradient=1..
+                          // BIN_CAP-1, yellow=saturated at BIN_CAP, red=any
+                          // spilled entry (dominates). Availability: the
+                          // m_micropolySwRasterPass is constructed (the bin
+                          // buffers only exist when the SW raster path is
+                          // wired). Does not read the vis image.
 };
 
 // Configurable directional sun light. Direction need not be normalized —
@@ -82,6 +117,7 @@ struct SunLight {
 class Renderer {
 public:
     explicit Renderer(Window& window);
+    Renderer(Window& window, MicropolyConfig micropolyConfig);
     ~Renderer();
 
     Renderer(const Renderer&)            = delete;
@@ -186,6 +222,52 @@ private:
     std::unique_ptr<Denoiser>                m_reflectionDenoiser;
     std::unique_ptr<ClusteredForwardPass>    m_clusteredForwardPass;
     std::unique_ptr<SMAAPass>               m_smaaPass;
+
+    // Micropoly scaffolding (M0a). Config + capability-gated pass shell.
+    // record() is a no-op whenever m_micropolyConfig.enabled == false, so
+    // the bit-identical-when-disabled invariant (Principle 1) holds as
+    // long as nothing downstream reads m_micropolyPass state without
+    // guarding on active(). The plan allows this pass to exist
+    // unconditionally on all devices — the capability row selects behavior.
+    MicropolyConfig                  m_micropolyConfig{};
+    std::unique_ptr<MicropolyPass>   m_micropolyPass;
+
+    // M2.4a: streaming subsystem constructed only when MicropolyConfig::enabled
+    // is true AND MicropolyCapability::row != Disabled. When absent (either
+    // disabled or capability-gated off) the Renderer produces BIT-IDENTICAL
+    // output to pre-micropoly behavior (Principle 1). Owns an MpAssetReader
+    // for the per-frame page-table lookup used by MicropolyStreaming.
+    std::unique_ptr<asset::MpAssetReader>                     m_micropolyReader;
+    std::unique_ptr<renderer::micropoly::MicropolyStreaming>  m_micropolyStreaming;
+
+    // M3.2: cluster cull compute pass. Same construction gating as
+    // m_micropolyStreaming — null when disabled so the Principle-1
+    // bit-identity invariant holds. Owns its cull-stats + indirect-draw
+    // buffers; registers both as bindless UAV slots. Hot-reload-aware.
+    std::unique_ptr<renderer::micropoly::MicropolyCullPass>   m_micropolyCullPass;
+
+    // M3.3: HW rasterisation pass (task+mesh+fragment). Null when the
+    // device lacks VK_EXT_mesh_shader OR VK_EXT_shader_image_atomic_int64,
+    // or when MicropolyConfig::enabled=false. Dispatched after cull,
+    // reading the indirect-draw buffer the cull pass writes and emitting
+    // fragments whose atomic-min updates the 64-bit vis image owned by
+    // MicropolyPass.
+    std::unique_ptr<renderer::micropoly::MicropolyRasterPass> m_micropolyRasterPass;
+
+    // M4.2: SW rasteriser BINNING pass. Same capability gate as the HW
+    // raster pass — null when MicropolyConfig::enabled=false or when the
+    // device lacks mesh-shaders / shaderImageInt64. Dispatched after
+    // MicropolyRasterPass::record() under the same enableMp branch; the
+    // fragment compute that consumes the bin buffers lands in M4.3.
+    std::unique_ptr<renderer::micropoly::MicropolySwRasterPass> m_micropolySwRasterPass;
+
+    // M5a: per-asset-proxy BLAS manager for micropoly shadow casting.
+    // Constructed ONLY when m_device->supportsRayTracing() == true AND
+    // MicropolyConfig::enabled == true (double gate). Null on non-RT
+    // devices and when micropoly is disabled. The manager owns one BLAS
+    // per loaded asset, extracted from DAG level 3, and surfaces them as
+    // TLAS instance entries to buildAccelerationStructures().
+    std::unique_ptr<renderer::micropoly::MicropolyBlasManager> m_micropolyBlasManager;
 
     // AA settings — driven from the Settings ImGui panel.
     AASettings m_aaSettings{};
@@ -330,6 +412,12 @@ private:
     std::unique_ptr<DebugVisualizationPass> m_debugVisPass;
     DebugMode m_debugMode     = DebugMode::Lit;
     vec3      m_wireframeColor{1.0f, 1.0f, 1.0f};
+
+    // M6.2a: centralised micropoly runtime knobs. Stateless — the panel
+    // reads/writes through `m_micropolyConfig` + `m_debugMode` directly.
+    // Visibility is driven by `m_mpSettingsPanelOpen` (ImGui idiom).
+    MicropolySettingsPanel m_mpSettingsPanel{};
+    bool                   m_mpSettingsPanelOpen = true;
 
     // HDR linear intermediate — R16G16B16A16_SFLOAT, render-extent sized.
     // All deferred passes (lighting, physics debug, sky, post-process) target
