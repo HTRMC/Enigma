@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <system_error>
 #include <utility>
 
@@ -461,10 +462,47 @@ MpAssetReader::assembleRuntimeDagNodes() const {
             n.m2[1] = cd.coneAxis[1];
             n.m2[2] = cd.coneAxis[2];
             // Pack: low 24 bits pageId, high 8 bits lodLevel. Matches the
-            // unpack in mp_cluster_cull.comp.hlsl::loadDagNode lines 113-115.
+            // unpack in mp_cluster_cull.comp.hlsl::loadDagNode.
             const u32 packed = (pageId & 0x00FFFFFFu)
                              | ((cd.dagLodLevel & 0xFFu) << 24u);
             std::memcpy(&n.m2[3], &packed, sizeof(u32));
+
+            // m3: screen-space-error traversal metadata.
+            //   m3[0] = this cluster's maxSimplificationError (world units)
+            //   m3[1] = parent cluster's maxSimplificationError, or FLT_MAX
+            //           for roots so the cull shader's "errParent > threshold"
+            //           test always passes for root clusters. Looked up via
+            //           the on-disk DAG's parentGroupId (see DagBuilder.cpp:
+            //           parentGroupId encodes the global DAG index of the
+            //           parent cluster — not a METIS group id — via
+            //           groupFirstNewCluster[gid] = firstNewIdx).
+            const f32 selfError = cd.maxSimplificationError;
+            n.m3[0] = selfError;
+            const MpDagNode& onDisk = dag[globalIdx];
+            f32 parentError;
+            if (onDisk.parentGroupId == UINT32_MAX) {
+                parentError = std::numeric_limits<f32>::max();
+            } else if (onDisk.parentGroupId < dag.size()) {
+                parentError = dag[onDisk.parentGroupId].maxError;
+                // Defence-in-depth: a parent's error must be >= its own
+                // children's (monotonic up the DAG; see DagBuilder
+                // std::max(childMaxErr, achieved)). If a corrupt asset
+                // inverts the invariant, pin at self so the LOD test still
+                // accepts this cluster when its descendants would round
+                // below threshold. NaN gets sanitized to 0 so parentError
+                // stays finite.
+                if (!std::isfinite(parentError) || parentError < selfError) {
+                    parentError = selfError;
+                }
+            } else {
+                // Corrupt parent index — treat as root so the shader's
+                // fallback path emits this cluster rather than silently
+                // dropping it.
+                parentError = std::numeric_limits<f32>::max();
+            }
+            n.m3[1] = parentError;
+            n.m3[2] = 0.0f;
+            n.m3[3] = 0.0f;
         }
     }
 

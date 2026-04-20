@@ -83,18 +83,21 @@ struct PushBlock {
 [[vk::push_constant]] PushBlock pc;
 
 // --- DAG node load ----------------------------------------------------------
-// MpDagNode layout — must match tools/mpbake/DagBuilder.h exactly. The
-// runtime streams these via the page cache; the cull pass treats the
+// MpDagNode layout — must match MpAssetReader::RuntimeDagNode exactly. The
+// runtime uploads these as a DEVICE_LOCAL SSBO; the cull pass treats the
 // whole-node SSBO as a flat array indexed by globalClusterIdx.
 //
-// Layout (48 bytes per node = 3 float4):
+// Layout (64 bytes per node = 4 float4):
 //   float4 m0 = {boundsCenter.xyz, boundsRadius}
 //   float4 m1 = {coneApex.xyz, coneCutoff}
 //   float4 m2 = {coneAxis.xyz, asfloat(packed)}
+//   float4 m3 = {maxError, parentMaxError, 0, 0}
 //   where packed = pageId<<0 (low 24b) | lodLevel<<24 (high 8b).
 //
-// pageId / lodLevel / dagIdx accessors pull from m2.w. This is the M3.2-
-// minimal shape; M4 will widen as needed.
+// pageId / lodLevel accessors pull from m2.w. maxError / parentMaxError in
+// m3.xy drive the M4 screen-space-error traversal (see CSMain below).
+// parentMaxError == FLT_MAX marks a root cluster (no coarser parent exists);
+// the SSE test falls back to "emit when own error is above threshold".
 struct MpDagNode {
     float3 center;
     float  radius;
@@ -103,14 +106,17 @@ struct MpDagNode {
     float3 coneAxis;
     uint   pageId;
     uint   lodLevel;
+    float  maxError;        // M4: world-space simplification error at this LOD
+    float  parentMaxError;  // M4: error of the next-coarser parent, or FLT_MAX for roots
 };
 
 MpDagNode loadDagNode(uint idx) {
     StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.dagBufferBindlessIndex)];
-    const uint base = idx * 3u;
+    const uint base = idx * 4u;
     float4 m0 = buf[base + 0u];
     float4 m1 = buf[base + 1u];
     float4 m2 = buf[base + 2u];
+    float4 m3 = buf[base + 3u];
 
     MpDagNode n;
     // Engine-wide -90° Y correction: bake writes positions in the
@@ -130,8 +136,10 @@ MpDagNode loadDagNode(uint idx) {
     n.coneCutoff = m1.w;
     n.coneAxis   = float3(-coneAxisRaw.z, coneAxisRaw.y, coneAxisRaw.x);
     const uint packed = asuint(m2.w);
-    n.pageId   = packed & 0x00FFFFFFu;           // low 24 bits
-    n.lodLevel = (packed >> 24u) & 0xFFu;        // high 8 bits
+    n.pageId         = packed & 0x00FFFFFFu;           // low 24 bits
+    n.lodLevel       = (packed >> 24u) & 0xFFu;        // high 8 bits
+    n.maxError       = m3.x;
+    n.parentMaxError = m3.y;
     return n;
 }
 
@@ -487,20 +495,13 @@ void CSMain(uint3 dtid : SV_DispatchThreadID) {
     // culledResidency even when off-screen) for slight request-queue noise —
     // the queue is already backed by emitPageReq()'s overflow-OR guard.
     //
-    // TODO(M4): when screen-space-error traversal replaces `lodLevel == 0`,
-    // MpDagNode needs parent/child pointers + an mpa-format version bump;
-    // the current 48-byte shape has no room for them.
-    //
-    // 1) LOD gate. M3.2 scope: only leaf clusters (lodLevel == 0) are
-    //    rendered directly. Higher-LOD (parent/internal) clusters are
-    //    handled by M4's screen-space-error traversal; for now we skip
-    //    them cleanly so a single baked asset renders correctly.
-    if (node.lodLevel != 0u) {
-        bumpStat(4u);  // culledLOD
-        return;
-    }
+    // M4 ordering: residency → frustum → LOD (SSE) → backface → HiZ.
+    // Frustum runs before LOD because it's cheaper than a pair of view-space
+    // projections for out-of-frame clusters. LOD runs before backface/HiZ
+    // because it's a deterministic DAG-traversal gate and trims the survivor
+    // pool before the more expensive cone/HiZ tests.
 
-    // 2) Residency check. Non-resident pages trigger a request and the
+    // 1) Residency check. Non-resident pages trigger a request and the
     //    cluster is skipped this frame. Once the streaming pump completes
     //    the transfer a subsequent frame will see isPageResident() == true
     //    and the cluster will progress through the remaining culls.
@@ -510,11 +511,61 @@ void CSMain(uint3 dtid : SV_DispatchThreadID) {
         return;
     }
 
-    // 3) Frustum cull (view-space — see banner for -Zpc caveat).
+    // 2) Frustum cull (view-space — see banner for -Zpc caveat).
     CameraData cam = loadCamera(pc.cameraSlot);
     if (!frustumCullVS(cam, node.center, node.radius)) {
         bumpStat(12u); // culledFrustum
         return;
+    }
+
+    // 3) Screen-space-error LOD traversal (Nanite-style).
+    //    A cluster C is emitted iff
+    //      projectedError(C)          <= pixelThreshold, AND
+    //      projectedError(parent(C))  >  pixelThreshold
+    //    Together these two conditions guarantee exactly-one-LOD coverage
+    //    across the DAG: every rendered pixel is claimed by exactly one
+    //    cluster, with no overlap or cracks at cut boundaries (provided
+    //    the per-group simplify is boundary-symmetric, which
+    //    DagBuilder.cpp enforces via the group-external lock mask).
+    //
+    //    Projection: worldError * cot(fovY/2) * (screenH/2) / viewDepth.
+    //    We use cam.proj[1][1] (= -cot(fovY/2) under the engine's reverse-Z
+    //    perspective — same convention as frustumCullVS + classifyRasterClass).
+    //
+    //    Root fallback: parentMaxError == FLT_MAX at roots forces the
+    //    parent projected error to infinity, so the "> threshold" condition
+    //    always holds at the root and the cluster is emitted when its own
+    //    error falls below threshold OR when no finer descendant is
+    //    available. This handles non-simplifiable roots (e.g. BMW's tiny
+    //    disconnected shells) cleanly.
+    {
+        float4 viewPos = mul(cam.view, float4(node.center, 1.0f));
+        const float depth = max(-viewPos.z, 1.0e-4f);
+        const float fY    = -cam.proj[1][1];
+        const float halfH = 0.5f * (float)pc.screenHeight;
+        const float scale = (fY * halfH) / depth;
+        const float errSelf   = node.maxError       * scale;
+        const float errParent = node.parentMaxError * scale;
+        const float threshold = pc.screenSpaceErrorThreshold;
+
+        // Standard Nanite SSE rule: emit iff errSelf <= threshold AND
+        // errParent > threshold. Both must hold for exactly-one-LOD coverage.
+        const bool sseAccept = (errSelf <= threshold)
+                            && (errParent > threshold);
+
+        // Root fallback: a cluster with parentMaxError == FLT_MAX has no
+        // coarser parent. When its own projected error is ABOVE threshold
+        // the standard rule would reject (no finer descendant exists to
+        // take over), leaving a hole. Emit these unconditionally so
+        // non-simplifiable shells (e.g. BMW's disconnected-component
+        // roots) always render — they're the leaf of their own DAG subtree.
+        // `isinf` catches the FLT_MAX * scale projection.
+        const bool isRootFallback = isinf(errParent) && (errSelf > threshold);
+        const bool accept = sseAccept || isRootFallback;
+        if (!accept) {
+            bumpStat(4u);  // culledLOD
+            return;
+        }
     }
 
     // 4) Normal-cone backface cull. Re-enabled now that loadDagNode

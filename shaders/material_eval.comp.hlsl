@@ -365,14 +365,16 @@ void CSMain(uint3 dispatchId : SV_DispatchThreadID) {
                 // lighting pass treats the pixel as "something is here" rather
                 // than stamping garbage.
                 //
-                // Step 1: load the DAG node (3 float4 = 48 B per node), apply
+                // Step 1: load the DAG node (4 float4 = 64 B per node — M4
+                // widened from 3 float4 to carry maxError/parentMaxError; the
+                // material pass only needs the pageId packed in m2.w). Apply
                 // the engine-wide -90° Y correction to its positional data so
                 // the cluster's bounds centre/cone match the rendered
                 // geometry (the HW + SW raster paths already do the same).
                 if (mpClusterId >= pc.mpDagNodeCount) return;
                 StructuredBuffer<float4> dagBuf =
                     g_buffers[NonUniformResourceIndex(pc.mpDagBufferSlot)];
-                const uint dagBase = mpClusterId * 3u;
+                const uint dagBase = mpClusterId * 4u;
                 float4 dm0 = dagBuf[dagBase + 0u];
                 // dm1 + dm2 carry cone data that the material pass doesn't
                 // need beyond the pageId packed in dm2.w.

@@ -24,7 +24,9 @@
 //     vkCmdDrawMeshTasksIndirectEXT is called with offset=16 stride=16 so
 //     this shader sees (1,1,1) as groupCount and needs to re-read clusterIdx
 //     from the indirect buffer via the bindless RWByteAddressBuffer[].
-//   * MpDagNode: 48 B per node = 3 float4 (see mp_cluster_cull.comp.hlsl).
+//   * MpDagNode: 64 B per node = 4 float4 (see mp_cluster_cull.comp.hlsl —
+//     M4 widened the stride from 48 B / 3 float4 to carry maxError /
+//     parentMaxError for screen-space-error traversal).
 //   * PageCache layout: one SSBO of `slotBytes` units indexed by slot; the
 //     runtime populates pageToSlotBuffer[pageId] = slotIndex or UINT32_MAX.
 //   * Page payload (after zstd decompress):
@@ -109,13 +111,14 @@ uint loadClusterIdx(uint cmdIndex) {
 }
 
 // Load the pageId for a cluster. The DAG buffer is a StructuredBuffer<float4>
-// in bindless slot pc.dagBufferBindlessIndex, 3 float4 per node. The pageId
-// is packed in m2.w low-24 bits — see mp_cluster_cull.comp.hlsl::loadDagNode
-// for the full layout.
+// in bindless slot pc.dagBufferBindlessIndex, 4 float4 per node (M4 widened
+// from 3 to carry maxError/parentMaxError — see
+// mp_cluster_cull.comp.hlsl::loadDagNode for the full layout). The pageId
+// is packed in m2.w low-24 bits.
 uint loadPageIdForCluster(uint clusterIdx) {
     if (clusterIdx >= pc.dagNodeCount) return 0xFFFFFFFFu;
     StructuredBuffer<float4> buf = g_buffers[NonUniformResourceIndex(pc.dagBufferBindlessIndex)];
-    const uint base = clusterIdx * 3u;
+    const uint base = clusterIdx * 4u;
     float4 m2 = buf[base + 2u];
     const uint packed = asuint(m2.w);
     return packed & 0x00FFFFFFu;

@@ -95,10 +95,11 @@ float4 PSMain(VSOut vs) : SV_Target {
         return float4(1.0, 1.0, 0.0, 1.0);
     }
 
-    // MpDagNode GPU layout — same as debug_micropoly_lod_heatmap.hlsl:
+    // MpDagNode GPU layout — 4 float4 per node (M4 widening; see
+    // mp_cluster_cull.comp.hlsl::loadDagNode). Only m2.w is needed here:
     //   m2.w = asfloat(pageId(low 24) | lodLevel(high 8)).
     StructuredBuffer<float4> dag = g_buffers[NonUniformResourceIndex(pc.dagBufferBindless)];
-    float4 m2 = dag[clusterIdx * 3u + 2u];
+    float4 m2 = dag[clusterIdx * 4u + 2u];
     uint   packedWord = asuint(m2.w);
     uint   pageId     = packedWord & 0x00FFFFFFu;
 

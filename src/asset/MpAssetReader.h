@@ -108,27 +108,36 @@ public:
     // at asset load, so the copy cost is negligible. Empty when not open.
     std::vector<u32> firstDagNodeIndices() const;
 
-    // Runtime-format DAG node for GPU upload. 48 bytes = 3×float4, matching
+    // Runtime-format DAG node for GPU upload. 64 bytes = 4×float4, matching
     // the shader's `MpDagNode` layout in mp_cluster_cull.comp.hlsl::loadDagNode:
     //   float4 m0 = (center.xyz, radius)           — from ClusterOnDisk.boundsSphere
     //   float4 m1 = (coneApex.xyz, coneCutoff)     — from ClusterOnDisk.cone*
     //   float4 m2 = (coneAxis.xyz, asfloat(packed))
     //     where packed = (pageId & 0x00FFFFFF) | (lodLevel << 24)
+    //   float4 m3 = (maxError, parentMaxError, 0, 0)
+    //     * maxError       = this cluster's world-space simplification error
+    //     * parentMaxError = the error of the next-coarser cluster whose
+    //                       group produced this one. FLT_MAX for roots so the
+    //                       screen-space-error "emit when parent fails" test
+    //                       always accepts a root. M4 widening over the
+    //                       previous 48 B layout.
     //
-    // On-disk MpDagNode (36 B) carries only bounds/parent/pageId; cone data
-    // lives inside each page's ClusterOnDisk entries (76 B each). The
+    // On-disk MpDagNode (36 B) carries bounds/parent/pageId + maxError; cone
+    // data lives inside each page's ClusterOnDisk entries (76 B each). The
     // assembler walks the page table, decompresses every page, and joins
-    // ClusterOnDisk cone+bounds with MpDagNode.pageId to produce one runtime
-    // node per global DAG node. PageWriter guarantees a 1:1 mapping: DAG
-    // node at global index (firstDagNodeIdx + i) ↔ ClusterOnDisk[i] in that
-    // page (see PageWriter.cpp:317 + DagBuilder's stable sort by parentGid).
+    // ClusterOnDisk cone+bounds+error with MpDagNode.pageId + parentGroupId
+    // to produce one runtime node per global DAG node. PageWriter guarantees
+    // a 1:1 mapping: DAG node at global index (firstDagNodeIdx + i) ↔
+    // ClusterOnDisk[i] in that page (see PageWriter.cpp:317 + DagBuilder's
+    // stable sort by parentGid).
     struct RuntimeDagNode {
         f32 m0[4];  // center.xyz, radius
         f32 m1[4];  // coneApex.xyz, coneCutoff
         f32 m2[4];  // coneAxis.xyz, asfloat(pageId | lodLevel<<24)
+        f32 m3[4];  // maxError, parentMaxError, 0, 0
     };
 
-    // Assemble the full 48 B runtime DAG node array (one entry per
+    // Assemble the full 64 B runtime DAG node array (one entry per
     // `MpDagNode` in the on-disk DAG section). Called exactly once at asset
     // load by MicropolyStreaming::attachDagNodeBuffer. Decompresses every
     // page via `fetchPage()` + reuses a single scratch buffer across pages
@@ -136,7 +145,7 @@ public:
     // bounds mismatch, zstd failure, or not-open.
     //
     // Resulting size: header_.dagNodeCount * sizeof(RuntimeDagNode)
-    //                 == dagNodeCount * 48 B.
+    //                 == dagNodeCount * 64 B.
     std::expected<std::vector<RuntimeDagNode>, MpReadError>
     assembleRuntimeDagNodes() const;
 

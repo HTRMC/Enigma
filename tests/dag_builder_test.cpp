@@ -248,11 +248,44 @@ bool testHappyPath(const fs::path& assetPath) {
         return false;
     }
 
+    // M4 SSE-traversal parent-error invariant: for every non-root node whose
+    // parentGroupId points at a real parent cluster (i.e. not UINT32_MAX —
+    // orphans skip this check by definition), the parent's maxError must be
+    // >= the child's. This is the bottom-up monotonicity the cull shader's
+    // screen-space-error test relies on: when the child's projected error
+    // drops below the pixel threshold, the parent's is guaranteed to still
+    // be above it, so the DAG traversal picks exactly one LOD level per
+    // pixel with no overlap or cracks. DagBuilder enforces the invariant
+    // at construction time via std::max(childMaxErr, achieved).
+    std::uint32_t parentErrChecked = 0u;
+    for (std::size_t i = 0; i < dag.nodes.size(); ++i) {
+        const auto& n = dag.nodes[i];
+        if (n.parentGroupId == UINT32_MAX) continue;   // root / orphan
+        if (n.parentGroupId >= dag.nodes.size()) {
+            std::fprintf(stderr,
+                "[dag_builder_test] case 1 FAIL: node %zu parentGroupId=%u "
+                "out of range (nodes=%zu)\n",
+                i, n.parentGroupId, dag.nodes.size());
+            return false;
+        }
+        const auto& parent = dag.nodes[n.parentGroupId];
+        if (!(parent.maxError >= n.maxError)) {
+            std::fprintf(stderr,
+                "[dag_builder_test] case 1 FAIL: parent error monotonicity "
+                "violated: node %zu maxError=%.9g but parent (node %u) "
+                "maxError=%.9g (child > parent)\n",
+                i, static_cast<double>(n.maxError),
+                n.parentGroupId, static_cast<double>(parent.maxError));
+            return false;
+        }
+        ++parentErrChecked;
+    }
+
     std::printf(
         "[dag_builder_test] case 1 PASS: leafCount=%u rootCount=%u "
-        "orphans=%u maxLodLevel=%u totalClusters=%zu\n",
+        "orphans=%u maxLodLevel=%u totalClusters=%zu parentErrChecked=%u\n",
         dag.leafCount, dag.rootCount, orphanCount,
-        dag.maxLodLevel, dag.clusters.size());
+        dag.maxLodLevel, dag.clusters.size(), parentErrChecked);
     return true;
 }
 

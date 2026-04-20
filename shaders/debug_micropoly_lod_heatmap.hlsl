@@ -38,7 +38,7 @@ StructuredBuffer<float4> g_buffers[] : register(t0, space1);
 
 struct PushBlock {
     uint visImage64Bindless;  // R64_UINT vis image slot
-    uint dagBufferBindless;   // StructuredBuffer<MpDagNode> as 3 float4 per node
+    uint dagBufferBindless;   // StructuredBuffer<MpDagNode> as 4 float4 per node (M4 widening)
     uint dagNodeCount;        // defensive bounds check
     uint _pad;
 };
@@ -89,13 +89,15 @@ float4 PSMain(VSOut vs) : SV_Target {
         return float4(1.0, 0.0, 1.0, 1.0);
     }
 
-    // MpDagNode GPU layout: 3 float4 per node (see mp_cluster_cull.comp.hlsl).
+    // MpDagNode GPU layout: 4 float4 per node (M4 widening — see
+    // mp_cluster_cull.comp.hlsl::loadDagNode for the full stride rationale).
     //   float4 m0 = {center.xyz,    radius}
     //   float4 m1 = {coneApex.xyz,  coneCutoff}
     //   float4 m2 = {coneAxis.xyz,  asfloat(packed)} where
     //               packed = pageId(low 24) | lodLevel(high 8).
+    //   float4 m3 = {maxError, parentMaxError, _, _}  (not needed here)
     StructuredBuffer<float4> dag = g_buffers[NonUniformResourceIndex(pc.dagBufferBindless)];
-    float4 m2 = dag[clusterIdx * 3u + 2u];
+    float4 m2 = dag[clusterIdx * 4u + 2u];
     uint   packedWord = asuint(m2.w);
     uint   lodLevel   = (packedWord >> 24u) & 0xFFu;
 

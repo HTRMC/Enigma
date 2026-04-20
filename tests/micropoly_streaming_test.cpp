@@ -726,7 +726,9 @@ bool testFirstDagNodeAttach(TestEnv& env) {
 // Case 7: M3.3-deferred DAG SSBO — attachDagNodeBuffer ABI check
 // ---------------------------------------------------------------------------
 // Exercises the runtime-format DAG attach path:
-//   1) MpAssetReader::assembleRuntimeDagNodes() yields dagNodeCount × 48 B.
+//   1) MpAssetReader::assembleRuntimeDagNodes() yields dagNodeCount × 64 B
+//      (M4: widened from 3 to 4 float4 per node to carry maxError +
+//      parentMaxError for screen-space-error traversal).
 //   2) MicropolyStreaming::attachDagNodeBuffer() succeeds on the staging
 //      upload + DEVICE_LOCAL fill.
 //   3) dagNodeBuffer() / dagNodeBufferBytes() are non-null/non-zero.
@@ -752,10 +754,12 @@ bool testDagNodeAttach(TestEnv& env) {
         return false;
     }
 
-    // Each runtime node is 48 bytes = 3×float4. Sanity-check the type size
-    // so a future header tweak doesn't silently break the upload contract.
-    static_assert(sizeof(MpAssetReader::RuntimeDagNode) == 48u,
-                  "RuntimeDagNode must be 48 bytes (3×float4) to match shader");
+    // Each runtime node is 64 bytes = 4×float4 (M4 widening: m3 carries
+    // maxError + parentMaxError for screen-space-error traversal). Sanity-
+    // check the type size so a future header tweak doesn't silently break
+    // the upload contract.
+    static_assert(sizeof(MpAssetReader::RuntimeDagNode) == 64u,
+                  "RuntimeDagNode must be 64 bytes (4×float4) to match shader");
 
     const u8*  dagBytes = reinterpret_cast<const u8*>(runtimeDag->data());
     const auto dagByteCount = runtimeDag->size() * sizeof(MpAssetReader::RuntimeDagNode);

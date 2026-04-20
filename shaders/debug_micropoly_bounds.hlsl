@@ -119,8 +119,8 @@ float4 PSMain(VSOut vs) : SV_Target {
     const uint iterCount = min(pc.dagNodeCount, kMaxClustersToIterate);
     for (uint i = 0u; i < iterCount; ++i) {
         // MpDagNode::m0 = (center.xyz, radius). Layout matches loadDagNode()
-        // in mp_cluster_cull.comp.hlsl.
-        float4 m0 = dag[i * 3u + 0u];
+        // in mp_cluster_cull.comp.hlsl — 4 float4 per node (M4 widening).
+        float4 m0 = dag[i * 4u + 0u];
         const float3 center = m0.xyz;
         const float  radius = m0.w;
 
