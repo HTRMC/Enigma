@@ -249,7 +249,26 @@ MpAssetReader::open(const std::filesystem::path& path) {
                 + " != " + std::to_string(kMpAssetVersion),
         });
     }
-    // Section offsets must fit within the file.
+    // Section offsets must fit within the file. Check raw offsets against
+    // mappedSize_ BEFORE computing derived ends — otherwise a crafted
+    // header with an offset near UINT64_MAX plus a small count wraps the
+    // u64 addition back to a legal-looking value, bypassing the end-of-
+    // section checks and letting dagNodes() / pageTable() read at
+    // (mappedBase_ + huge_offset). Attacker-supplied .mpa files must not
+    // dereference arbitrary host memory.
+    if (header_.dagByteOffset    > mappedSize_ ||
+        header_.pagesByteOffset  > mappedSize_ ||
+        header_.boundsByteOffset > mappedSize_) {
+        close();
+        return std::unexpected(MpReadError{
+            MpReadErrorKind::InvalidSectionOffsets,
+            std::string{"section offset > file size: dagOff="}
+                + std::to_string(header_.dagByteOffset)
+                + " pagesOff=" + std::to_string(header_.pagesByteOffset)
+                + " boundsOff=" + std::to_string(header_.boundsByteOffset)
+                + " fileSize=" + std::to_string(mappedSize_),
+        });
+    }
     const u64 dagEnd = header_.dagByteOffset +
         static_cast<u64>(header_.dagNodeCount) * kMpDagNodeSize;
     const u64 pagesEnd = header_.pagesByteOffset +
@@ -292,9 +311,15 @@ MpAssetReader::open(const std::filesystem::path& path) {
         const u64 boundsOff     = header_.boundsByteOffset;
         const u64 fileSz        = mappedSize_;
 
+        // Guard against u64 overflow on the end computation — a crafted
+        // entry with payloadOffset near UINT64_MAX could wrap `end` back
+        // inside the file and bypass the range check below, yielding an
+        // OOB read at (mappedBase_ + payloadOffset) in fetchPage().
         const u64 end = payloadOffset + static_cast<u64>(compressedSz);
-        if (payloadOffset < boundsOff ||
+        if (payloadOffset > fileSz ||
+            payloadOffset < boundsOff ||
             end > fileSz ||
+            end < payloadOffset ||
             compressedSz == 0u) {
             close();
             return std::unexpected(MpReadError{

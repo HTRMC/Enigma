@@ -381,6 +381,16 @@ MicropolyStreaming::processCompletions_(bool recordUploads) {
             bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
             if (vkBeginCommandBuffer(cmd, &bi) == VK_SUCCESS) {
                 cmdBegun = true;
+            } else {
+                // Free the allocated command buffer on begin-failure —
+                // the pool has no RESET_COMMAND_BUFFER bit, so a leaked
+                // handle stays allocated until device destroy. Under
+                // sustained memory pressure the pool silently fills and
+                // subsequent vkAllocateCommandBuffers calls fail, which
+                // looks to the engine like streaming just stopped.
+                vkFreeCommandBuffers(device_->logical(),
+                                     transferCmdPool_, 1u, &cmd);
+                cmd = VK_NULL_HANDLE;
             }
         }
     }

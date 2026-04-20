@@ -205,11 +205,13 @@ uint pageVertexBlobStart(uint pageByteOffset) {
 
 // Multi-cluster pages concatenate vertex blobs back-to-back; we must sum
 // every ClusterOnDisk entry's vertexCount, not just this cluster's. The
-// clusterCount bound guards against corrupt pages.
+// clusterCount clamp matches the reader's kMaxClustersPerPage ceiling
+// (MpAssetReader.cpp) and must equal the clamp in pageVertexBlobStart so
+// the two helpers agree on where the ClusterOnDisk table ends.
 uint pageTriangleBlobStart(uint pageByteOffset) {
     RWByteAddressBuffer pageBuf = g_rwBuffers[NonUniformResourceIndex(pc.pageCacheBufferBindlessIndex)];
     uint clusterCount = pageBuf.Load(pageByteOffset + 0u);
-    if (clusterCount > 64u) clusterCount = 64u;
+    if (clusterCount > 4096u) clusterCount = 4096u;
     const uint vertexBlobStart = pageByteOffset + MP_PAGE_PAYLOAD_HEADER_BYTES
                                + clusterCount * MP_CLUSTER_ON_DISK_STRIDE;
     uint totalVertexBytes = 0u;

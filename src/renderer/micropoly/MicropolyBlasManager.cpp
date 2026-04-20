@@ -235,9 +235,18 @@ bool gatherLevelTriangles(asset::MpAssetReader& reader,
                 f32 pos[3];
                 std::memcpy(&pos[0], clusterVerts + v * asset::kMpVertexStride,
                             sizeof(pos));
-                outPositions.push_back(pos[0]);
-                outPositions.push_back(pos[1]);
-                outPositions.push_back(pos[2]);
+                // Engine-wide -90° Y correction (glb +X → physics +Z).
+                // Must match the rotation applied in the raster shaders
+                // (mp_raster.mesh.hlsl, sw_raster.comp.hlsl,
+                // sw_raster_bin.comp.hlsl) and in the cull DAG loader
+                // (mp_cluster_cull.comp.hlsl::loadDagNode) — otherwise
+                // the shadow BLAS sits 90° off from the visible mesh,
+                // producing shadow rays that miss the on-screen
+                // silhouette and cast phantom shadows where no
+                // geometry is visible.
+                outPositions.push_back(-pos[2]);
+                outPositions.push_back( pos[1]);
+                outPositions.push_back( pos[0]);
             }
 
             outIndices.reserve(outIndices.size()

@@ -213,7 +213,12 @@ void ASMain(uint3 gid : SV_GroupID) {
         // triangle blob begins at. Loop bound clamped to the architectural
         // cap to sidestep corrupt clusterCount values.
         uint clusterCount = pageBuf.Load(pageByteOffset + 0u);
-        if (clusterCount > 64u) clusterCount = 64u;
+        // Clamp to the reader's kMaxClustersPerPage ceiling
+        // (MpAssetReader.cpp). MUST equal mp_raster.mesh.hlsl's
+        // pageVertexBlobStart clamp or the mesh shader's vertex-blob
+        // offset drifts against the triangleBlobOff we publish here —
+        // silent corruption on any page with clusterCount > 64.
+        if (clusterCount > 4096u) clusterCount = 4096u;
         uint totalVertexBytes = 0u;
         for (uint ci = 0u; ci < clusterCount; ++ci) {
             const uint cAddr = pageByteOffset + MP_PAGE_PAYLOAD_HEADER_BYTES
