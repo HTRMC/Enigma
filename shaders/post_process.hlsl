@@ -137,20 +137,25 @@ float4 PSMain(VSOut vs) : SV_Target {
             float3 worldKm  = worldPos * 0.001f; // metres → km
 
             float depthKm = length(worldKm - pc.cameraWorldPosKm.xyz);
-            depthKm = max(depthKm, AP_NEAR);
 
-            // Log-distributed slice index matching atmosphere_aerial_perspective.hlsl.
-            // Use a dedicated linear sampler so the 32³ froxel grid blends smoothly;
-            // the nearest gbuffer sampler would produce 32 discrete horizontal bands.
-            float w = saturate(log(depthKm / AP_NEAR) / log(AP_FAR / AP_NEAR));
+            // Always sample the LUT; scale the contribution by depth so
+            // near fragments receive nothing and the effect ramps smoothly
+            // to full strength at AP_NEAR (= 1 km). This avoids the hard
+            // horizon seam a hard `if (depth > AP_NEAR)` cutoff produces:
+            //   ratio = saturate(depthKm / AP_NEAR)
+            //   effect = apStrength * ratio
+            // At 0 m → 0 effect; at 1 km → full effect; beyond → saturated.
+            // Log slice index clamps w ≥ 0 so fragments with depth <=
+            // AP_NEAR all sample slice 0 (which itself is tiny scatter).
+            float w = saturate(log(max(depthKm, AP_NEAR) / AP_NEAR)
+                               / log(AP_FAR / AP_NEAR));
             SamplerState apSamp = g_samplers[NonUniformResourceIndex(pc.apSamplerSlot)];
             float4 ap = g_apVolume.SampleLevel(apSamp, float3(uv, w), 0);
 
             // ap.rgb = in-scatter, ap.a = average transmittance.
-            // lerp with apStrength so the effect can be dialled down from full
-            // physical (1.0) to a subtle hint (0.25) without changing the LUT.
             float3 apColor = color * ap.a + ap.rgb;
-            color = lerp(color, apColor, pc.apStrength);
+            float depthRatio = saturate(depthKm / AP_NEAR);
+            color = lerp(color, apColor, pc.apStrength * depthRatio);
         }
     }
 

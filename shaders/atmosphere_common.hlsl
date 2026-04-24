@@ -30,7 +30,16 @@ static const float3 OZONE_SIGMA_A = float3(0.650e-3f, 1.881e-3f, 0.085e-3f);
 // Aerial Perspective froxel depth range (km).
 // AP_NEAR / AP_FAR must match AtmospherePass::apSliceFar (C++ side) and
 // any shader that samples the volume with a log-distributed depth mapping.
-static const float AP_NEAR = 0.01f;
+//
+// AP_NEAR = 1 km — near cutoff for the LUT. Fragments closer than this do
+// NOT receive aerial perspective at all (composite skips the blend — see
+// post_process.hlsl); the LUT starts its integration budget at 1 km so
+// slice resolution is spent on the 1–50 km range where haze is actually
+// perceptible on a ground-level scene. At 1 km sea-level Rayleigh optical
+// depth ≈ 0.0058 (transmittance ≈ 99.4 %) — the first froxel represents
+// the very onset of visible haze. Slice 16/32 ≈ 7 km, slice 24/32 ≈ 19 km,
+// slice 31/32 ≈ 50 km.
+static const float AP_NEAR = 1.0f;
 static const float AP_FAR  = 50.0f;
 
 // ---------------------------------------------------------------------------
