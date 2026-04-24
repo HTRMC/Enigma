@@ -78,6 +78,22 @@ struct SimplifyOptions {
     // at runtime don't crack, while leaving group-interior boundary edges
     // free to collapse.
     std::vector<std::uint8_t> lockMask;
+
+    // Global mesh scale override for converting meshopt's relative
+    // result_error into absolute world-space units.
+    //
+    // Leave at 0 to use the per-group `meshopt_simplifyScale` computed on
+    // the input group's own positions (that is what meshopt documents).
+    // In DagBuilder that yields per-group-local scale, which is small for
+    // small spatial groups (e.g. a BMW lugnut) and large for big ones, so
+    // error values across the DAG land in inconsistent units and the
+    // monotonic `parent >= child` invariant can be broken after a level of
+    // simplification.
+    //
+    // When > 0, this scale is used verbatim instead of the per-group
+    // computation, giving all clusters at every LOD level errors in the
+    // SAME world-space scale (typically the full leaf mesh's extent).
+    float       globalScale      = 0.0f;
 };
 
 // Output of one simplify invocation. Welded, deduped positions / normals /

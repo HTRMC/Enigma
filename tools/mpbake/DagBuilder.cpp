@@ -49,6 +49,8 @@
 #  pragma warning(pop)
 #endif
 
+#include <meshoptimizer.h>
+
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 #include <glm/vec4.hpp>
@@ -354,6 +356,51 @@ DagBuilder::build(std::span<const ClusterData> leafClusters,
     DagResult out;
     out.clusters.reserve(leafClusters.size() * 2u);
     out.nodes.reserve(leafClusters.size() * 2u);
+
+    // --- Compute the GLOBAL mesh-scale ONCE, up front. ---
+    //
+    // meshopt_simplifyScale returns the "scale factor used to convert
+    // relative simplification error to absolute world-space units". When
+    // computed per-group (the default inside `simplify()`), it reflects
+    // only that group's local extent — a small spatial group (e.g. a
+    // lugnut on a BMW) yields a tiny scale, a large one yields a much
+    // bigger scale, and the resulting per-cluster `maxSimplificationError`
+    // values end up in inconsistent world-space units across the DAG.
+    //
+    // With mismatched units the runtime monotonic invariant `parent.err
+    // >= every child.err` breaks — a level-N+1 parent assembled from
+    // small-scale children can still end up with a smaller
+    // maxSimplificationError than one of its OWN ancestors' children at
+    // level N that happened to belong to a large-scale group. The only
+    // way to keep errors in one consistent scale is to use a single
+    // simplifyScale value across every simplify call.
+    //
+    // We compute it from the full leaf mesh's concatenated positions;
+    // that is the object whose world-space extent the error is measured
+    // against. Passed in via `SimplifyOptions::globalScale` below.
+    float globalSimplifyScale = 0.0f;
+    {
+        std::vector<glm::vec3> allLeafPositions;
+        std::size_t totalVerts = 0u;
+        for (const auto& lc : leafClusters) {
+            totalVerts += lc.positions.size();
+        }
+        allLeafPositions.reserve(totalVerts);
+        for (const auto& lc : leafClusters) {
+            for (const auto& p : lc.positions) {
+                allLeafPositions.push_back(p);
+            }
+        }
+        if (!allLeafPositions.empty()) {
+            const float s = meshopt_simplifyScale(
+                reinterpret_cast<const float*>(allLeafPositions.data()),
+                allLeafPositions.size(), sizeof(glm::vec3));
+            if (std::isfinite(s) && s > 0.0f) {
+                globalSimplifyScale = s;
+            }
+        }
+    }
+
     for (std::size_t i = 0; i < leafClusters.size(); ++i) {
         ClusterData c = leafClusters[i];  // copy — DagResult owns its data
         c.dagLodLevel = 0u;
@@ -604,6 +651,12 @@ DagBuilder::build(std::span<const ClusterData> leafClusters,
             simOpts.weldEpsilon     = opts.adjacencyWeldEpsilon;
             simOpts.lockBorder      = false;  // mask-driven lock replaces flag
             simOpts.useAbsoluteError = false;
+            // Use the pre-computed full-leaf-mesh scale so every simplify
+            // call in every group at every LOD level converts relative
+            // achievedError to absolute world-space units using the SAME
+            // factor. That keeps the monotonic `parent >= child` invariant
+            // intact across the whole DAG. See globalSimplifyScale above.
+            simOpts.globalScale     = globalSimplifyScale;
             {
                 // targetIndexCount = simplifyRatio * groupInputTris * 3,
                 // rounded down to a multiple of 3, with a minimum of 3.
@@ -945,6 +998,39 @@ DagBuilder::build(std::span<const ClusterData> leafClusters,
     } else {
         out.maxLodLevel = lodLevel;
         out.rootCount   = levelCount;
+    }
+
+    // --- Monotonic enforcement pass ---
+    //
+    // The runtime SSE LOD rule `accept = (errSelf <= thr) && (errParent >
+    // thr)` requires `parent.maxError >= every child.maxError` across the
+    // entire DAG. The std::max(childMaxErr, achieved) propagation inside
+    // the per-iteration loop should have established this invariant, but
+    // MpAssetReader-side measurement on BMW shows ~10-12% of nodes end
+    // up with a parent whose maxError is SMALLER than the child's. The
+    // exact bake-time cause has not been tracked down (candidates: stale
+    // maxSimplificationError written before the reorder, a member that
+    // slipped between two groups, an inter-iteration update that wasn't
+    // propagated back to the cluster array). Rather than paper over it
+    // at runtime and cause mixed-LOD artifacts, enforce the invariant
+    // here so the written .mpa is self-consistent.
+    //
+    // Iterate ascending: leaves are at [0..leafCount), level 1 at
+    // [leafCount..), etc. For each node, bump its parent's maxError up
+    // to at least this node's value. Writing both the DagNode and the
+    // matching ClusterData keeps PageWriter's two independent float
+    // writes in sync.
+    for (std::size_t i = 0; i < out.nodes.size(); ++i) {
+        const DagNode& n = out.nodes[i];
+        if (n.parentGroupId == UINT32_MAX) continue;
+        if (n.parentGroupId >= out.nodes.size()) continue;
+        DagNode& parent = out.nodes[n.parentGroupId];
+        if (!(parent.maxError >= n.maxError)) {
+            parent.maxError = n.maxError;
+            if (parent.clusterId < out.clusters.size()) {
+                out.clusters[parent.clusterId].maxSimplificationError = n.maxError;
+            }
+        }
     }
 
     return out;

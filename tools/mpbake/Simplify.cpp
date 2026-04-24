@@ -474,10 +474,18 @@ simplify(std::span<const ClusterData> group, const SimplifyOptions& opts) {
         achievedError = 0.0f;
     }
     // Multiply by scale to convert relative → absolute world-space units.
+    // Prefer the caller-supplied globalScale when set (DagBuilder passes
+    // the full leaf-mesh extent so errors across every LOD level end up
+    // in a consistent world-space scale — required for the runtime
+    // monotonic `parent >= child` invariant). When globalScale is 0 we
+    // fall back to meshopt's per-group computation for compatibility.
     {
-        const float scale = meshopt_simplifyScale(
-            reinterpret_cast<const float*>(mergedPositions.data()),
-            mergedPositions.size(), sizeof(glm::vec3));
+        float scale = opts.globalScale;
+        if (!(std::isfinite(scale) && scale > 0.0f)) {
+            scale = meshopt_simplifyScale(
+                reinterpret_cast<const float*>(mergedPositions.data()),
+                mergedPositions.size(), sizeof(glm::vec3));
+        }
         if (std::isfinite(scale) && scale > 0.0f) {
             achievedError *= scale;
         }
