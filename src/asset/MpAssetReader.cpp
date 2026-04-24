@@ -18,6 +18,8 @@
 
 #include <zstd.h>
 
+#include "core/Log.h"
+
 #if defined(_WIN32)
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -413,6 +415,29 @@ MpAssetReader::assembleRuntimeDagNodes() const {
     // one allocation vs. N keeps the cold-cache cost minimal).
     std::vector<u8> scratch;
 
+    // Defence-in-depth counters — fire only on corrupt/non-canonical .mpa
+    // inputs. We still clamp locally so runtime behaviour stays sane, but
+    // the summary warning below surfaces the occurrence so asset issues
+    // are not silently masked.
+    u64 parentMonotonicClampCount = 0;
+    u64 corruptParentIndexCount   = 0;
+    u64 nonFiniteParentCenterCount = 0;
+    u32 firstMonoChildIdx  = UINT32_MAX;
+    u32 firstMonoParentIdx = UINT32_MAX;
+    f32 firstMonoChildErr  = 0.0f;
+    f32 firstMonoParentErr = 0.0f;
+    u32 firstMonoChildLod  = 0u;
+    u64 perLodViolations[16] = {};
+    // Pairing-integrity check: page's cluster[i] is paired with dag[firstDagIdx+i]
+    // by positional correspondence. If PageWriter produced non-contiguous
+    // nodeIndices for a page, this pairing is broken and we'd render one
+    // cluster's triangles at another cluster's bounds. Detect by comparing
+    // boundsSphere which PageWriter writes into BOTH on-disk structures
+    // from the same source cluster.
+    u64 boundsMismatchCount = 0;
+    u32 firstMismatchPage   = UINT32_MAX;
+    u32 firstMismatchI      = UINT32_MAX;
+
     for (u32 pageId = 0; pageId < pages.size(); ++pageId) {
         auto view = fetchPage(pageId, scratch);
         if (!view.has_value()) {
@@ -479,6 +504,29 @@ MpAssetReader::assembleRuntimeDagNodes() const {
             const f32 selfError = cd.maxSimplificationError;
             n.m3[0] = selfError;
             const MpDagNode& onDisk = dag[globalIdx];
+
+            // Pairing integrity: ClusterOnDisk and MpDagNode are written from
+            // the SAME source cluster by PageWriter; their bounds must match.
+            // A mismatch means this page's i-th cluster did NOT correspond to
+            // dag[firstDagIdx + i] — page nodeIndices were non-contiguous and
+            // the reader is silently pairing the wrong triangles with the
+            // wrong bounds/parent. This manifests visually as "meshes
+            // connected to the wrong things" at runtime.
+            {
+                const f32 eps = 1e-5f;
+                const bool boundsMatch =
+                    std::fabs(cd.boundsSphere[0] - onDisk.boundsSphere[0]) < eps &&
+                    std::fabs(cd.boundsSphere[1] - onDisk.boundsSphere[1]) < eps &&
+                    std::fabs(cd.boundsSphere[2] - onDisk.boundsSphere[2]) < eps &&
+                    std::fabs(cd.boundsSphere[3] - onDisk.boundsSphere[3]) < eps;
+                if (!boundsMatch) {
+                    if (boundsMismatchCount == 0u) {
+                        firstMismatchPage = pageId;
+                        firstMismatchI    = i;
+                    }
+                    ++boundsMismatchCount;
+                }
+            }
             f32 parentError;
             // M4-fix: parentCenter is the group-coherent LOD anchor. Every
             // child in a DAG group shares the same parent, so projecting the
@@ -492,41 +540,80 @@ MpAssetReader::assembleRuntimeDagNodes() const {
             f32 parentCz = cd.boundsSphere[2];
             if (onDisk.parentGroupId == UINT32_MAX) {
                 parentError = std::numeric_limits<f32>::max();
-                // Root: no coarser parent. Keep parentCenter = own centre so
-                // the projection stays finite; the shader's root fallback
-                // (parentError == FLT_MAX) handles the accept decision.
+                // Root: no coarser parent. parentCenter stays at own centre
+                // so the SSE projection stays finite; the cull shader's
+                // `errParent > threshold` half of the rule is trivially
+                // satisfied by +inf, so the root emits iff errSelf <=
+                // threshold.
             } else if (onDisk.parentGroupId < dag.size()) {
                 parentError = dag[onDisk.parentGroupId].maxError;
-                // Defence-in-depth: a parent's error must be >= its own
-                // children's (monotonic up the DAG; see DagBuilder
-                // std::max(childMaxErr, achieved)). If a corrupt asset
-                // inverts the invariant, pin at self so the LOD test still
-                // accepts this cluster when its descendants would round
-                // below threshold. NaN gets sanitized to 0 so parentError
-                // stays finite.
+                // Monotonic-up-the-DAG invariant (DagBuilder is supposed to
+                // enforce `parent.maxError >= every child.maxError`). If
+                // the immediate parent violates it, walk up the DAG until
+                // we find an ancestor whose error IS strictly greater than
+                // selfError — that ancestor is the correct "next coarser"
+                // cluster for the SSE rule
+                //     accept = (errSelf <= thr) && (errParent > thr)
+                // to have a real acceptance window at some camera distance.
+                // If no such ancestor exists (chain ends at a root before
+                // the invariant recovers), promote to root (+inf) so the
+                // cluster emits under the standard Nanite root rule (iff
+                // errSelf <= threshold).
                 if (!std::isfinite(parentError) || parentError < selfError) {
-                    parentError = selfError;
+                    if (parentMonotonicClampCount == 0u) {
+                        firstMonoChildIdx  = globalIdx;
+                        firstMonoParentIdx = onDisk.parentGroupId;
+                        firstMonoChildErr  = selfError;
+                        firstMonoParentErr = parentError;
+                        firstMonoChildLod  = cd.dagLodLevel;
+                    }
+                    if (cd.dagLodLevel < 16u) {
+                        ++perLodViolations[cd.dagLodLevel];
+                    }
+                    ++parentMonotonicClampCount;
+
+                    u32 ancestorIdx = onDisk.parentGroupId;
+                    f32 recoveredErr = std::numeric_limits<f32>::max();
+                    for (u32 hop = 0; hop < 32u; ++hop) {
+                        const MpDagNode& a = dag[ancestorIdx];
+                        if (std::isfinite(a.maxError) && a.maxError > selfError) {
+                            recoveredErr = a.maxError;
+                            break;
+                        }
+                        if (a.parentGroupId == UINT32_MAX ||
+                            a.parentGroupId >= dag.size()) {
+                            // Hit a root without recovering the invariant.
+                            // Emit under the root rule.
+                            recoveredErr = std::numeric_limits<f32>::max();
+                            break;
+                        }
+                        ancestorIdx = a.parentGroupId;
+                    }
+                    parentError = recoveredErr;
                 }
-                // Pull the parent's bounds centre from the on-disk DAG node.
-                // On-disk MpDagNode stores centre as boundsSphere[0..2]
-                // (boundsSphere[3] is the radius) — see MpAssetFormat.h.
+                // Parent bounds centre lookup. On-disk MpDagNode stores
+                // centre as boundsSphere[0..2] (boundsSphere[3] = radius).
                 const MpDagNode& parentNode = dag[onDisk.parentGroupId];
                 const f32 pcx = parentNode.boundsSphere[0];
                 const f32 pcy = parentNode.boundsSphere[1];
                 const f32 pcz = parentNode.boundsSphere[2];
-                // Sanitize: non-finite parent centre falls back to the
-                // cluster's own centre. Crafted asset defence-in-depth — the
-                // baker never emits non-finite bounds.
                 if (std::isfinite(pcx) && std::isfinite(pcy) && std::isfinite(pcz)) {
                     parentCx = pcx;
                     parentCy = pcy;
                     parentCz = pcz;
+                } else {
+                    // Non-finite parent centre (crafted / corrupt asset):
+                    // keep parentCenter at the cluster's own centre so the
+                    // projection stays finite, and record for the summary.
+                    ++nonFiniteParentCenterCount;
                 }
             } else {
-                // Corrupt parent index — treat as root so the shader's
-                // fallback path emits this cluster rather than silently
-                // dropping it. parentCenter stays at own centre.
+                // parentGroupId out of range — corrupt asset. Treat as a
+                // root (FLT_MAX) so the cluster still passes the cull
+                // shader's SSE rule when errSelf <= threshold, and record
+                // for the summary warning.
                 parentError = std::numeric_limits<f32>::max();
+                ++corruptParentIndexCount;
             }
             n.m3[1] = parentError;
             n.m3[2] = 0.0f;
@@ -538,6 +625,43 @@ MpAssetReader::assembleRuntimeDagNodes() const {
             n.m4[2] = parentCz;
             n.m4[3] = 0.0f;
         }
+    }
+
+    if (parentMonotonicClampCount != 0u ||
+        corruptParentIndexCount != 0u ||
+        nonFiniteParentCenterCount != 0u) {
+        ENIGMA_LOG_WARN(
+            "[mpa] assembleRuntimeDagNodes: defence-in-depth fallbacks fired "
+            "(parent-monotonic-clamp={}, corrupt-parent-index={}, "
+            "non-finite-parent-center={}) — .mpa asset may be corrupt or "
+            "from an older baker",
+            parentMonotonicClampCount,
+            corruptParentIndexCount,
+            nonFiniteParentCenterCount);
+    }
+    if (parentMonotonicClampCount != 0u) {
+        ENIGMA_LOG_WARN(
+            "[mpa] first monotonic violation: child_idx={}, parent_idx={}, "
+            "child_lod={}, child_err={}, parent_err={}. Per-lod violations: "
+            "L0={} L1={} L2={} L3={} L4={} L5={} L6={} L7={} L8={} L9={}",
+            firstMonoChildIdx, firstMonoParentIdx, firstMonoChildLod,
+            firstMonoChildErr, firstMonoParentErr,
+            perLodViolations[0], perLodViolations[1], perLodViolations[2],
+            perLodViolations[3], perLodViolations[4], perLodViolations[5],
+            perLodViolations[6], perLodViolations[7], perLodViolations[8],
+            perLodViolations[9]);
+    }
+    if (boundsMismatchCount != 0u) {
+        ENIGMA_LOG_ERROR(
+            "[mpa] cluster/dag pairing broken: boundsSphere mismatched on {} "
+            "clusters (first page={}, local-idx={}). PageWriter produced "
+            "non-contiguous nodeIndices; triangles are being rendered with "
+            "the wrong cluster's bounds/parent. Re-bake against a fixed "
+            "PageWriter that sorts each page's nodeIndices contiguously, or "
+            "adds a per-cluster global index to ClusterOnDisk.",
+            boundsMismatchCount,
+            firstMismatchPage,
+            firstMismatchI);
     }
 
     return out;

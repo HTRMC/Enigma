@@ -118,8 +118,10 @@ public:
     //     * maxError       = this cluster's world-space simplification error
     //     * parentMaxError = the error of the next-coarser cluster whose
     //                       group produced this one. FLT_MAX for roots so the
-    //                       screen-space-error "emit when parent fails" test
-    //                       always accepts a root. M4 widening over the
+    //                       cull shader's `errParent > threshold` half of
+    //                       the SSE rule is always satisfied (+inf > any
+    //                       finite threshold); a root therefore emits iff
+    //                       errSelf <= threshold. M4 widening over the
     //                       previous 48 B layout.
     //   float4 m4 = (parentCenter.xyz, 0)          — M4-fix widening over 64 B.
     //     * parentCenter = bounds centre of the coarser parent cluster.
@@ -131,9 +133,7 @@ public:
     //                      together — no cracks or temporal flicker at
     //                      group boundaries. For roots (parentGroupId ==
     //                      UINT32_MAX) we copy the node's own centre so
-    //                      the SSE projection stays finite; combined with
-    //                      parentMaxError == FLT_MAX the root fallback in
-    //                      the cull shader still emits the root cluster.
+    //                      the SSE projection stays finite.
     //
     // On-disk MpDagNode (36 B) carries bounds/parent/pageId + maxError; cone
     // data lives inside each page's ClusterOnDisk entries (76 B each). The
