@@ -355,9 +355,20 @@ TriProjection loadAndProject(uint clusterIdx, uint triIdxInCluster,
     const uint i1 = min(idx.y, vertexCount - 1u);
     const uint i2 = min(idx.z, vertexCount - 1u);
 
-    const float3 p0 = loadVertexPos(vertexBlobStart, vertexBaseInBlob + i0);
-    const float3 p1 = loadVertexPos(vertexBlobStart, vertexBaseInBlob + i1);
-    const float3 p2 = loadVertexPos(vertexBlobStart, vertexBaseInBlob + i2);
+    const float3 p0Raw = loadVertexPos(vertexBlobStart, vertexBaseInBlob + i0);
+    const float3 p1Raw = loadVertexPos(vertexBlobStart, vertexBaseInBlob + i1);
+    const float3 p2Raw = loadVertexPos(vertexBlobStart, vertexBaseInBlob + i2);
+
+    // Engine-wide -90° Y correction: the bake writes positions in the
+    // source glTF's native axes; the engine runs in physics/render space
+    // (+Z forward). Mirror mp_raster.mesh.hlsl's per-vertex rotation so
+    // SW-rasterised clusters land at the same world position the HW mesh
+    // shader draws. Without this, SW-classified clusters render 90° off
+    // from the camera's actual view and overlap/miss the matching HW
+    // geometry — the root of the BMW "holes / wrong connections" symptom.
+    const float3 p0 = float3(-p0Raw.z, p0Raw.y, p0Raw.x);
+    const float3 p1 = float3(-p1Raw.z, p1Raw.y, p1Raw.x);
+    const float3 p2 = float3(-p2Raw.z, p2Raw.y, p2Raw.x);
 
     result.proj = projectTri(cam, p0, p1, p2, viewW, viewH);
     result.ok   = result.proj.valid;

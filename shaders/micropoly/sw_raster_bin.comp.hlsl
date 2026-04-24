@@ -411,9 +411,21 @@ void CSMain(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID) {
         const uint i1 = min(idx.y, vertexCount - 1u);
         const uint i2 = min(idx.z, vertexCount - 1u);
 
-        const float3 p0 = loadVertexPos(vertexBlobStart, vertexBaseInBlob + i0);
-        const float3 p1 = loadVertexPos(vertexBlobStart, vertexBaseInBlob + i1);
-        const float3 p2 = loadVertexPos(vertexBlobStart, vertexBaseInBlob + i2);
+        const float3 p0Raw = loadVertexPos(vertexBlobStart, vertexBaseInBlob + i0);
+        const float3 p1Raw = loadVertexPos(vertexBlobStart, vertexBaseInBlob + i1);
+        const float3 p2Raw = loadVertexPos(vertexBlobStart, vertexBaseInBlob + i2);
+
+        // Engine-wide -90° Y correction: the bake writes positions in the
+        // source glTF's native axes (+X forward); the engine (and camera)
+        // runs in physics/render space (+Z forward). Mirror
+        // mp_raster.mesh.hlsl's per-vertex rotation so binning sees the
+        // same world-space triangles the HW mesh shader rasterises. Without
+        // this, triangles are binned into tiles 90° off from where the
+        // camera actually sees them, producing the "meshes connected to
+        // wrong things" symptom on BMW-scale micropoly assets.
+        const float3 p0 = float3(-p0Raw.z, p0Raw.y, p0Raw.x);
+        const float3 p1 = float3(-p1Raw.z, p1Raw.y, p1Raw.x);
+        const float3 p2 = float3(-p2Raw.z, p2Raw.y, p2Raw.x);
 
         // World -> clip. No instance transform (micropoly is static geometry
         // in M3/M4; Principle 5).
