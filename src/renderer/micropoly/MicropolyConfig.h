@@ -51,6 +51,11 @@ struct MicropolyConfig {
     // Micropoly settings panel.
     f32  lodScale = 1.0f;
 
+    // Diagnostic: when true, the cull shader treats every frustum/residency-
+    // passing cluster as visible (skips the screen-space-error gate). Used
+    // to isolate LOD-rule bugs from render-path bugs. Default off.
+    bool disableLOD = false;
+
     // Surface the per-cluster classification + vis-buffer inspector overlays
     // in the debug UI. Wired in M6; stored here from M0a onward.
     bool debugOverlay = false;

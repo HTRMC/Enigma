@@ -1509,7 +1509,9 @@ void Renderer::drawFrame() {
                 m_hizPass ? static_cast<f32>(m_hizPass->mip_count()) : 1.0f;
             cin.hiZBindlessIndex            =
                 m_hizPass ? m_hizPass->mip_slot(0u) : UINT32_MAX;
-            cin.screenSpaceErrorThreshold   = m_micropolyConfig.lodScale;
+            cin.screenSpaceErrorThreshold   = m_micropolyConfig.disableLOD
+                                                ? -1.0f
+                                                : m_micropolyConfig.lodScale;
             // Security HIGH-2: pageCount bounds-checks residency-bitmap reads.
             // Zero is legal for totalClusterCount=0 dispatches (early-out).
             cin.pageCount                   =

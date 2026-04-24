@@ -102,8 +102,9 @@ struct PushBlock {
 // parentCenter (m4.xyz) is the coarser parent's bounds centre, shared by
 // every child in the same DAG group — projecting the SSE test there makes
 // siblings flip LOD as a unit. For roots the assembler copies the node's
-// own centre so the projection stays finite (shader's root fallback still
-// emits the cluster).
+// own centre so the projection stays finite; the SSE rule emits such
+// roots iff errSelf <= threshold (errParent == +inf always satisfies the
+// other half of the rule).
 struct MpDagNode {
     float3 center;
     float  radius;
@@ -386,13 +387,8 @@ uint classifyRasterClass(float3 worldCenter, float worldRadius,
     if (triangleCount < MP_SW_TRI_MIN) return kMpRasterClassHw;
 
     // M5 interim: route every non-trivial cluster through the SW raster.
-    // The HW mesh-shader path is known-good for large primitives but the
-    // driver silently discards sub-pixel triangles (the usual HW raster
-    // coverage rule), which produces the "sparse dots" symptom on BMW's
-    // micropoly-scale geometry. SW has proven correctness + is budgeted
-    // at ~3 ms for 16k clusters, so until M4.6 lands its own sub-pixel-
-    // safe HW path we prefer SW everywhere. Revert the early-return
-    // when HW sub-pixel handling ships.
+    // The HW mesh-shader path silently discards sub-pixel triangles
+    // (coverage rule), so BMW-scale micropoly relies on SW.
     (void)worldCenter; (void)worldRadius; (void)cam;
     return kMpRasterClassSw;
 
@@ -544,12 +540,11 @@ void CSMain(uint3 dtid : SV_DispatchThreadID) {
     //    We use cam.proj[1][1] (= -cot(fovY/2) under the engine's reverse-Z
     //    perspective — same convention as frustumCullVS + classifyRasterClass).
     //
-    //    Root fallback: parentMaxError == FLT_MAX at roots forces the
-    //    parent projected error to infinity, so the "> threshold" condition
-    //    always holds at the root and the cluster is emitted when its own
-    //    error falls below threshold OR when no finer descendant is
-    //    available. This handles non-simplifiable roots (e.g. BMW's tiny
-    //    disconnected shells) cleanly.
+    //    Root handling: parentMaxError == FLT_MAX at roots forces errParent
+    //    to +inf, so "errParent > threshold" is always true for roots.
+    //    A root therefore emits iff errSelf <= threshold. Multi-level roots
+    //    with errSelf > threshold are rejected so their finer descendants
+    //    take over under the same rule.
     {
         // M4-fix: project BOTH errSelf and errParent at the PARENT'S centre.
         // Nanite's group-coherent LOD rule: every child in the same DAG group
@@ -560,9 +555,10 @@ void CSMain(uint3 dtid : SV_DispatchThreadID) {
         // Using the cluster's own centre (the previous code) let siblings
         // disagree by tiny depth differences, which produced the "parts
         // going missing / blinking" symptom. For roots the assembler sets
-        // parentCenter = own centre so the projection is still finite; the
-        // root fallback below then emits the cluster on the `errSelf >
-        // threshold` path when parentMaxError == FLT_MAX.
+        // parentCenter = own centre so the projection is still finite;
+        // errParent is +inf (from parentMaxError == FLT_MAX) so the
+        // `errParent > threshold` half of the rule is always satisfied,
+        // and the root emits iff `errSelf <= threshold`.
         float4 viewPos = mul(cam.view, float4(node.parentCenter, 1.0f));
         const float depth = max(-viewPos.z, 1.0e-4f);
         const float fY    = -cam.proj[1][1];
@@ -574,18 +570,24 @@ void CSMain(uint3 dtid : SV_DispatchThreadID) {
 
         // Standard Nanite SSE rule: emit iff errSelf <= threshold AND
         // errParent > threshold. Both must hold for exactly-one-LOD coverage.
-        const bool sseAccept = (errSelf <= threshold)
-                            && (errParent > threshold);
-
-        // Root fallback: a cluster with parentMaxError == FLT_MAX has no
-        // coarser parent. When its own projected error is ABOVE threshold
-        // the standard rule would reject (no finer descendant exists to
-        // take over), leaving a hole. Emit these unconditionally so
-        // non-simplifiable shells (e.g. BMW's disconnected-component
-        // roots) always render — they're the leaf of their own DAG subtree.
-        // `isinf` catches the FLT_MAX * scale projection.
-        const bool isRootFallback = isinf(errParent) && (errSelf > threshold);
-        const bool accept = sseAccept || isRootFallback;
+        //
+        // Root handling: a root cluster has parentMaxError == FLT_MAX, so
+        // errParent projects to +inf, and `errParent > threshold` is always
+        // true for roots. A root is therefore emitted iff its own error is
+        // fine enough (errSelf <= threshold). Multi-level roots with
+        // errSelf > threshold are correctly rejected so their finer
+        // descendants take over via the same rule applied independently to
+        // each cluster. No fallback — if a cluster with no parent ALSO has
+        // no resident descendants, the fix belongs in the streaming layer,
+        // not here.
+        //
+        // Diagnostic bypass: `threshold < 0` is a sentinel meaning "emit
+        // every cluster, skip the LOD gate". Used from the UI to isolate
+        // render-side bugs from LOD-rule bugs. Residency, frustum, cone,
+        // and HiZ culls still run.
+        const bool lodBypass = (threshold < 0.0f);
+        const bool accept    = lodBypass ||
+                               ((errSelf <= threshold) && (errParent > threshold));
         if (!accept) {
             bumpStat(4u);  // culledLOD
             return;

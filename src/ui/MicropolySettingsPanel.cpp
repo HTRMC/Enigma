@@ -134,6 +134,16 @@ void MicropolySettingsPanel::draw(bool* open,
         ImGui::SetTooltip("Screen-space error threshold multiplier. 1.0 = reference.");
     }
 
+    bool disableLOD = cfg.disableLOD;
+    if (ImGui::Checkbox("Disable LOD (diagnostic)", &disableLOD)) {
+        cfg.disableLOD = disableLOD;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Skip the screen-space-error gate in the cull shader. "
+                          "Residency, frustum, cone, and HiZ culls still run. "
+                          "Use to isolate LOD bugs from raster/data bugs.");
+    }
+
     ImGui::Separator();
 
     // ---------------------------------------------------------------
